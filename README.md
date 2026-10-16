@@ -28,8 +28,14 @@ npm run dev   # http://localhost:3000
 | 공유 | Markdown, 엑셀(CSV), JSON 내보내기, 클립보드 복사 |
 | 프로젝트 관리 | 전체 프로젝트, 즐겨찾기, 휴지통(되살리기, 완전 삭제) |
 
-데이터는 브라우저 localStorage에 저장됩니다. AI 생성은 `lib/generator.ts`의 로컬 규칙 기반 생성기가 맡고 있어서,
-실제 언어 모델을 붙이려면 이 파일의 함수들을 API 호출로 바꾸면 됩니다.
+데이터는 브라우저 localStorage에 저장됩니다.
+
+### AI 연결 (Claude)
+
+채팅 입력창 아래 배지나 왼쪽 [설정] 패널에서 Anthropic API 키를 넣으면, 질문·PRD·기능명세서·검토·채팅 답변을
+Claude(`claude-opus-5-5`)가 아이디어에 맞춰 새로 만듭니다(`lib/ai.ts`). 정적 사이트라 서버가 없으므로 키는 방문자 각자의
+브라우저 localStorage에만 저장되고 브라우저에서 Anthropic API로 바로 보내집니다. 저장소나 빌드 결과물에는 키가 들어가지 않습니다.
+키가 없거나 호출이 실패하면 `lib/generator.ts`의 로컬 규칙 기반 생성기가 대신 만듭니다.
 
 ## 배포
 

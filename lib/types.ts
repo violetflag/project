@@ -79,6 +79,8 @@ export interface ChatMessage {
   id: string;
   from: "user" | "ai";
   text: string;
+  thinking?: boolean;
+  error?: boolean;
   question?: Question;
   answered?: string[];
   choices?: { question: string; options: ChatOption[]; picked?: string };

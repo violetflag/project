@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  addMoreQuestions, answerQuestion, editAnswer, generatePrd, pickChoice, review, sendChat,
+  addMoreQuestions, answerQuestion, editAnswer, generatePrd, isBusy, pickChoice, review, sendChat,
 } from "@/lib/actions";
+import { AiBadge, AiKeyDialog } from "../AiKeyForm";
 import type { ChatMessage, Project, Question } from "@/lib/types";
 import { ArrowUp, Paperclip, Sparkle } from "../icons";
 
@@ -54,15 +55,24 @@ function Message({ p, m, onGoto }: { p: Project; m: ChatMessage; onGoto: (tab: s
       </div>
     );
   }
+  if (m.thinking) {
+    return (
+      <p className="flex items-center gap-2 text-sm text-foreground-muted">
+        <span className="h-3 w-3 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+        {m.text}
+      </p>
+    );
+  }
+  const busy = isBusy(p);
   return (
     <div className="flex flex-col gap-2">
-      {m.text && <p className="text-sm leading-relaxed whitespace-pre-line">{m.text}</p>}
+      {m.text && <p className={`text-sm leading-relaxed whitespace-pre-line ${m.error ? "rounded-md bg-surface px-3 py-2 text-foreground-support" : ""}`}>{m.text}</p>}
       {m.question && <QuestionCard p={p} q={m.question} answered={m.answered} />}
       {m.choices && (
         <div className="rounded-lg border border-border bg-background p-3">
           <p className="mb-2 text-sm font-medium">{m.choices.question}</p>
           {m.choices.options.map((o) => (
-            <button key={o.title} disabled={!!m.choices!.picked} onClick={() => pickChoice(p.id, m.id, o.title)}
+            <button key={o.title} disabled={!!m.choices!.picked || busy} onClick={() => pickChoice(p.id, m.id, o.title)}
               className={`mb-1.5 block w-full rounded-md border px-3 py-2 text-left ${m.choices!.picked === o.title ? "border-primary bg-primary-soft" : "border-border hover:border-border-strong disabled:opacity-50"}`}>
               <span className="block text-sm">{o.title}</span>
               <span className="block text-xs text-foreground-muted">{o.detail}</span>
@@ -73,12 +83,12 @@ function Message({ p, m, onGoto }: { p: Project; m: ChatMessage; onGoto: (tab: s
       {m.actions && (
         <div className="flex flex-col gap-1.5">
           {m.actions.includes("generate-prd") && !p.prd && (
-            <button onClick={() => generatePrd(p.id)} className="flex items-center justify-center gap-1.5 rounded-md bg-primary py-2 text-sm font-medium text-white">
+            <button disabled={busy} onClick={() => generatePrd(p.id)} className="flex items-center justify-center gap-1.5 rounded-md bg-primary py-2 text-sm font-medium text-white disabled:opacity-50">
               <Sparkle className="h-3.5 w-3.5" /> 바로 PRD 만들기
             </button>
           )}
           {m.actions.includes("more-questions") && !p.prd && (
-            <button onClick={() => addMoreQuestions(p.id)} className="rounded-md border border-border py-2 text-sm hover:border-border-strong">
+            <button disabled={busy} onClick={() => addMoreQuestions(p.id)} className="disabled:opacity-50 rounded-md border border-border py-2 text-sm hover:border-border-strong">
               + 질문 더 받고 더 정확하게 만들기
             </button>
           )}
@@ -86,7 +96,7 @@ function Message({ p, m, onGoto }: { p: Project; m: ChatMessage; onGoto: (tab: s
             <button onClick={() => onGoto("features")} className="rounded-md border border-border px-3 py-2 text-left text-sm hover:border-border-strong">→ 기능명세서 보러 가기</button>
           )}
           {m.actions.includes("run-review") && (
-            <button onClick={() => { review(p.id); onGoto("review"); }} className="rounded-md border border-border px-3 py-2 text-left text-sm hover:border-border-strong">→ 기획서 전체 검토하기</button>
+            <button disabled={busy} onClick={() => { review(p.id); onGoto("review"); }} className="disabled:opacity-50 rounded-md border border-border px-3 py-2 text-left text-sm hover:border-border-strong">→ 기획서 전체 검토하기</button>
           )}
         </div>
       )}
@@ -96,10 +106,12 @@ function Message({ p, m, onGoto }: { p: Project; m: ChatMessage; onGoto: (tab: s
 
 export function ChatPanel({ p, onGoto }: { p: Project; onGoto: (tab: string) => void }) {
   const [text, setText] = useState("");
+  const [keyOpen, setKeyOpen] = useState(false);
+  const busy = isBusy(p);
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => end.current?.scrollIntoView({ behavior: "smooth" }), [p.chat.length]);
   const send = () => {
-    if (!text.trim()) return;
+    if (!text.trim() || busy) return;
     sendChat(p.id, text.trim());
     setText("");
   };
@@ -116,13 +128,14 @@ export function ChatPanel({ p, onGoto }: { p: Project; onGoto: (tab: string) => 
           className="w-full resize-none bg-transparent px-1 text-sm outline-none placeholder:text-foreground-assistive" />
         <div className="flex items-center gap-2">
           <Paperclip className="h-4 w-4 text-foreground-muted" />
-          <span className="rounded bg-surface px-1.5 py-0.5 text-[11px] text-foreground-support">로컬 생성기</span>
-          <button onClick={send} disabled={!text.trim()} aria-label="보내기"
+          <AiBadge onClick={() => setKeyOpen(true)} />
+          <button onClick={send} disabled={!text.trim() || busy} aria-label="보내기"
             className="ml-auto grid h-7 w-7 place-items-center rounded-full bg-foreground text-background disabled:bg-border-strong">
             <ArrowUp className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
+      <AiKeyDialog open={keyOpen} onClose={() => setKeyOpen(false)} />
     </div>
   );
 }

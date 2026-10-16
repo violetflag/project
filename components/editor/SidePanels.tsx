@@ -1,5 +1,6 @@
 "use client";
 
+import { AiKeyForm } from "../AiKeyForm";
 import { useState } from "react";
 import {
   addComment, applyDecision, discussFinding, extractDecisions, restoreVersion, review, saveVersion,
@@ -199,6 +200,10 @@ export function SettingsPanel({ p }: { p: Project }) {
       </label>
       <button onClick={() => setSettings(p.id, s)} className="w-full rounded-md bg-primary py-2 text-white">저장</button>
       <p className="text-xs text-foreground-muted">이 설정은 다음에 만드는 문서부터 적용돼요.</p>
+      <div className="border-t border-border pt-4">
+        <p className="mb-2 font-medium">AI 연결</p>
+        <AiKeyForm />
+      </div>
     </div>
   );
 }

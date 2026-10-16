@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createProject } from "@/lib/store";
+import { aiEnabled, initQuestions } from "@/lib/actions";
 import { topicSuggestions } from "@/lib/mock";
 import { ArrowUp, Close, Paperclip, Sparkle } from "./icons";
 
@@ -53,7 +54,9 @@ export function PromptBox() {
   const submit = () => {
     if (!canSend) return;
     const idea = text.trim() || files.map((f) => f.name).join(", ");
-    const p = createProject(idea, mode);
+    const withAi = aiEnabled();
+    const p = createProject(idea, mode, withAi);
+    if (withAi) initQuestions(p.id);
     router.push(`/editor?id=${p.id}`);
   };
 

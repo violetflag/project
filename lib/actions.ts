@@ -1,14 +1,50 @@
 "use client";
 
 import { uid } from "./id";
-import { updateProject } from "./store";
+import { getProject, updateProject } from "./store";
 import {
-  interpret, makeFeatures, makeFlow, makePrd, makeScreens, runReview, summarizeAnswers,
+  interpret, makeFeatures, makeFlow, makePrd, makeQuestions, makeScreens, runReview, summarizeAnswers,
 } from "./generator";
+import {
+  aiApplyChoice, aiChat, aiChoices, aiPlan, aiQuestions, aiReview, aiSummary, describeError, getApiKey, toFeature,
+} from "./ai";
 import type { ChatMessage, Decision, Feature, Project } from "./types";
 
 const ai = (text: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({ id: uid("m_"), from: "ai", text, ...extra });
 const me = (text: string): ChatMessage => ({ id: uid("m_"), from: "user", text });
+
+export const aiEnabled = () => !!getApiKey();
+export const isBusy = (p: Project) => p.chat.some((m) => m.thinking);
+
+// Runs a Claude call behind a "thinking" chat bubble. On failure the bubble
+// turns into an error note and the local generator does the job instead.
+async function withAi(id: string, label: string, run: (p: Project) => Promise<void>, fallback: () => void, prefix: ChatMessage[] = []) {
+  const p = getProject(id);
+  if (!p || isBusy(p)) return;
+  const bubble = ai(label, { thinking: true });
+  updateProject(id, (x) => ({ ...x, chat: [...x.chat, ...prefix, bubble] }));
+  const drop = () => updateProject(id, (x) => ({ ...x, chat: x.chat.filter((m) => m.id !== bubble.id) }));
+  try {
+    await run(getProject(id)!);
+    drop();
+  } catch (e) {
+    drop();
+    updateProject(id, (x) => ({ ...x, chat: [...x.chat, ai(`${describeError(e)} 이번에는 로컬 생성기로 대신 만들었어요.`, { error: true })] }));
+    fallback();
+  }
+}
+
+export function initQuestions(id: string) {
+  // Called right after createProject(..., withAi=true); the store already shows a thinking bubble.
+  const fill = (questions: Project["questions"], note?: string) => updateProject(id, (p) => ({
+    ...p, questions,
+    chat: [...p.chat.filter((m) => !m.thinking), ...(note ? [ai(note, { error: true })] : []), ai("", { question: questions[0] })],
+  }));
+  const p = getProject(id);
+  if (!p) return;
+  aiQuestions(p, 6).then((qs) => (qs.length ? fill(qs) : fill(makeQuestions())))
+    .catch((e) => fill(makeQuestions(), `${describeError(e)} 기본 질문으로 시작할게요.`));
+}
 
 export function answerQuestion(id: string, qid: string, picked: string[]) {
   updateProject(id, (p) => {
@@ -17,9 +53,17 @@ export function answerQuestion(id: string, qid: string, picked: string[]) {
     chat.push(me(picked.join(", ")));
     const next = p.questions.find((q) => !answers[q.id]);
     if (next) chat.push(ai("", { question: next }));
-    else chat.push(ai(summarizeAnswers(p.idea, answers), { actions: ["generate-prd", "more-questions"] }));
+    else if (!aiEnabled()) chat.push(ai(summarizeAnswers(p.idea, answers), { actions: ["generate-prd", "more-questions"] }));
     return { ...p, answers, chat };
   });
+  const p = getProject(id);
+  if (p && aiEnabled() && p.questions.every((q) => p.answers[q.id])) {
+    const local = () => updateProject(id, (x) => ({ ...x, chat: [...x.chat, ai(summarizeAnswers(x.idea, x.answers), { actions: ["generate-prd", "more-questions"] })] }));
+    withAi(id, "답변을 정리하고 있어요…", async (x) => {
+      const text = await aiSummary(x);
+      updateProject(id, (y) => ({ ...y, chat: [...y.chat, ai(text, { actions: ["generate-prd", "more-questions"] })] }));
+    }, local);
+  }
 }
 
 export function editAnswer(id: string, qid: string) {
@@ -32,6 +76,18 @@ export function editAnswer(id: string, qid: string) {
 }
 
 export function addMoreQuestions(id: string) {
+  if (aiEnabled()) {
+    withAi(id, "질문을 더 만들고 있어요…", async (p) => {
+      const extra = await aiQuestions(p, 2);
+      if (!extra.length) throw new Error("새 질문을 만들지 못했어요.");
+      updateProject(id, (x) => ({ ...x, questions: [...x.questions, ...extra], chat: [...x.chat, ai("", { question: extra[0] })] }));
+    }, () => addMoreQuestionsLocal(id));
+    return;
+  }
+  addMoreQuestionsLocal(id);
+}
+
+function addMoreQuestionsLocal(id: string) {
   updateProject(id, (p) => {
     const extra = [
       { id: "scale", text: "첫 해에 예상하는 사용자 규모는 어느 정도인가요?", multi: false, options: ["수백 명", "수천 명", "수만 명 이상"] },
@@ -42,7 +98,22 @@ export function addMoreQuestions(id: string) {
   });
 }
 
+const planDone = (groups: { features: unknown[] }[]) =>
+  `PRD 초안과 함께 기능명세서 초안을 만들었어요. 기능 묶음 ${groups.length}개, 세부 기능 ${groups.reduce((n, g) => n + g.features.length, 0)}개예요. 이어서 무엇을 할까요?`;
+
 export function generatePrd(id: string) {
+  if (aiEnabled()) {
+    withAi(id, "PRD와 기능명세서를 쓰고 있어요. 1~2분 정도 걸릴 수 있어요…", async (p) => {
+      const { prd, groups } = await aiPlan(p);
+      updateProject(id, (x) => ({ ...x, prd, groups, chat: [...x.chat, ai(planDone(groups), { actions: ["goto-features", "run-review"] })] }),
+        "AI가 PRD와 기능명세서 초안을 만들었어요");
+    }, () => generatePrdLocal(id));
+    return;
+  }
+  generatePrdLocal(id);
+}
+
+function generatePrdLocal(id: string) {
   updateProject(id, (p) => {
     const prd = makePrd(p.idea, p.answers);
     const groups = makeFeatures(p.idea, p.answers);
@@ -64,7 +135,12 @@ export function generateScreens(id: string) {
 }
 
 export function review(id: string) {
-  updateProject(id, (p) => (p.groups ? { ...p, findings: runReview(p.groups) } : p), "기획 검토를 실행했어요");
+  const local = () => updateProject(id, (p) => (p.groups ? { ...p, findings: runReview(p.groups) } : p), "기획 검토를 실행했어요");
+  if (!aiEnabled() || !getProject(id)?.groups) return local();
+  withAi(id, "여섯 관점에서 기획서를 검토하고 있어요…", async (p) => {
+    const findings = await aiReview(p);
+    updateProject(id, (x) => ({ ...x, findings, chat: [...x.chat, ai(`검토를 마쳤어요. 의견 ${findings.length}개를 [검토] 패널에 정리했어요.`)] }), "AI가 기획 검토를 실행했어요");
+  }, local);
 }
 
 export function setFinding(id: string, fid: string, state: "open" | "resolved" | "held") {
@@ -72,12 +148,24 @@ export function setFinding(id: string, fid: string, state: "open" | "resolved" |
 }
 
 export function discussFinding(id: string, fid: string) {
+  const f = getProject(id)?.findings?.find((x) => x.id === fid);
+  if (f && aiEnabled()) {
+    withAi(id, "해결 방법을 찾고 있어요…", async (p) => {
+      const c = await aiChoices(p, f);
+      updateProject(id, (x) => ({ ...x, chat: [...x.chat, ai(c.intro, { choices: { question: f.title, options: c.options.slice(0, 4) } })] }));
+    }, () => discussFindingLocal(id, fid, false), [me(`검토 의견을 해결하고 싶어요: ${f.title}`)]);
+    return;
+  }
+  discussFindingLocal(id, fid, true);
+}
+
+function discussFindingLocal(id: string, fid: string, withAsk: boolean) {
   updateProject(id, (p) => {
     const f = p.findings?.find((x) => x.id === fid);
     if (!f) return p;
     return {
       ...p,
-      chat: [...p.chat, me(`검토 의견을 해결하고 싶어요: ${f.title}`), ai("해결 방법을 몇 가지로 정리했어요. 하나를 고르면 기능명세에 반영할 안을 만들게요.", {
+      chat: [...p.chat, ...(withAsk ? [me(`검토 의견을 해결하고 싶어요: ${f.title}`)] : []), ai("해결 방법을 몇 가지로 정리했어요. 하나를 고르면 기능명세에 반영할 안을 만들게요.", {
         choices: { question: f.title, options: [
           { title: "가장 단순한 규칙으로 정하기", detail: "처음 출시는 한 가지 기준만 두고, 예외는 운영자가 직접 처리해요." },
           { title: "사용자가 직접 정하게 하기", detail: "설정 화면에서 기준을 바꿀 수 있게 해요. 대신 화면이 조금 늘어나요." },
@@ -89,6 +177,27 @@ export function discussFinding(id: string, fid: string) {
 }
 
 export function pickChoice(id: string, mid: string, title: string) {
+  const p0 = getProject(id);
+  const msg = p0?.chat.find((m) => m.id === mid);
+  if (p0 && msg?.choices && p0.groups && aiEnabled()) {
+    const finding = p0.findings?.find((f) => f.title === msg.choices!.question);
+    const target = p0.groups.flatMap((g) => g.features).find((f) => f.id === finding?.featureId) ?? p0.groups[0].features[0];
+    updateProject(id, (x) => ({ ...x, chat: x.chat.map((m) => (m.id === mid ? { ...m, choices: { ...m.choices!, picked: title } } : m)) }));
+    withAi(id, `'${title}' 기준으로 수정안을 만들고 있어요…`, async (p) => {
+      const after = await aiApplyChoice(p, target.code, msg.choices!.question, title);
+      updateProject(id, (x) => ({
+        ...x,
+        chat: [...x.chat, ai(`'${title}' 기준으로 '${target.title}'을 고치는 안을 만들었어요. 기능명세서 아래쪽에서 승인해 주세요.`)],
+        findings: x.findings?.map((f) => (f.id === finding?.id ? { ...f, state: "resolved" as const } : f)) ?? null,
+        pending: [...x.pending, { id: uid("c_"), featureId: target.id, kind: "edit", before: { summary: target.summary, criteria: target.criteria }, after, reason: title }],
+      }));
+    }, () => pickChoiceLocal(id, mid, title));
+    return;
+  }
+  pickChoiceLocal(id, mid, title);
+}
+
+function pickChoiceLocal(id: string, mid: string, title: string) {
   updateProject(id, (p) => {
     const msg = p.chat.find((m) => m.id === mid);
     if (!msg?.choices || !p.groups) return p;
@@ -108,10 +217,41 @@ export function pickChoice(id: string, mid: string, title: string) {
   });
 }
 
-export function sendChat(id: string, text: string) {
+export async function sendChat(id: string, text: string) {
+  if (aiEnabled()) {
+    let wantsReview = false;
+    await withAi(id, "생각하고 있어요…", async (p) => {
+      const r = await aiChat(p, text);
+      updateProject(id, (x) => {
+        const next: Project = { ...x, chat: [...x.chat, ai(r.reply)] };
+        const groups = x.groups;
+        if (groups && r.action === "add_feature") {
+          const g = groups.find((y) => y.code === r.groupCode) ?? groups[groups.length - 1];
+          const f = toFeature(r.feature, `${g.code}.${g.features.length + 1}`);
+          next.pending = [...x.pending, { id: uid("c_"), featureId: f.id, kind: "add", groupId: g.id, after: f, reason: "기능 추가 요청" }];
+        }
+        if (groups && r.action === "edit_feature") {
+          const t = groups.flatMap((y) => y.features).find((f) => f.code === r.featureCode);
+          if (t) {
+            const { id: _drop, code: _c, status: _s, ...after } = toFeature(r.feature, t.code);
+            next.pending = [...x.pending, { id: uid("c_"), featureId: t.id, kind: "edit",
+              before: { title: t.title, summary: t.summary, criteria: t.criteria }, after, reason: "수정 요청" }];
+          }
+        }
+        return next;
+      });
+      wantsReview = r.action === "review";
+    }, () => sendChatLocal(id, text, false), [me(text)]);
+    if (wantsReview) review(id);
+    return;
+  }
+  sendChatLocal(id, text, true);
+}
+
+function sendChatLocal(id: string, text: string, echo: boolean) {
   updateProject(id, (p) => {
     const r = interpret(text, p.groups);
-    let next: Project = { ...p, chat: [...p.chat, me(text), ai(r.reply)] };
+    let next: Project = { ...p, chat: [...p.chat, ...(echo ? [me(text)] : []), ai(r.reply)] };
     if ("add" in r && r.add && p.groups) {
       const g = p.groups[1] ?? p.groups[0];
       const f: Feature = {

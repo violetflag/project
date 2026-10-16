@@ -40,14 +40,19 @@ export function useProjects() {
   return useSyncExternalStore(subscribe, load, () => EMPTY);
 }
 
+export function getProject(id: string) {
+  return load().find((p) => p.id === id) ?? null;
+}
+
 export function useProject(id: string | null) {
   const all = useProjects();
   return all.find((p) => p.id === id) ?? null;
 }
 
-export function createProject(idea: string, startFrom: "ask" | "files" = "ask"): Project {
+export function createProject(idea: string, startFrom: "ask" | "files" = "ask", withAi = false): Project {
   const now = Date.now();
-  const questions = makeQuestions();
+  // With AI on, questions arrive asynchronously (see initQuestions).
+  const questions = withAi ? [] : makeQuestions();
   const p: Project = {
     id: uid("p_"),
     name: shortName(idea),
@@ -60,7 +65,9 @@ export function createProject(idea: string, startFrom: "ask" | "files" = "ask"):
       { id: uid("m_"), from: "ai", text: startFrom === "files"
         ? "올려 주신 자료를 기준으로 기획을 시작할게요. 빠진 부분을 채우기 위해 몇 가지만 여쭤볼게요."
         : "안녕하세요. 기획을 함께 정리할 AI 어시스턴트예요. 범위와 대상을 분명히 하기 위해 여섯 가지만 여쭤볼게요." },
-      { id: uid("m_"), from: "ai", text: "", question: questions[0] },
+      withAi
+        ? { id: uid("m_"), from: "ai", text: "아이디어에 맞는 질문을 만들고 있어요…", thinking: true }
+        : { id: uid("m_"), from: "ai", text: "", question: questions[0] },
     ],
     prd: null,
     groups: null,
