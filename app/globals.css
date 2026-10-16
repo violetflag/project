@@ -1,0 +1,44 @@
+@import "tailwindcss";
+
+/* Design tokens measured from the reference app's computed styles. */
+@theme {
+  --font-sans: "Pretendard Variable", Pretendard, -apple-system, system-ui, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+
+  --color-foreground: #333333;
+  --color-foreground-support: #555555;
+  --color-foreground-muted: #888888;
+  --color-foreground-assistive: #b5b3b3;
+
+  --color-background: #fdfdfd;
+  --color-background-canvas: #efefef;
+  --color-surface: #f7f7f7;
+
+  --color-border: #e9e8e8;
+  --color-border-strong: #d2d0d0;
+
+  --color-primary: #845dde;
+  --color-primary-soft: rgb(132 93 222 / 0.08);
+
+  --color-avatar: #f08a3c;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--color-surface);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.4s ease-out both;
+}
