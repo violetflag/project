@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useCallback, useState } from "react";
 import { brand } from "@/lib/brand";
+import { useProjects } from "@/lib/store";
 import { patchNotes } from "@/lib/mock";
 import { useDismiss } from "./Popover";
 import { useConnectorModal } from "./ConnectorModal";
@@ -151,13 +152,19 @@ function PatchNotes() {
 
 export function Sidebar() {
   const openConnectors = useConnectorModal();
+  const projects = useProjects().filter((p) => !p.deletedAt);
+  const starred = projects.filter((p) => p.starred);
   return (
     <nav className="flex h-full w-70 shrink-0 flex-col gap-2 p-2 pr-0">
       <GroupMenu />
       <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pt-1">
         <NavLink href="/" label="홈" icon={<HomeIcon />} />
-        <LockedItem label="전체 프로젝트" icon={<FolderIcon />} hint="프로젝트를 만들면 열려요" />
-        <LockedItem label="기획 보드" icon={<BoardIcon />} hint="프로젝트를 만들면 열려요" />
+        {projects.length ? (
+          <NavLink href="/projects" label={`전체 프로젝트 ${projects.length}`} icon={<FolderIcon />} />
+        ) : (
+          <LockedItem label="전체 프로젝트" icon={<FolderIcon />} hint="프로젝트를 만들면 열려요" />
+        )}
+        <LockedItem label="기획 보드" icon={<BoardIcon />} hint="팀 플랜에서 열려요" />
         <button onClick={openConnectors} className={itemCls}>
           <PlugIcon />
           <span>연결</span>
@@ -166,7 +173,15 @@ export function Sidebar() {
         <div className="h-3" />
         <Notifications />
         <p className="mt-4 px-2.5 text-xs font-medium text-foreground-support">즐겨찾기</p>
-        <p className="py-6 text-center text-xs text-foreground-muted">아직 즐겨찾은 프로젝트가 없어요</p>
+        {starred.length ? (
+          starred.map((p) => (
+            <Link key={p.id} href={`/editor?id=${p.id}`} className={`${itemCls} truncate`}>
+              <span className="truncate">{p.name}</span>
+            </Link>
+          ))
+        ) : (
+          <p className="py-6 text-center text-xs text-foreground-muted">아직 즐겨찾은 프로젝트가 없어요</p>
+        )}
       </div>
       <div className="flex flex-col gap-2">
         <PatchNotes />

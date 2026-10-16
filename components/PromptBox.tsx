@@ -1,6 +1,8 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { createProject } from "@/lib/store";
 import { topicSuggestions } from "@/lib/mock";
 import { ArrowUp, Close, Paperclip, Sparkle } from "./icons";
 
@@ -43,17 +45,16 @@ export function PromptBox() {
   const [text, setText] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [topicsOpen, setTopicsOpen] = useState(false);
-  const [sent, setSent] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const hint = hints[mode];
   const canSend = text.trim().length > 0 || (mode === "files" && files.length > 0);
 
+  const router = useRouter();
   const submit = () => {
     if (!canSend) return;
-    // No backend: show what would be sent instead of calling an API.
-    setSent(text.trim() || `${files.length}개 자료`);
-    setText("");
-    setFiles([]);
+    const idea = text.trim() || files.map((f) => f.name).join(", ");
+    const p = createProject(idea, mode);
+    router.push(`/editor?id=${p.id}`);
   };
 
   return (
@@ -127,11 +128,6 @@ export function PromptBox() {
         </div>
       </div>
       <p className="mt-3 text-center text-xs text-foreground-muted">{hint.caption}</p>
-      {sent && (
-        <p className="animate-fade-up mt-4 text-center text-xs text-primary">
-          데모 화면이라 실제로 전송되지는 않아요. 보낸 내용: “{sent}”
-        </p>
-      )}
     </div>
   );
 }
