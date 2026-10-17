@@ -1,3 +1,4 @@
+import type { FlowPlanOp } from "./flow-local";
 export type Role = string;
 export type Status = "draft" | "review" | "done";
 export const STATUS_LABEL: Record<Status, string> = { draft: "기획 작성중", review: "검토중", done: "확정" };
@@ -147,7 +148,9 @@ export interface ChatMessage {
   question?: Question;
   answered?: string[];
   choices?: { question: string; options: ChatOption[]; picked?: string };
-  actions?: ("generate-prd" | "more-questions" | "goto-features" | "run-review" | "complete-spec" | "make-flow" | "make-wire")[];
+  actions?: ("generate-prd" | "more-questions" | "goto-features" | "goto-flow" | "goto-wire" | "run-review" | "complete-spec" | "make-flow" | "make-wire")[];
+  // A user-flow change planned from chat; applied only when the user presses a button on it.
+  flowPlan?: { summary: string; ops: FlowPlanOp[]; flowId: string; done?: "applied" | "copied" | "dismissed" };
 }
 
 export type Perspective = "개발" | "사업" | "UX" | "디자인" | "QA" | "보안";
@@ -234,7 +237,8 @@ export interface Project {
   wires: WireSet[];
   wireId?: string;
   // Later tabs whose source changed since they were made; the sync button refreshes them.
-  stale?: { flow?: boolean; wire?: boolean };
+  // prd: PRD edits made in the PRD tab that the chat has not yet checked against the other documents.
+  stale?: { flow?: boolean; wire?: boolean; prd?: string[] };
   findings: Finding[] | null;
   comments: Comment[];
   decisions: Decision[];

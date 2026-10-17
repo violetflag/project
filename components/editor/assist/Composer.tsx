@@ -1,7 +1,8 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import { isBusy, sendChat } from "@/lib/actions";
+import { chatTokenEstimate, isBusy, sendChat } from "@/lib/actions";
+import { useAiSettings } from "@/lib/ai";
 import { flatten, LEVEL_LABEL } from "@/lib/spec-model";
 import type { Project } from "@/lib/types";
 import { AiPicker } from "../../AiKeyForm";
@@ -113,12 +114,13 @@ export function Composer({ p }: { p: Project }) {
         )}
         <textarea ref={box} value={text} rows={2} aria-label="채팅 입력"
           onChange={(e) => onChange(e.target.value)} onKeyDown={onKey} onBlur={() => setTimeout(() => setQuery(null), 150)}
-          placeholder={p.spec?.length ? "@로 항목을 집어 질문하거나 고쳐 달라고 해 보세요" : "궁금한 점이나 바꾸고 싶은 점을 적어 주세요"}
+          placeholder={p.spec?.length ? "기능명세서, 유저플로우, 와이어프레임 무엇이든 고쳐 달라고 해 보세요 (@로 항목 집기)" : "궁금한 점이나 바꾸고 싶은 점을 적어 주세요"}
           className="w-full resize-none bg-transparent px-1 text-sm outline-none placeholder:text-foreground-assistive" />
         <div className="flex items-center gap-1">
           <button onMouseDown={(e) => e.preventDefault()} onClick={() => { setText((t) => (t && !t.endsWith(" ") ? t + " @" : t + "@")); setQuery(""); box.current?.focus(); }}
             aria-label="항목 멘션" className="grid h-7 w-7 place-items-center rounded-full text-sm text-foreground-muted hover:bg-surface">@</button>
           <AiPicker up />
+          <ContextMeter p={p} />
           <button onClick={send} disabled={(!text.trim() && !chips.length) || busy} aria-label="보내기"
             className="ml-auto grid h-8 w-8 place-items-center rounded-full bg-foreground text-background disabled:bg-border-strong">
             <ArrowUp className="h-3.5 w-3.5" />
@@ -127,5 +129,28 @@ export function Composer({ p }: { p: Project }) {
       </div>
       {busy && <p className="mt-1 px-1 text-[11px] text-foreground-muted">AI가 작업하고 있어요. 끝나면 이어서 보낼 수 있어요.</p>}
     </div>
+  );
+}
+
+const k = (n: number) => (n >= 1_000_000 ? `${+(n / 1_000_000).toFixed(1)}M` : `${n < 10_000 ? +(n / 1000).toFixed(1) : Math.round(n / 1000)}k`);
+
+// Estimated input tokens of the next chat request against the context size in AI settings.
+// Haiku 5.5 bills a higher rate once a prompt passes 100K tokens, so that line is marked.
+function ContextMeter({ p }: { p: Project }) {
+  const { model } = useAiSettings();
+  const { used, limit } = useMemo(() => chatTokenEstimate(p), [p]);
+  const pct = Math.min(100, Math.round((used / limit) * 100));
+  const pricey = model === "claude-haiku-5-5" && used > 100_000;
+  const tone = pct >= 90 ? "text-red-600" : pricey ? "text-amber-600" : "text-foreground-muted";
+  return (
+    <span aria-label={`컨텍스트 ${k(used)} / ${k(limit)} 토큰`}
+      title={`다음 채팅에 들어갈 입력 약 ${used.toLocaleString()} 토큰 / 한도 ${limit.toLocaleString()} 토큰 (${pct}%)${pricey ? "\nHaiku 5.5는 입력이 10만 토큰을 넘으면 단가가 5배예요" : ""}\n문서는 항상 다 넣고, 한도를 넘으면 오래된 대화부터 줄여요.`}
+      className={`flex items-center gap-1 px-1 text-[11px] tabular-nums whitespace-nowrap ${tone}`}>
+      <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 -rotate-90" aria-hidden>
+        <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeOpacity="0.2" strokeWidth="2.5" />
+        <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="2.5" strokeDasharray={`${(pct / 100) * 37.7} 37.7`} />
+      </svg>
+      {k(used)} / {k(limit)}
+    </span>
   );
 }

@@ -163,6 +163,23 @@ ${styleOf(p)}`);
   return cleanPlan(flow, out);
 }
 
+// For the chat: the open flow as text, and a change plan made inside an AI run the chat already holds.
+export const flowOutline = (p: Project) => { const f = openFlow(p); return f ? `${f.name}\n${flowText(f)}` : ""; };
+export const chatFlowPlan = (p: Project, request: string) => aiPlan(p, openFlow(p)!, request, []);
+export const localChatFlowPlan = (p: Project, request: string) => localPlan(openFlow(p)!, request, []);
+
+export function setChatFlowPlan(id: string, msgId: string, done: "applied" | "copied" | "dismissed") {
+  const p = getProject(id);
+  const m = p?.chat.find((x) => x.id === msgId);
+  if (!p || !m?.flowPlan || m.flowPlan.done) return;
+  if (done !== "dismissed") {
+    if (p.flowId !== m.flowPlan.flowId && p.flows.some((f) => f.id === m.flowPlan!.flowId)) selectFlow(id, m.flowPlan.flowId);
+    applyFlowPlan(id, m.flowPlan, done === "copied");
+  }
+  updateProject(id, (x) => ({ ...x, chat: x.chat.map((y) => (y.id === msgId && y.flowPlan ? { ...y, flowPlan: { ...y.flowPlan, done } } : y)) }));
+  saveToDrive();
+}
+
 export async function planFlowRevision(id: string, request: string, focusNodeIds: string[]): Promise<FlowPlan> {
   const p = getProject(id);
   const flow = p && openFlow(p);

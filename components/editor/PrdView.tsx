@@ -7,6 +7,7 @@ import type { Project } from "@/lib/types";
 import { useIsMobile } from "@/lib/useMedia";
 import { ArrowRight, Plus, Sparkle } from "../icons";
 import { InlineText } from "./spec/ui";
+import { PrdChangeBar } from "./ChatPanel";
 
 export function EmptyDoc({ title, hint, action }: { title: string; hint: string; action?: React.ReactNode }) {
   return (
@@ -93,7 +94,9 @@ export function PrdView({ p }: { p: Project }) {
   const scroll = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full flex-col">
+      {mobile && <div className="pt-2"><PrdChangeBar p={p} /></div>}
+    <div className="flex min-h-0 flex-1">
       {!mobile && (
         <aside className="w-56 shrink-0 overflow-y-auto border-r border-border bg-background px-3 py-4" aria-label="문서 구조">
           <p className="mb-2 px-2 text-xs font-medium text-foreground-support">문서 구조</p>
@@ -152,6 +155,7 @@ export function PrdView({ p }: { p: Project }) {
           </div>
         </div>
       </div>
+    </div>
     </div>
   );
 }

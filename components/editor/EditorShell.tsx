@@ -3,11 +3,9 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { isBusy } from "@/lib/actions";
-import { syncFlow } from "@/lib/flow";
-import { getProject, updateProject } from "@/lib/store";
+import { updateProject } from "@/lib/store";
 import type { Project } from "@/lib/types";
 import { useIsMobile } from "@/lib/useMedia";
-import { syncWires } from "@/lib/wire";
 import { ArrowLeft, Chat, Gear, Sparkle } from "../icons";
 import { ChatPanel } from "./ChatPanel";
 import { FeaturesView } from "./FeaturesView";
@@ -46,7 +44,6 @@ export function EditorShell({ p }: { p: Project }) {
   const [panel, setPanel] = useState<Panel | null>("chat");
   const [tab, setTab] = useState<Tab>("prd");
   const [share, setShare] = useState(false);
-  const [syncing, setSyncing] = useState(false);
   // Phones show one pane at a time: a side panel or the documents.
   const [mobilePane, setMobilePane] = useState<Panel | "doc">("chat");
   const [more, setMore] = useState(false);
@@ -95,16 +92,6 @@ export function EditorShell({ p }: { p: Project }) {
   const openComments = p.comments.filter((c) => !c.resolved).length;
   const openFindings = p.findings?.filter((f) => f.state === "open").length ?? 0;
 
-  const runSync = async () => {
-    setSyncing(true);
-    try {
-      if (getProject(p.id)?.stale?.flow) await syncFlow(p.id);
-      if (getProject(p.id)?.stale?.wire) await syncWires(p.id);
-    } finally {
-      setSyncing(false);
-    }
-  };
-
   const panelBody = (k: Panel) => (
     <>
       {k === "chat" && <ChatPanel p={p} onGoto={goto} />}
@@ -123,18 +110,12 @@ export function EditorShell({ p }: { p: Project }) {
       <div role="tablist" className="flex min-w-0 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {TABS.map(([k, l], i) => (
           <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
-            title={`${stale[k] ? "앞 단계가 바뀌었어요. 동기화로 반영할 수 있어요 · " : ""}Shift + ${i + 1}`}
+            title={`${stale[k] ? "앞 단계가 바뀌었어요. 탭 안의 [동기화]로 반영할 수 있어요 · " : ""}Shift + ${i + 1}`}
             className={`flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-sm whitespace-nowrap ${tab === k ? "bg-surface font-medium" : filled[k] ? "text-foreground-support hover:bg-surface" : "text-foreground-assistive hover:bg-surface"}`}>
             {dot(k)}{l}
           </button>
         ))}
       </div>
-      <button onClick={runSync} disabled={!anyStale || syncing || busy} aria-label="동기화"
-        title={anyStale ? "앞 단계에서 바뀐 내용을 유저플로우와 와이어프레임에 반영해요" : "모든 탭이 최신이에요"}
-        className={`flex shrink-0 items-center gap-1 rounded-md border px-2 py-0.5 text-xs disabled:cursor-not-allowed ${anyStale ? "border-amber-400 text-amber-700 hover:bg-amber-50" : "border-border text-foreground-assistive"}`}>
-        {syncing ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" /> : <span>⟳</span>}
-        동기화
-      </button>
     </div>
   );
   const doc = (

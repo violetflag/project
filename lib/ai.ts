@@ -27,11 +27,13 @@ export const EFFORTS = [
 ] as const;
 export type Effort = (typeof EFFORTS)[number]["id"];
 
-// How much of the project goes to the model, and how long an answer may be.
+// How much the model may read (inputTokens) and write (maxTokens) per request. All offered models
+// take 1M tokens in and 128K out. The project documents always go in; older chat is dropped to fit.
+// Haiku 5.5 doubles its price above 100K input tokens, so 보통 stays under that.
 export const CONTEXTS = [
-  { id: "small", label: "작게", hint: "최근 대화 6개 · 답변 최대 16K 토큰", history: 6, maxTokens: 16000 },
-  { id: "medium", label: "보통", hint: "최근 대화 20개 · 답변 최대 32K 토큰", history: 20, maxTokens: 32000 },
-  { id: "large", label: "크게", hint: "대화 전체와 PRD 전문 · 답변 최대 64K 토큰", history: 1000, maxTokens: 64000 },
+  { id: "small", label: "작게 (3.2만)", hint: "입력 최대 약 32,000 토큰 · 답변 최대 16,000 토큰", inputTokens: 32_000, maxTokens: 16_000 },
+  { id: "medium", label: "보통 (10만)", hint: "입력 최대 약 100,000 토큰 · 답변 최대 64,000 토큰", inputTokens: 100_000, maxTokens: 64_000 },
+  { id: "large", label: "크게 (100만)", hint: "입력 최대 약 1,000,000 토큰(모델 한도) · 답변 최대 128,000 토큰(모델 한도)", inputTokens: 1_000_000, maxTokens: 128_000 },
 ] as const;
 export type ContextSize = (typeof CONTEXTS)[number]["id"];
 
@@ -164,7 +166,7 @@ export function styleOf(p: Pick<Project, "settings">) {
 }
 
 // Every call uses the model, effort and context size picked in AI settings.
-// Streaming keeps long answers (up to 64K tokens) from hitting HTTP timeouts.
+// Streaming keeps long answers (up to 128K tokens) from hitting HTTP timeouts.
 export async function ask<T extends z.ZodType>(schema: T, prompt: string, files: Anthropic.Beta.BetaContentBlockParam[] = []): Promise<z.infer<T>> {
   const { model, effort } = getAiSettings();
   const withFallback = MODELS.find((m) => m.id === model)?.fallback;
@@ -240,7 +242,22 @@ ${answersText(p)}
 }
 
 // Context helpers for the feature modules (spec, flow, wireframe, assistant).
-export const historySize = () => ctx().history;
+// Rough token count: about one token per Korean syllable, and one per ~3.5 other characters.
+export const estTokens = (s: string) => {
+  const ko = s.match(/[\uAC00-\uD7A3]/g)?.length ?? 0;
+  return Math.ceil(ko + (s.length - ko) / 3.5);
+};
+export const contextLimit = () => ctx().inputTokens;
+// Newest chat lines that fit in what the context size leaves after the rest of the prompt.
+export function fitHistory(lines: string[], restOfPrompt: string) {
+  let room = ctx().inputTokens - estTokens(restOfPrompt) - 2000;
+  const out: string[] = [];
+  for (let i = lines.length - 1; i >= 0 && room > 0; i--) {
+    room -= estTokens(lines[i]);
+    if (room >= 0) out.unshift(lines[i]);
+  }
+  return out;
+}
 export const largeContext = () => ctx().id === "large";
 export const prdText = (p: Pick<Project, "prd">) => (p.prd
   ? p.prd.map((s) => `## ${s.title}\n` + s.blocks.map((b) => `- ${b.label}: ${b.body}`).join("\n")).join("\n")

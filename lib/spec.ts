@@ -78,20 +78,35 @@ ${styleOf(x)}`, await materialBlocks(x));
 }
 
 // Direct PRD edits from the PRD tab.
-const editPrd = (id: string, fn: (s: PrdSection[]) => PrdSection[]) => updateProject(id, (p) => (p.prd ? {
-  ...p, prd: fn(p.prd), stale: p.spec ? { ...p.stale, flow: p.flows.length > 0, wire: p.wires.length > 0 } : p.stale,
-} : p));
+// Each change is remembered so the chat can later check whether the spec, flow and wireframes need it too.
+const editPrd = (id: string, fn: (s: PrdSection[]) => PrdSection[], change: (p: PrdSection[]) => string) => updateProject(id, (p) => {
+  if (!p.prd) return p;
+  const line = change(p.prd);
+  const prd = fn(p.prd);
+  if (JSON.stringify(prd) === JSON.stringify(p.prd)) return p;
+  return { ...p, prd, stale: p.spec?.length && line ? { ...p.stale, prd: [...(p.stale?.prd ?? []).filter((x) => x !== line), line].slice(-12) } : p.stale };
+});
+const blockName = (ss: PrdSection[], sid: string, idx: number) => { const s = ss.find((x) => x.id === sid); return `${s?.title ?? ""} · ${s?.blocks[idx]?.label ?? ""}`; };
 export function setPrdBlock(id: string, sid: string, idx: number, patch: Partial<{ label: string; body: string }>) {
-  editPrd(id, (ss) => ss.map((s) => (s.id === sid ? { ...s, blocks: s.blocks.map((b, i) => (i === idx ? { ...b, ...patch } : b)) } : s)));
+  editPrd(id, (ss) => ss.map((s) => (s.id === sid ? { ...s, blocks: s.blocks.map((b, i) => (i === idx ? { ...b, ...patch } : b)) } : s)),
+    (ss) => `${blockName(ss, sid, idx)}${patch.label ? ` (이름 → ${patch.label})` : ""}: ${patch.body ?? ss.find((s) => s.id === sid)?.blocks[idx]?.body ?? ""}`.slice(0, 600));
 }
 export function addPrdBlock(id: string, sid: string) {
-  editPrd(id, (ss) => ss.map((s) => (s.id === sid ? { ...s, blocks: [...s.blocks, { label: "새 항목", body: "" }] } : s)));
+  editPrd(id, (ss) => ss.map((s) => (s.id === sid ? { ...s, blocks: [...s.blocks, { label: "새 항목", body: "" }] } : s)),
+    () => "");
 }
 export function deletePrdBlock(id: string, sid: string, idx: number) {
-  editPrd(id, (ss) => ss.map((s) => (s.id === sid ? { ...s, blocks: s.blocks.filter((_, i) => i !== idx) } : s)));
+  editPrd(id, (ss) => ss.map((s) => (s.id === sid ? { ...s, blocks: s.blocks.filter((_, i) => i !== idx) } : s)),
+    (ss) => `${blockName(ss, sid, idx)} 항목 삭제`);
 }
 export function setPrdProps(id: string, patch: Partial<PrdProps>) {
-  updateProject(id, (p) => ({ ...p, prdProps: { category: "", roles: [], devices: [], ...p.prdProps, ...patch } }));
+  updateProject(id, (p) => {
+    const line = Object.entries(patch).map(([k, v]) => `PRD 속성 · ${({ category: "카테고리", roles: "사용자 역할", devices: "지원 기기" } as Record<string, string>)[k] ?? k}: ${Array.isArray(v) ? v.join(", ") : v}`).join(" / ");
+    return {
+      ...p, prdProps: { category: "", roles: [], devices: [], ...p.prdProps, ...patch },
+      stale: p.spec?.length && line ? { ...p.stale, prd: [...(p.stale?.prd ?? []).filter((x) => x !== line), line].slice(-12) } : p.stale,
+    };
+  });
 }
 
 // --- Spec schemas ------------------------------------------------------------------------

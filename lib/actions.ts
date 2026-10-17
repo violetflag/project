@@ -7,9 +7,12 @@ import { getProject, updateProject } from "./store";
 import { saveToDrive } from "./sync";
 import { makeQuestions, shortName, summarizeAnswers } from "./generator";
 import {
-  aiQuestions, aiSummary, ask, describeError, historySize, materialText, prdText, styleOf,
+  aiQuestions, aiSummary, ask, contextLimit, describeError, estTokens, fitHistory, materialText, prdText, styleOf,
 } from "./ai";
 import { ai, aiEnabled, me, withAi } from "./run";
+import { autoVersion } from "./versions";
+import { chatFlowPlan, flowOutline, localChatFlowPlan, type FlowPlan } from "./flow";
+import { matchPage, pageNodes, regeneratePage } from "./wire";
 import { cleanSlots, generatePrd, slotGuide, SlotsSchema, slotWords } from "./spec";
 import {
   blankItem, findItem, flatten, insertItem, LEVEL_LABEL, pathTo, proposeEdit, specText,
@@ -458,23 +461,25 @@ export function mentionsOf(text: string) {
   return [...text.matchAll(MENTION)].map((m) => ({ title: m[1], id: m[2] }));
 }
 
+// The whole project is always in view; @-mentioned items are marked as the focus of the question.
 function chatContext(p: Project, text: string) {
   const ms = mentionsOf(text);
-  if (!ms.length) return `[PRD]\n${prdText(p)}\n\n[기능명세서]\n${specText(p.spec, true) || "(아직 없음)"}`;
   const parts: string[] = [];
   for (const m of ms) {
-    if (m.id === "prd") parts.push(`[PRD]\n${prdText(p)}`);
+    if (m.id === "prd") parts.push("[PRD 전체]");
     else if (m.id.startsWith("prd:")) {
       const s = p.prd?.find((x) => x.id === m.id.slice(4));
-      if (s) parts.push(`[PRD · ${s.title}]\n${s.blocks.map((b) => `- ${b.label}: ${b.body}`).join("\n")}`);
+      if (s) parts.push(`[PRD · ${s.title}]`);
     } else {
       const it = findItem(p.spec, m.id);
       if (!it) continue;
       const path = pathTo(p.spec ?? [], it.id).slice(0, -1).map((x) => `${x.code} ${x.title}`).join(" > ");
-      parts.push(`[${LEVEL_LABEL[it.level]}${path ? ` · ${path}` : ""}]\n${specText([it], true)}${it.criteria?.length ? `\n수용 기준: ${it.criteria.join(" / ")}` : ""}`);
+      parts.push(`[${LEVEL_LABEL[it.level]}${path ? ` · ${path}` : ""}] ${it.code} ${it.title}${it.criteria?.length ? `\n수용 기준: ${it.criteria.join(" / ")}` : ""}`);
     }
   }
-  return `사용자가 다음 항목을 집어서 물었어요. 이 항목을 중심으로 답합니다.\n${parts.join("\n\n")}\n\n[기능명세서 목차]\n${specText(p.spec)}`;
+  const props = p.prdProps ? `\n카테고리: ${p.prdProps.category} / 사용자 역할: ${p.prdProps.roles.join(", ")} / 기기: ${p.prdProps.devices.join(", ")}` : "";
+  const prd = p.prd ? p.prd.map((s) => `## ${s.title}\n${s.blocks.map((b) => `- ${b.label}: ${b.body}`).join("\n")}`).join("\n") : "(아직 없음)";
+  return `[PRD]${props}\n${prd}\n\n[기능명세서]\n${specText(p.spec, true) || "(아직 없음)"}${parts.length ? `\n\n사용자가 다음 항목을 집어서 물었어요. 이 항목을 중심으로 답합니다.\n${parts.join("\n")}` : ""}`;
 }
 
 export const ChatSchema = z.object({
@@ -482,20 +487,102 @@ export const ChatSchema = z.object({
   edits: z.array(EditSchema),
   additions: z.array(AddSchema),
   review: z.boolean(),
+  prd: z.array(z.object({ section: z.string(), label: z.string(), body: z.string() })),
+  flow: z.string(),
+  pages: z.array(z.object({ page: z.string(), request: z.string() })),
 });
+
+// PRD changes from chat: rewrite a block by section title + label, or add it when the label is new.
+function applyPrdEdits(p: Project, edits: { section: string; label: string; body: string }[]) {
+  if (!p.prd) return { prd: p.prd, lines: [] as string[] };
+  const lines: string[] = [];
+  const norm = (s: string) => s.replace(/\s/g, "");
+  const prd = p.prd.map((s) => ({ ...s, blocks: [...s.blocks] }));
+  for (const e of edits) {
+    if (!e.body.trim() || !e.label.trim()) continue;
+    const sec = prd.find((s) => norm(s.title) === norm(e.section)) ?? prd.find((s) => norm(s.title).includes(norm(e.section)) || norm(e.section).includes(norm(s.title)));
+    if (!sec) continue;
+    const i = sec.blocks.findIndex((b) => norm(b.label) === norm(e.label));
+    if (i >= 0) { if (sec.blocks[i].body === e.body) continue; sec.blocks[i] = { ...sec.blocks[i], body: e.body }; lines.push(`• PRD 수정 · ${sec.title} · ${sec.blocks[i].label}`); }
+    else { sec.blocks.push({ label: e.label.trim(), body: e.body }); lines.push(`• PRD 추가 · ${sec.title} · ${e.label.trim()}`); }
+  }
+  return { prd, lines };
+}
+
+// PRD edits made in the PRD tab: ask the AI whether the spec, flow and wireframes should follow.
+export function checkPrdChanges(id: string) {
+  const p = getProject(id);
+  const changes = p?.stale?.prd;
+  if (!p || !changes?.length) return;
+  updateProject(id, (x) => ({ ...x, stale: { ...x.stale, prd: undefined } }));
+  if (!aiEnabled()) {
+    updateProject(id, (x) => ({
+      ...x, stale: { ...x.stale, flow: x.flows.length > 0, wire: x.wires.length > 0 },
+      chat: [...x.chat, ai("AI 키가 없어서 자동으로 판단하지는 못해요. 유저플로우와 와이어프레임 탭에 [동기화] 표시를 띄워 두었어요. 기능명세서는 바뀐 PRD를 보며 직접 고쳐 주세요.")],
+    }));
+    return;
+  }
+  return sendChat(id, `PRD를 이렇게 고쳤어요. 기능명세서, 유저플로우, 와이어프레임 중 함께 고쳐야 할 곳이 있는지 판단해서 필요한 곳만 고쳐 주세요. 없으면 없다고 알려 주세요.\n${changes.map((c) => `- ${c}`).join("\n")}`);
+}
+export const dismissPrdChanges = (id: string) => updateProject(id, (x) => ({ ...x, stale: { ...x.stale, prd: undefined } }));
+
+// What the chat can see of the user flow and the wireframes it may change.
+function designContext(p: Project) {
+  const flow = flowOutline(p);
+  const set = p.wires.find((w) => w.id === p.wireId) ?? p.wires[0];
+  return [
+    flow ? `[유저플로우]\n${flow.slice(0, 5000)}` : "[유저플로우]\n(아직 없음)",
+    set?.pages.length ? `[와이어프레임 페이지]\n${set.pages.map((x) => x.name).join(", ")}` : "[와이어프레임 페이지]\n(아직 없음)",
+  ].join("\n\n");
+}
+
+// Redraws wireframe pages the chat asked for, one after another, then says what changed.
+async function redrawPages(id: string, asks: { page: string; request: string }[]) {
+  const done: string[] = [];
+  for (const a of asks) {
+    const p = getProject(id);
+    const set = p && (p.wires.find((w) => w.id === p.wireId) ?? p.wires[0]);
+    const flow = set && p!.flows.find((f) => f.id === set.flowId);
+    if (!set || !flow) break;
+    const node = matchPage(a.page, pageNodes(flow).filter((n) => set.pages.some((x) => x.nodeId === n.id)));
+    const page = node && set.pages.find((x) => x.nodeId === node.id);
+    if (!page || done.includes(page.name)) continue;
+    await regeneratePage(id, set.id, page.id, a.request);
+    done.push(page.name);
+  }
+  if (done.length) updateProject(id, (x) => ({ ...x, chat: [...x.chat, ai(`와이어프레임 ${done.map((n) => `'${n}'`).join(", ")} 페이지를 요청대로 다시 그렸어요. 이전 모습은 [버전]에서 되돌릴 수 있어요.`, { actions: ["goto-wire"] })] }));
+}
+
+const flowPlanMsg = (p: Project, plan: { summary: string; ops: FlowPlan["ops"] }) => {
+  const flowId = (p.flows.find((f) => f.id === p.flowId) ?? p.flows.at(-1))!.id;
+  return plan.ops.length
+    ? ai(`유저플로우 변경 계획이에요. ${plan.summary}\n[적용]하면 지금 유저플로우에 반영하고, [새 버전으로]는 원본을 두고 수정본을 만들어요.`, { flowPlan: { summary: plan.summary, ops: plan.ops, flowId } })
+    : ai("유저플로우에서 바꿀 곳을 찾지 못했어요. 어떤 화면이나 연결을 바꿀지 조금 더 구체적으로 적어 주세요.");
+};
+
+// What the next chat request would send, in tokens, against the context size picked in AI settings.
+const CHAT_RULES_TOKENS = 2500;
+export function chatTokenEstimate(p: Project) {
+  const docs = `${chatContext(p, "")}\n\n${designContext(p)}`;
+  const lines = p.chat.filter((m) => m.text && !m.thinking && !m.error).map((m) => `${m.from === "user" ? "사용자" : "AI"}: ${plainText(m.text)}`);
+  const history = fitHistory(lines, docs).join("\n");
+  return { used: estTokens(docs) + estTokens(history) + CHAT_RULES_TOKENS, limit: contextLimit() };
+}
 
 export async function sendChat(id: string, text: string) {
   const p = getProject(id);
   if (!p) return;
   if (!aiEnabled()) return sendChatLocal(id, text);
   let wantsReview = false;
+  let pageAsks: { page: string; request: string }[] = [];
   await withAi(id, "생각하고 있어요…", async (x, step) => {
-    const history = x.chat.filter((m) => m.text && !m.thinking && !m.error).slice(-historySize() - 1, -1)
-      .map((m) => `${m.from === "user" ? "사용자" : "AI"}: ${plainText(m.text)}`).join("\n");
+    const docs = `${chatContext(x, text)}\n\n${designContext(x)}`;
+    const history = fitHistory(x.chat.filter((m) => m.text && !m.thinking && !m.error).slice(0, -1)
+      .map((m) => `${m.from === "user" ? "사용자" : "AI"}: ${plainText(m.text)}`), docs + text).join("\n");
     step("문서 읽음");
     const out = await ask(ChatSchema, `서비스 기획을 함께 다듬는 대화입니다.
 아이디어: ${x.idea}
-${chatContext(x, text)}
+${docs}
 
 [최근 대화]
 ${history || "(없음)"}
@@ -507,19 +594,40 @@ ${plainText(text)}
 - 질문이면 reply에 답만 하고 edits/additions는 빈 배열로 둡니다.
 - 기능을 고치거나 더해 달라는 요청이면 edits(기존 항목, code는 위 코드 그대로, 바꾸지 않는 칸은 빈 문자열/빈 배열)와 additions(parentCode는 부모 코드, 요구사항을 새로 만들 때만 빈 문자열)에 담고, reply에는 무엇을 바꿨는지 짧게 씁니다. 바뀐 내용은 사용자가 승인해야 반영됩니다.
 - 기획 전체 검토를 원하면 review를 true로 합니다.
+- 당신은 PRD, 기능명세서, 유저플로우, 와이어프레임 전체를 알고 있습니다. 어느 한 곳을 바꾸는 요청이라도 나머지 문서와 어긋나게 되면, 함께 고쳐야 할 곳을 스스로 판단해 같이 고칩니다. 특히 PRD가 바뀌면 그 내용이 기능명세서, 유저플로우, 와이어프레임에 영향을 주는지 꼭 확인합니다. 영향이 없는 곳은 비워 둡니다.
+- PRD를 고쳐야 하면 prd에 {section: 위 PRD의 ## 제목 그대로, label: 항목 이름 그대로(새 항목이면 새 이름), body: 고친 뒤 전체 내용}을 담습니다. 아니면 빈 배열입니다.
+- 유저플로우(화면 흐름, 노드, 연결, 분기)를 바꿔 달라는 요청이면 flow에 무엇을 어떻게 바꿀지 한두 문장으로 씁니다. 아니면 빈 문자열입니다. 유저플로우가 아직 없으면 빈 문자열로 두고 reply에서 먼저 만들자고 안내합니다.
+- 와이어프레임 화면을 바꿔 달라는 요청이면 pages에 {page: 위 [와이어프레임 페이지]에 있는 이름 그대로, request: 그 화면에서 바꿀 내용}을 담습니다. 아니면 빈 배열입니다.
+- 한 요청이 기능명세서, 유저플로우, 와이어프레임을 함께 바꿀 수도 있습니다. 그때는 해당하는 칸을 모두 채우고, reply에는 어디를 바꾸는지 짧게 씁니다.
 ${editRules}
 ${styleOf(x)}`);
     let lines: string[] = [];
+    let prdLines: string[] = [];
+    if (out.prd.length) {
+      const r = applyPrdEdits(getProject(id)!, out.prd);
+      if (r.lines.length) {
+        updateProject(id, (y) => ({ ...y, prd: r.prd }), "채팅 요청으로 PRD를 고쳤어요");
+        autoVersion(id, `채팅으로 PRD 수정 ${r.lines.length}곳`);
+        prdLines = r.lines;
+      }
+    }
     if (x.spec && (out.edits.length || out.additions.length)) {
       const r = applyProposals(getProject(id)!.spec ?? [], out.edits, out.additions);
       lines = r.lines;
       step(r.lines.some((l) => l.includes("상세 기능")) ? "상세 기능 작성 완료" : "기능 작성 완료");
       updateProject(id, (y) => ({ ...y, spec: r.spec }), "채팅 요청으로 수정안을 만들었어요");
     }
-    updateProject(id, (y) => ({ ...y, chat: [...y.chat, ai(out.reply + changedText(lines), { actions: lines.length ? ["goto-features"] : undefined })] }));
-    if (lines.length) saveToDrive();
+    updateProject(id, (y) => ({ ...y, chat: [...y.chat, ai(out.reply + (prdLines.length ? `\n\nPRD에 바로 반영했어요 (이전 내용은 [버전]에서 되돌릴 수 있어요)\n${prdLines.join("\n")}` : "") + changedText(lines), { actions: lines.length ? ["goto-features"] : undefined })] }));
+    if (out.flow.trim() && x.flows.length) {
+      step("유저플로우 변경 계획 세움");
+      const plan = await chatFlowPlan(getProject(id)!, out.flow.trim());
+      updateProject(id, (y) => ({ ...y, chat: [...y.chat, flowPlanMsg(y, plan)] }));
+    }
+    if (lines.length || prdLines.length) saveToDrive();
     wantsReview = out.review;
+    pageAsks = out.pages.filter((a) => a.page.trim() && a.request.trim());
   }, () => sendChatLocal(id, text, false), [me(text)]);
+  if (pageAsks.length) await redrawPages(id, pageAsks);
   if (wantsReview) review(id);
 }
 
@@ -538,6 +646,20 @@ function sendChatLocal(id: string, text: string, echo = true) {
     return say("먼저 PRD와 기능명세서를 만들어야 그 내용에 맞춰 도와드릴 수 있어요. 질문에 답하고 [PRD 만들기]를 눌러 주세요.");
   }
   const bare = text.replace(MENTION, "").trim();
+  const change = /(바꿔|수정|고쳐|다시|추가|넣어|빼|없애|지워|만들어)/.test(plain);
+  const set = p.wires.find((w) => w.id === p.wireId) ?? p.wires[0];
+  const wflow = set && p.flows.find((f) => f.id === set.flowId);
+  if (change && wflow && !/(유저플로우|플로우|흐름)/.test(plain) && /(와이어프레임|화면|페이지)/.test(plain)) {
+    const node = matchPage(plain.replace(/와이어프레임|화면|페이지/g, " "), pageNodes(wflow).filter((n) => set.pages.some((x) => x.nodeId === n.id)));
+    if (node) {
+      say(`'${node.label}' 페이지를 요청대로 다시 그릴게요.`);
+      return redrawPages(id, [{ page: node.label, request: plain }]);
+    }
+  }
+  if (change && p.flows.length && /(유저플로우|플로우|흐름)/.test(plain)) {
+    const plan = localChatFlowPlan(p, plain);
+    return updateProject(id, (x) => ({ ...x, chat: [...x.chat, ...(echo ? [me(text)] : []), flowPlanMsg(x, plan)] }));
+  }
   const add = bare.match(/^(.*?)\s*(?:기능|항목)?\s*(?:을|를)?\s*(?:추가|넣어|만들어)/);
   if (add) {
     const title = add[1].replace(/["'“”]/g, "").replace(/\s*(기능|항목)$/, "").trim() || "새 기능";
