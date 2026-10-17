@@ -15,18 +15,19 @@ function QuestionCard({ p, q, answered }: { p: Project; q: Question; answered?: 
   if (answered) {
     return <p className="text-sm text-foreground-support">Q{index}. {q.text}</p>;
   }
-  const toggle = (o: string) => setSel((s) => (q.multi ? (s.includes(o) ? s.filter((x) => x !== o) : [...s, o]) : [o]));
+  // Every question allows several picks; options left out are kept as later candidates in the PRD.
+  const toggle = (o: string) => setSel((s) => (s.includes(o) ? s.filter((x) => x !== o) : [...s, o]));
   const picked = custom.trim() ? [...sel, custom.trim()] : sel;
   return (
     <div className="animate-fade-up">
-      <p className="mb-2 text-sm">Q{index}. {q.text} <span className="text-foreground-muted">{q.multi ? "(여러 개 선택)" : "(하나 선택)"}</span></p>
+      <p className="mb-2 text-sm">Q{index}. {q.text} <span className="text-foreground-muted">(여러 개 선택 가능)</span></p>
       <div className="flex flex-col gap-1.5">
         {q.options.map((o) => {
           const on = sel.includes(o);
           return (
             <button key={o} onClick={() => toggle(o)}
               className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left text-sm ${on ? "border-primary bg-primary-soft" : "border-border bg-background hover:border-border-strong"}`}>
-              <span className={`grid h-4 w-4 place-items-center border ${q.multi ? "rounded" : "rounded-full"} ${on ? "border-primary bg-primary text-white" : "border-border-strong"}`}>
+              <span className={`grid h-4 w-4 place-items-center border rounded ${on ? "border-primary bg-primary text-white" : "border-border-strong"}`}>
                 {on && <span className="text-[9px]">✓</span>}
               </span>
               {o}

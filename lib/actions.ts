@@ -8,7 +8,7 @@ import {
 import {
   aiApplyChoice, aiChat, aiChoices, aiPlan, aiQuestions, aiReview, aiSummary, describeError, getApiKey, toFeature,
 } from "./ai";
-import type { ChatMessage, Decision, Feature, Project } from "./types";
+import type { ChatMessage, Decision, Feature, PrdSection, Project } from "./types";
 
 const ai = (text: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({ id: uid("m_"), from: "ai", text, ...extra });
 const me = (text: string): ChatMessage => ({ id: uid("m_"), from: "user", text });
@@ -101,11 +101,23 @@ function addMoreQuestionsLocal(id: string) {
 const planDone = (groups: { features: unknown[] }[]) =>
   `PRD 초안과 함께 기능명세서 초안을 만들었어요. 기능 묶음 ${groups.length}개, 세부 기능 ${groups.reduce((n, g) => n + g.features.length, 0)}개예요. 이어서 무엇을 할까요?`;
 
+// Options the user didn't pick, kept in the PRD so they can be planned later.
+function withLater(p: Project, prd: PrdSection[]): PrdSection[] {
+  const lines = p.questions.flatMap((q) => {
+    const picked = p.answers[q.id] ?? [];
+    const rest = q.options.filter((o) => !picked.includes(o));
+    return rest.length ? [`- ${q.text}\n  ${rest.join(" / ")}`] : [];
+  });
+  if (!lines.length || !prd.length) return prd;
+  const last = prd[prd.length - 1];
+  return [...prd.slice(0, -1), { ...last, blocks: [...last.blocks, { label: "다음 단계 후보 (이번에 고르지 않은 보기)", body: lines.join("\n") }] }];
+}
+
 export function generatePrd(id: string) {
   if (aiEnabled()) {
     withAi(id, "PRD와 기능명세서를 쓰고 있어요. 1~2분 정도 걸릴 수 있어요…", async (p) => {
       const { prd, groups } = await aiPlan(p);
-      updateProject(id, (x) => ({ ...x, prd, groups, chat: [...x.chat, ai(planDone(groups), { actions: ["goto-features", "run-review"] })] }),
+      updateProject(id, (x) => ({ ...x, prd: withLater(x, prd), groups, chat: [...x.chat, ai(planDone(groups), { actions: ["goto-features", "run-review"] })] }),
         "AI가 PRD와 기능명세서 초안을 만들었어요");
     }, () => generatePrdLocal(id));
     return;
@@ -115,13 +127,14 @@ export function generatePrd(id: string) {
 
 function generatePrdLocal(id: string) {
   updateProject(id, (p) => {
-    const prd = makePrd(p.idea, p.answers);
+    let prd = makePrd(p.idea, p.answers);
     // The template generator can't read material, so it at least cites it.
     if (p.materials?.length) {
       const excerpt = p.materials.filter((m) => m.text).map((m) => `${m.name}: ${m.text!.slice(0, 300)}`).join("\n");
       prd[0].blocks.push({ label: "참고 자료", body: `${p.materials.map((m) => m.name).join(", ")}${excerpt ? `\n${excerpt}` : ""}` });
     }
     const groups = makeFeatures(p.idea, p.answers);
+    prd = withLater(p, prd);
     const count = groups.reduce((n, g) => n + g.features.length, 0);
     return {
       ...p, prd, groups,

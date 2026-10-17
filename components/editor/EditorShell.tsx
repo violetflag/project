@@ -80,7 +80,7 @@ export function EditorShell({ p }: { p: Project }) {
     </>
   );
   const tabs = (
-    <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
+    <div className="flex min-w-0 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {TABS.map(([k, l], i) => (
         <button key={k} onClick={() => setTab(k)} title={`Shift + ${i + 1}`}
           className={`flex shrink-0 items-center gap-1 rounded px-2.5 py-1 text-sm whitespace-nowrap ${tab === k ? "bg-surface font-medium" : ready[k] ? "text-foreground-support hover:bg-surface" : "text-foreground-assistive"}`}>
