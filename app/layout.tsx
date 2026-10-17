@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { brand } from "@/lib/brand";
-import { SyncStarter } from "@/components/SyncStarter";
+import { AppWatch } from "@/components/AppWatch";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -18,7 +18,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body>
-        <SyncStarter />
+        <AppWatch />
         {children}
       </body>
     </html>
