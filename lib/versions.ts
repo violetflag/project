@@ -1,6 +1,7 @@
 "use client";
 
 import { uid } from "./id";
+import { migrate } from "./migrate";
 import { updateProject } from "./store";
 import type { Project } from "./types";
 
@@ -24,7 +25,9 @@ export function restoreVersion(id: string, vid: string) {
   updateProject(id, (p) => {
     const v = p.versions.find((x) => x.id === vid);
     if (!v) return p;
-    const s = JSON.parse(v.snapshot);
-    return { ...p, prd: s.prd ?? null, prdProps: s.prdProps, spec: s.spec ?? s.groups ?? null, flows: s.flows ?? [], wires: s.wires ?? [], stale: {} };
+    const raw = JSON.parse(v.snapshot);
+    // Versions saved before schema 2 hold groups/flow; convert them like an old project.
+    const s = "spec" in raw ? raw : migrate({ ...p, ...raw, schema: undefined } as Project);
+    return { ...p, prd: s.prd ?? null, prdProps: s.prdProps, spec: s.spec ?? null, flows: s.flows ?? [], wires: s.wires ?? [], stale: {} };
   }, "이전 버전으로 되돌렸어요");
 }

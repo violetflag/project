@@ -1,4 +1,6 @@
-import type { Project } from "./types";
+import { flatten, LEVEL_LABEL, numbering } from "./spec-model";
+import { SLOTS, STATUS_LABEL } from "./types";
+import type { Flow, Project, SpecItem } from "./types";
 
 function download(name: string, text: string, type: string) {
   const blob = new Blob([text], { type });
@@ -12,41 +14,140 @@ function download(name: string, text: string, type: string) {
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
 
-export function toMarkdown(p: Project) {
+const PRIORITY = { 3: "높음", 2: "보통", 1: "낮음" } as const;
+const KIND_LABEL = { start: "시작", page: "페이지", data: "데이터", branch: "분기", action: "행동" } as const;
+
+export const currentFlow = (p: Project) => p.flows.find((f) => f.id === p.flowId) ?? p.flows[p.flows.length - 1];
+export const currentWires = (p: Project) => p.wires.find((w) => w.id === p.wireId) ?? p.wires[0];
+
+function specMarkdown(items: SpecItem[]) {
+  const num = numbering(items);
+  const out: string[] = [];
+  flatten(items).filter((x) => x.pending?.kind !== "new").forEach((x) => {
+    out.push(`${"#".repeat(x.level + 2)} ${num[x.id]} [${x.code}] ${x.title}`, "");
+    out.push(`*${LEVEL_LABEL[x.level]} · ${STATUS_LABEL[x.status]} · 중요도 ${PRIORITY[x.priority]}${x.roles.length ? ` · ${x.roles.join(", ")}` : ""}*`, "");
+    if (x.summary) out.push(x.summary, "");
+    if (x.rationale) out.push(`- 근거: ${x.rationale}`);
+    if (x.success) out.push(`- 성공 기준: ${x.success}`);
+    if (x.rationale || x.success) out.push("");
+    if (x.criteria?.length) out.push("**수용 기준**", "", ...x.criteria.map((c) => `- [ ] ${c}`), "");
+    const slots = SLOTS.filter(([k]) => !x.offSlots?.includes(k) && x.slots?.[k]?.some((s) => s.trim()));
+    if (slots.length) {
+      out.push("**개발 준비**", "", "| 항목 | 내용 |", "|---|---|");
+      slots.forEach(([k, label]) => out.push(`| ${label} | ${x.slots![k]!.filter((s) => s.trim()).join("<br>").replace(/\|/g, "\\|")} |`));
+      out.push("");
+    }
+  });
+  return out;
+}
+
+const mid = (id: string) => id.replace(/[^A-Za-z0-9_]/g, "_");
+const mlabel = (s: string) => s.replace(/["\[\]{}()<>|]/g, " ").trim() || " ";
+
+export function flowMermaid(f: Flow) {
+  const shape = (k: keyof typeof KIND_LABEL, l: string) => {
+    const t = `"${mlabel(l)}"`;
+    return k === "start" ? `([${t}])` : k === "data" ? `[/${t}/]` : k === "branch" ? `{${t}}` : k === "action" ? `((${t}))` : `[${t}]`;
+  };
+  const out = ["flowchart TD"];
+  f.sections.forEach((s, i) => {
+    out.push(`  subgraph S${i}["${mlabel(s)}"]`);
+    f.nodes.filter((n) => n.section === s).forEach((n) => out.push(`    ${mid(n.id)}${shape(n.kind, n.label)}`));
+    out.push("  end");
+  });
+  f.nodes.filter((n) => !f.sections.includes(n.section)).forEach((n) => out.push(`  ${mid(n.id)}${shape(n.kind, n.label)}`));
+  f.edges.forEach((e) => out.push(`  ${mid(e.from)} -->${e.label ? `|"${mlabel(e.label)}"|` : ""} ${mid(e.to)}`));
+  return out.join("\n");
+}
+
+function flowList(f: Flow) {
+  const name = (id: string) => f.nodes.find((n) => n.id === id)?.label ?? "?";
+  const out: string[] = [];
+  f.sections.forEach((s) => {
+    out.push(`#### ${s}`, "");
+    f.nodes.filter((n) => n.section === s).forEach((n) => {
+      out.push(`- (${KIND_LABEL[n.kind]}) ${n.label}`);
+      f.edges.filter((e) => e.from === n.id).forEach((e) => out.push(`  - → ${name(e.to)}${e.label ? ` (${e.label})` : ""}`));
+    });
+    out.push("");
+  });
+  return out;
+}
+
+export interface ExportOptions { mermaid?: boolean }
+
+export function toMarkdown(p: Project, opts: ExportOptions = {}) {
   const out: string[] = [`# ${p.name}`, "", `> ${p.idea}`, ""];
   if (p.prd) {
     out.push("## PRD", "");
+    if (p.prdProps) {
+      out.push(`- 카테고리: ${p.prdProps.category}`, `- 사용자 역할: ${p.prdProps.roles.join(", ")}`, `- 기기: ${p.prdProps.devices.join(", ")}`, "");
+    }
     p.prd.forEach((s) => {
       out.push(`### ${s.title}`, "");
       s.blocks.forEach((b) => out.push(`**${b.label}**`, "", b.body, ""));
     });
   }
-  if (p.groups) {
+  if (p.spec?.length) {
     out.push("## 기능명세서", "");
-    p.groups.forEach((g) => {
-      out.push(`### ${g.code}. ${g.title}`, "");
-      g.features.forEach((f) => {
-        out.push(`#### ${f.code} ${f.title}`, "", f.summary, "", `- 역할: ${f.roles.join(", ")}`, `- 중요도: ${f.priority}`, `- 상태: ${f.status}`);
-        f.criteria.forEach((c) => out.push(`- [ ] ${c}`));
-        out.push("");
-      });
+    out.push(...specMarkdown(p.spec));
+  }
+  const f = currentFlow(p);
+  if (f) {
+    out.push(`## 유저플로우 — ${f.name}`, "");
+    if (opts.mermaid) out.push("```mermaid", flowMermaid(f), "```", "");
+    else out.push(...flowList(f));
+  }
+  const w = currentWires(p);
+  if (w) {
+    out.push(`## 와이어프레임 (${w.device === "mobile" ? "모바일" : "데스크톱"}, ${w.pages.length}페이지)`, "");
+    const sections = [...new Set(w.pages.map((x) => x.section))];
+    sections.forEach((s) => {
+      out.push(`### ${s}`, "");
+      w.pages.filter((x) => x.section === s).forEach((x) => out.push(`- ${x.name} (요소 ${x.els.length}개)`));
+      out.push("");
     });
   }
   return out.join("\n");
 }
 
+// Deliverables only, in a shape other tools can read.
+export function toDeliverablesJson(p: Project) {
+  const strip = (x: SpecItem): unknown => ({
+    code: x.code, level: LEVEL_LABEL[x.level], title: x.title, summary: x.summary, rationale: x.rationale, success: x.success,
+    criteria: x.criteria ?? [], roles: x.roles, status: STATUS_LABEL[x.status], priority: PRIORITY[x.priority],
+    slots: Object.fromEntries(SLOTS.filter(([k]) => x.slots?.[k]?.length && !x.offSlots?.includes(k)).map(([k, l]) => [l, x.slots![k]])),
+    children: x.children.filter((c) => c.pending?.kind !== "new").map(strip),
+  });
+  const f = currentFlow(p);
+  const w = currentWires(p);
+  return JSON.stringify({
+    name: p.name, idea: p.idea, prd: p.prd, prdProps: p.prdProps,
+    spec: (p.spec ?? []).filter((x) => x.pending?.kind !== "new").map(strip),
+    flow: f ? { name: f.name, sections: f.sections, nodes: f.nodes, edges: f.edges, mermaid: flowMermaid(f) } : null,
+    wireframe: w ? { device: w.device, pages: w.pages.map((x) => ({ name: x.name, section: x.section, nodeId: x.nodeId, elements: x.els.length })) } : null,
+  }, null, 2);
+}
+
 const csvCell = (v: string) => `"${v.replace(/"/g, '""')}"`;
 
-export function exportMarkdown(p: Project) {
-  download(`${p.name}.md`, toMarkdown(p), "text/markdown");
+export function exportMarkdown(p: Project, opts: ExportOptions = {}) {
+  download(`${p.name}.md`, toMarkdown(p, opts), "text/markdown");
 }
 
 export function exportCsv(p: Project) {
-  const rows = [["번호", "기능 묶음", "기능", "설명", "역할", "중요도", "상태", "수용 기준"]];
-  p.groups?.forEach((g) => g.features.forEach((f) =>
-    rows.push([f.code, g.title, f.title, f.summary, f.roles.join(", "), ({ 3: "높음", 2: "보통", 1: "낮음" } as const)[f.priority], ({ draft: "작성 중", review: "검토 중", done: "확정" } as const)[f.status], f.criteria.join(" / ")])));
+  const num = numbering(p.spec ?? []);
+  const rows = [["번호", "코드", "단계", "이름", "설명", "역할", "중요도", "상태", "수용 기준", ...SLOTS.map(([, l]) => l)]];
+  flatten(p.spec).filter((x) => x.pending?.kind !== "new").forEach((x) => rows.push([
+    num[x.id], x.code, LEVEL_LABEL[x.level], x.title, x.summary, x.roles.join(", "), PRIORITY[x.priority], STATUS_LABEL[x.status],
+    (x.criteria ?? []).join(" / "), ...SLOTS.map(([k]) => (x.slots?.[k] ?? []).join(" / ")),
+  ]));
   // BOM so Excel opens Korean text correctly.
   download(`${p.name}-기능명세서.csv`, "﻿" + rows.map((r) => r.map(csvCell).join(",")).join("\n"), "text/csv");
+}
+
+export function exportDeliverables(p: Project) {
+  download(`${p.name}-기획서.json`, toDeliverablesJson(p), "application/json");
 }
 
 export function exportJson(p: Project) {

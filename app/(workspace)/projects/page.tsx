@@ -8,9 +8,9 @@ import { importProject, trashProject, updateProject, useProjects } from "@/lib/s
 const fmt = (t: number) => new Date(t).toLocaleDateString("ko-KR", { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
 function stage(p: ReturnType<typeof useProjects>[number]) {
-  if (p.screens) return "와이어프레임";
-  if (p.flow) return "유저플로우";
-  if (p.groups) return "기능명세서";
+  if (p.wires?.length) return "와이어프레임";
+  if (p.flows?.length) return "유저플로우";
+  if (p.spec?.length) return "기능명세서";
   if (p.prd) return "PRD";
   return "질문 중";
 }
