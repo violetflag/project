@@ -319,8 +319,26 @@ const soon = () => {
   timer = setTimeout(syncNow, 1500);
 };
 
+// Optional old behaviour: save shortly after every edit, on returning to the tab and every minute.
+const AUTO = "planspace.sync.auto";
+export function getAutoSave() {
+  try {
+    return localStorage.getItem(AUTO) === "1";
+  } catch {
+    return false;
+  }
+}
+export function setAutoSave(on: boolean) {
+  localStorage.setItem(AUTO, on ? "1" : "0");
+  listeners.forEach((l) => l());
+  if (on) soon();
+}
+export function useAutoSave() {
+  return useSyncExternalStore(subscribe, getAutoSave, () => false);
+}
+
 // Drive is written when a deliverable is made (PRD, flow, wireframe, review),
-// when the save button is pressed, and when the app opens or signs in, never on every edit.
+// when the save button is pressed, and when the app opens or signs in; every edit only with auto-save on.
 export function saveToDrive() {
   if (!readAuth()) return;
   clearTimeout(timer);
@@ -335,7 +353,10 @@ export function startSync() {
   onLocalProjectsChange(() => {
     changes++;
     listeners.forEach((l) => l());
+    if (getAutoSave()) soon();
   });
+  document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && getAutoSave() && syncNow());
+  setInterval(() => document.visibilityState === "visible" && getAutoSave() && syncNow(), 60_000);
   // The key and AI settings are small and rarely change, so they still save on their own.
   onLocalAiChange(soon);
   // An expired token is renewed on the next tap anywhere, since that counts as a click.

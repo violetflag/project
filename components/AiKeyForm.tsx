@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import {
   CONTEXTS, EFFORTS, MODELS, modelLabel, setAiSettings, setApiKey, useAiSettings, useApiKey,
 } from "@/lib/ai";
+import { setAutoSave, useAutoSave, useSync } from "@/lib/sync";
 import { useIsMobile } from "@/lib/useMedia";
 import { useDismiss } from "./Popover";
 import { ChevronDown, Close } from "./icons";
@@ -70,7 +71,25 @@ export function AiKeyForm() {
       <Select label="모델" value={s.model} options={MODELS} onChange={(model) => setAiSettings({ model })} />
       <Select label="노력 (생각하는 깊이)" value={s.effort} options={EFFORTS} onChange={(effort) => setAiSettings({ effort })} />
       <Select label="컨텍스트 크기" value={s.context} options={CONTEXTS} onChange={(context) => setAiSettings({ context })} />
+      <AutoSaveToggle />
     </div>
+  );
+}
+
+function AutoSaveToggle() {
+  const sync = useSync();
+  const on = useAutoSave();
+  if (sync.status === "off") return null;
+  return (
+    <label className="flex cursor-pointer items-start gap-2 border-t border-border pt-3">
+      <input type="checkbox" checked={on} onChange={(e) => setAutoSave(e.target.checked)} aria-label="드라이브 자동 저장" className="mt-0.5 h-4 w-4 accent-[var(--color-primary)]" />
+      <span>
+        <span className="block text-xs text-foreground-support">구글 드라이브 자동 저장</span>
+        <span className="mt-0.5 block text-[11px] leading-relaxed text-foreground-muted">
+          켜면 고칠 때마다, 화면으로 돌아올 때, 1분마다 드라이브에 저장해요. 꺼도 결과물이 나올 때와 💾 버튼을 누를 때는 저장돼요. 이 기기에만 적용돼요.
+        </span>
+      </span>
+    </label>
   );
 }
 
