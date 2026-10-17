@@ -63,7 +63,7 @@ export function AiKeyForm() {
         <p className="text-xs text-foreground-support">Anthropic API 키</p>
         <KeyField />
         <p className="text-[11px] leading-relaxed text-foreground-muted">
-          키는 이 브라우저(구글 로그인 시 내 구글 드라이브의 숨김 폴더)에만 저장되고 Anthropic으로만 보내져요. 키가 없으면 기본 생성기가 템플릿으로 만들어요.{" "}
+          키는 이 브라우저(구글 로그인 시 내 구글 드라이브의 PlanSpace 폴더)에만 저장되고 Anthropic으로만 보내져요. 키가 없으면 기본 생성기가 템플릿으로 만들어요.{" "}
           <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-primary hover:underline">키 발급받기</a>
         </p>
       </div>

@@ -1,8 +1,9 @@
 "use client";
 
 // Google sign-in and sync. The projects, the Anthropic key and the AI settings
-// are kept in one JSON file in the user's own Google Drive "app data" folder,
-// a hidden folder only this app can read. No server of our own is involved.
+// are kept in one JSON file, PlanSpace/planspace.json, in the user's own Google
+// Drive. The drive.file scope only lets the app see files it created itself.
+// No server of our own is involved.
 
 import { useSyncExternalStore } from "react";
 import { applySyncedAi, getAiSettings, getAiUpdatedAt, getApiKey, onLocalAiChange, type AiSettings } from "./ai";
@@ -11,7 +12,9 @@ import type { Project } from "./types";
 
 // Public OAuth client id (not a secret); allowed origin is https://violetflag.github.io.
 export const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "506759743876-b9p88u1n8k2ra0u7q5h67oqvika7043c.apps.googleusercontent.com";
-const SCOPE = "https://www.googleapis.com/auth/drive.appdata openid email profile";
+// drive.appdata is only read to move data saved by the first version (hidden app folder).
+const SCOPE = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.appdata openid email profile";
+const FOLDER = "PlanSpace";
 const FILE = "planspace.json";
 const AUTH = "planspace.google";
 
@@ -118,43 +121,86 @@ async function requestToken(prompt: "" | "select_account", hint?: string): Promi
 // --- Drive ----------------------------------------------------------------
 
 class Expired extends Error {}
+class Gone extends Error {}
+
+const API = "https://www.googleapis.com/drive/v3/files";
+const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
 
 async function drive(auth: Auth, url: string, init: RequestInit = {}) {
   const r = await fetch(url, { ...init, headers: { ...init.headers, Authorization: `Bearer ${auth.token}` } });
-  if (r.status === 401) throw new Expired();
+  // 403 here means a permission (such as the new folder scope) hasn't been granted yet: ask again.
+  if (r.status === 401 || r.status === 403) throw new Expired();
+  if (r.status === 404) throw new Gone();
   if (!r.ok) throw new Error(`구글 드라이브 오류 (${r.status})`);
   return r;
 }
 
+async function list(auth: Auth, q: string, space = "drive") {
+  const r = await drive(auth, `${API}?spaces=${space}&q=${encodeURIComponent(q)}&fields=files(id)&orderBy=modifiedTime desc`);
+  return ((await r.json()).files ?? []) as { id: string }[];
+}
+
+let folderId: string | null = null;
 let fileId: string | null = null;
+
+async function folder(auth: Auth) {
+  if (folderId) return folderId;
+  const found = await list(auth, `name='${FOLDER}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+  if (found[0]) return (folderId = found[0].id);
+  const r = await drive(auth, `${API}?fields=id`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: FOLDER, mimeType: "application/vnd.google-apps.folder" }),
+  });
+  return (folderId = (await r.json()).id as string);
+}
+
 async function findFile(auth: Auth) {
   if (fileId) return fileId;
-  const q = encodeURIComponent(`name='${FILE}'`);
-  const r = await drive(auth, `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id)`);
-  fileId = (await r.json()).files?.[0]?.id ?? null;
+  const dir = await folder(auth);
+  fileId = (await list(auth, `name='${FILE}' and '${dir}' in parents and trashed=false`))[0]?.id ?? null;
   return fileId;
 }
 
-async function pull(auth: Auth): Promise<Remote | null> {
-  const id = await findFile(auth);
-  if (!id) return null;
-  const r = await drive(auth, `https://www.googleapis.com/drive/v3/files/${id}?alt=media`);
-  return r.json();
+async function read(auth: Auth, id: string): Promise<Remote> {
+  return (await drive(auth, `${API}/${id}?alt=media`)).json();
+}
+
+// Data saved by the first version, in the hidden app folder.
+async function legacy(auth: Auth): Promise<Remote | null> {
+  try {
+    const old = (await list(auth, `name='${FILE}'`, "appDataFolder"))[0];
+    return old ? await read(auth, old.id) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Returns the saved data; fromLegacy means it still has to be written to the PlanSpace folder.
+async function pull(auth: Auth): Promise<{ remote: Remote | null; fromLegacy?: boolean }> {
+  try {
+    const id = await findFile(auth);
+    if (id) return { remote: await read(auth, id) };
+    const old = await legacy(auth);
+    return { remote: old, fromLegacy: !!old };
+  } catch (e) {
+    // The folder or file was deleted in Drive: start over and recreate them.
+    if (!(e instanceof Gone)) throw e;
+    folderId = fileId = null;
+    return { remote: null };
+  }
 }
 
 async function push(auth: Auth, data: Remote) {
   const body = JSON.stringify(data);
   const id = await findFile(auth);
   if (id) {
-    await drive(auth, `https://www.googleapis.com/upload/drive/v3/files/${id}?uploadType=media`, {
-      method: "PATCH", headers: { "Content-Type": "application/json" }, body,
-    });
+    await drive(auth, `${UPLOAD}/${id}?uploadType=media`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body });
     return;
   }
   const form = new FormData();
-  form.append("metadata", new Blob([JSON.stringify({ name: FILE, parents: ["appDataFolder"] })], { type: "application/json" }));
+  form.append("metadata", new Blob([JSON.stringify({ name: FILE, parents: [await folder(auth)] })], { type: "application/json" }));
   form.append("file", new Blob([body], { type: "application/json" }));
-  const r = await drive(auth, "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id", { method: "POST", body: form });
+  const r = await drive(auth, `${UPLOAD}?uploadType=multipart&fields=id`, { method: "POST", body: form });
   fileId = (await r.json()).id;
 }
 
@@ -197,7 +243,7 @@ async function syncOnce() {
   if (!valid(auth)) return set({ status: "expired", user: auth });
   set({ status: "syncing", user: auth });
   try {
-    const remote = await pull(auth);
+    const { remote, fromLegacy } = await pull(auth);
     const purged = [...new Set([...getPurged(), ...(remote?.purged ?? [])])];
     const local = getAllProjects();
     const projects = merge(local, remote?.projects ?? [], purged);
@@ -213,7 +259,7 @@ async function syncOnce() {
     }
 
     const next: Remote = { version: 1, savedAt: Date.now(), projects, purged, apiKey, ai, aiAt };
-    if (!remote || !same({ ...remote, savedAt: 0 }, { ...next, savedAt: 0 })) await push(auth, next);
+    if (!remote || fromLegacy || !same({ ...remote, savedAt: 0 }, { ...next, savedAt: 0 })) await push(auth, next);
     set({ status: "synced", user: auth, at: Date.now() });
   } catch (e) {
     if (e instanceof Expired) return set({ status: "expired", user: auth });
@@ -225,7 +271,7 @@ async function syncOnce() {
 
 export async function signIn() {
   const auth = await requestToken("select_account");
-  fileId = null;
+  folderId = fileId = null;
   writeAuth(auth);
   await syncNow();
 }
@@ -253,7 +299,7 @@ export async function signOut() {
     window.google?.accounts.oauth2.revoke(auth.token);
   }
   writeAuth(null);
-  fileId = null;
+  folderId = fileId = null;
   applySyncedProjects([], []);
   applySyncedAi("", getAiSettings(), 0);
   set({ status: "signed-out" });
