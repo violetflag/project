@@ -13,19 +13,18 @@ import { FlowView } from "./FlowView";
 import { PrdView } from "./PrdView";
 import { SaveButton } from "../SaveButton";
 import { ShareDialog } from "./ShareDialog";
-import { CommentsPanel, CustomizePanel, DocsPanel, ReviewPanel, VersionsPanel } from "./SidePanels";
+import { CustomizePanel, ReviewPanel, VersionsPanel } from "./SidePanels";
 import { WireframeView } from "./WireframeView";
 
-type Panel = "chat" | "review" | "docs" | "comments" | "custom" | "versions";
+type Panel = "chat" | "review" | "custom" | "versions";
 type Tab = "prd" | "features" | "flow" | "wire";
 
 const RAIL: [Panel, string, string][] = [
-  ["chat", "채팅", "💬"], ["review", "검토", "🔍"], ["docs", "문서함", "🗂"],
-  ["comments", "코멘트", "📝"], ["custom", "커스텀", "🎛"], ["versions", "버전", "🕘"],
+  ["chat", "채팅", "💬"], ["review", "검토", "🔍"], ["custom", "커스텀", "🎛"], ["versions", "버전", "🕘"],
 ];
 const TABS: [Tab, string][] = [["prd", "PRD"], ["features", "기능명세서"], ["flow", "유저플로우"], ["wire", "와이어프레임"]];
 const PANEL_TITLE: Record<Panel, string> = {
-  chat: "채팅", review: "검토", docs: "문서함", comments: "코멘트", custom: "프로젝트 커스터마이징", versions: "버전",
+  chat: "채팅", review: "검토", custom: "프로젝트 커스터마이징", versions: "버전",
 };
 const REVIEW_ONLY = "검토는 PRD와 기능명세서 탭에서 쓸 수 있어요";
 
@@ -89,15 +88,12 @@ export function EditorShell({ p }: { p: Project }) {
   const stale: Record<Tab, boolean> = { prd: false, features: false, flow: !!p.stale?.flow && filled.flow, wire: !!p.stale?.wire && filled.wire };
   const anyStale = stale.flow || stale.wire;
   const busy = isBusy(p);
-  const openComments = p.comments.filter((c) => !c.resolved).length;
   const openFindings = p.findings?.filter((f) => f.state === "open").length ?? 0;
 
   const panelBody = (k: Panel) => (
     <>
       {k === "chat" && <ChatPanel p={p} onGoto={goto} />}
       {k === "review" && <ReviewPanel p={p} usable={reviewUsable} onGotoSpec={() => setTab("features")} onChat={() => showPanel("chat")} />}
-      {k === "docs" && <DocsPanel p={p} />}
-      {k === "comments" && <CommentsPanel p={p} />}
       {k === "custom" && <CustomizePanel key={p.id} p={p} />}
       {k === "versions" && <VersionsPanel p={p} />}
     </>
@@ -167,7 +163,6 @@ export function EditorShell({ p }: { p: Project }) {
           <button onClick={() => setMore((m) => !m)} aria-label="더보기"
             className={`relative flex flex-1 flex-col items-center py-2 text-[11px] ${inMore || more ? "text-foreground" : "text-foreground-muted"}`}>
             <span className="text-base">⋯</span>더보기
-            {openComments > 0 && <span className="absolute top-1.5 right-[35%] h-1.5 w-1.5 rounded-full bg-primary" />}
           </button>
         </nav>
         {more && (
@@ -178,7 +173,6 @@ export function EditorShell({ p }: { p: Project }) {
                 <button key={k} onClick={() => { setMobilePane(k); setMore(false); }} aria-label={label}
                   className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm hover:bg-surface">
                   <span className="grayscale">{icon}</span>{PANEL_TITLE[k]}
-                  {k === "comments" && openComments > 0 && <span className="ml-auto text-xs text-primary">{openComments}</span>}
                 </button>
               ))}
             </div>
@@ -200,7 +194,6 @@ export function EditorShell({ p }: { p: Project }) {
               className={`relative flex w-12 flex-col items-center rounded-md py-1.5 text-[10px] ${off ? "cursor-not-allowed opacity-40" : panel === k ? "bg-border text-foreground" : "text-foreground-muted hover:bg-surface"}`}>
               <span className="text-sm grayscale">{icon}</span>{label}
               {k === "review" && openFindings > 0 && <span className="absolute top-1 right-2 h-1.5 w-1.5 rounded-full bg-amber-500" />}
-              {k === "comments" && openComments > 0 && <span className="absolute top-1 right-2 h-1.5 w-1.5 rounded-full bg-primary" />}
             </button>
           );
         })}

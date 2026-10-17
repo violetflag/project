@@ -17,7 +17,7 @@ import { cleanSlots, generatePrd, slotGuide, SlotsSchema, slotWords } from "./sp
 import {
   blankItem, findItem, flatten, insertItem, LEVEL_LABEL, pathTo, proposeEdit, specText,
 } from "./spec-model";
-import type { ChatOption, Decision, Finding, Perspective, PrdSection, Project, SpecCore, SpecItem } from "./types";
+import type { ChatOption, Finding, Perspective, PrdSection, Project, SpecCore, SpecItem } from "./types";
 
 export { aiEnabled, isBusy } from "./run";
 
@@ -729,53 +729,10 @@ function sendChatLocal(id: string, text: string, echo = true) {
   say("요청을 이해했어요. @로 항목을 집은 뒤 \"더 구체화해줘\", \"OO 기능 추가해줘\", \"기획 검토해줘\"처럼 말씀해 주시면 기능명세서에 수정안으로 반영할게요. (AI를 연결하면 자유롭게 질문할 수 있어요.)");
 }
 
-// --- Comments, docs, settings --------------------------------------------------------------------
-
-export function addComment(id: string, text: string, featureId?: string) {
-  updateProject(id, (p) => ({ ...p, comments: [...p.comments, { id: uid("cm_"), featureId, author: "나", text, at: Date.now() }] }));
-}
-export function toggleComment(id: string, cid: string) {
-  updateProject(id, (p) => ({ ...p, comments: p.comments.map((c) => (c.id === cid ? { ...c, resolved: !c.resolved } : c)) }));
-}
-export function deleteComment(id: string, cid: string) {
-  updateProject(id, (p) => ({ ...p, comments: p.comments.filter((c) => c.id !== cid) }));
-}
+// --- Versions, settings --------------------------------------------------------------------
 
 export function deleteVersion(id: string, vid: string) {
   updateProject(id, (p) => ({ ...p, versions: p.versions.filter((v) => v.id !== vid) }), "버전을 삭제했어요");
-}
-
-// Pulls decision-like lines out of pasted meeting notes.
-export function extractDecisions(id: string, title: string, body: string) {
-  const lines = body.split(/\n+/).map((l) => l.replace(/^[\s\-*•\d.)]+/, "").trim()).filter(Boolean);
-  const decisions: Decision[] = lines.flatMap<Decision>((l) => {
-    if (/(안 ?한다|하지 않|제외|기각|빼기로)/.test(l)) return [{ id: uid("d_"), state: "기각" as const, text: l, source: title }];
-    if (/(한다|하기로|결정|확정|정함|통일)/.test(l)) return [{ id: uid("d_"), state: "확정" as const, text: l, source: title }];
-    if (/(\?|검토|논의|미정|추후)/.test(l)) return [{ id: uid("d_"), state: "미정" as const, text: l, source: title }];
-    return [];
-  });
-  updateProject(id, (p) => ({
-    ...p,
-    notes: [{ id: uid("n_"), title, body, at: Date.now() }, ...p.notes],
-    decisions: [...decisions, ...p.decisions],
-  }), `회의록 '${title}'에서 결정 ${decisions.length}개를 뽑았어요`);
-  return decisions.length;
-}
-
-export function addNote(id: string, title: string, body: string) {
-  updateProject(id, (p) => ({ ...p, notes: [{ id: uid("n_"), title, body, at: Date.now() }, ...p.notes] }), `노트 '${title}'을 추가했어요`);
-}
-
-// A confirmed decision goes into the PRD's last section (risk & scope) as a block.
-export function applyDecision(id: string, did: string) {
-  updateProject(id, (p) => {
-    const d = p.decisions.find((x) => x.id === did);
-    if (!d || !p.prd?.length) return p;
-    const at = p.prd.findIndex((s) => s.id === "risk");
-    const i = at >= 0 ? at : p.prd.filter((s) => s.id !== LATER_ID).length - 1;
-    const prd = p.prd.map((s, k) => (k !== i ? s : { ...s, blocks: [...s.blocks, { label: `결정 (${d.source})`, body: d.text }] }));
-    return { ...p, prd, decisions: p.decisions.map((x) => (x.id === did ? { ...x, applied: true } : x)) };
-  }, "결정을 기획서에 반영했어요");
 }
 
 export function setSettings(id: string, settings: Project["settings"]) {

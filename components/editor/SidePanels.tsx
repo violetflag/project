@@ -2,10 +2,10 @@
 
 import { useCallback, useState } from "react";
 import {
-  addComment, applyDecision, deleteComment, deleteVersion, extractDecisions, fixFinding, isBusy, resolveFindingInChat, review,
-  setFinding, setSettings, toggleComment,
+  deleteVersion, fixFinding, isBusy, resolveFindingInChat, review,
+  setFinding, setSettings,
 } from "@/lib/actions";
-import { findItem, flatten } from "@/lib/spec-model";
+import { findItem } from "@/lib/spec-model";
 import { PERSPECTIVES } from "@/lib/types";
 import type { Perspective, Project, ProjectSettings } from "@/lib/types";
 import { josa } from "@/lib/josa";
@@ -121,105 +121,6 @@ export function ReviewPanel({ p, onChat, usable, onGotoSpec }: { p: Project; onC
 }
 
 // --- Docs ---------------------------------------------------------------------------------------
-
-export function DocsPanel({ p }: { p: Project }) {
-  const [tab, setTab] = useState<"결정" | "회의록">("결정");
-  const [writing, setWriting] = useState(false);
-  const [title, setTitle] = useState("");
-  const [body, setBody] = useState("");
-  return (
-    <div className="flex h-full flex-col">
-      <div className="flex gap-1 px-4 pt-3">
-        {(["결정", "회의록"] as const).map((t) => (
-          <button key={t} onClick={() => setTab(t)} className={`rounded-md px-2.5 py-1 text-xs ${tab === t ? "bg-border font-medium" : "text-foreground-support"}`}>{t}</button>
-        ))}
-      </div>
-      <div className="flex-1 overflow-y-auto px-4 py-3">
-        {writing ? (
-          <div className="space-y-2">
-            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="회의 제목" aria-label="회의 제목" className="w-full rounded-md border border-border px-2 py-1.5 text-sm outline-none focus:border-primary" />
-            <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={10} aria-label="회의 내용"
-              placeholder={"회의 내용을 붙여 넣으세요.\n예) 첫 출시는 웹으로 한다\n예) 결제는 다음 버전에서 검토\n예) 단체 요금제는 만들지 않는다"}
-              className="w-full rounded-md border border-border px-2 py-1.5 text-sm outline-none focus:border-primary" />
-            <div className="flex gap-2">
-              <button onClick={() => { extractDecisions(p.id, title || "제목 없는 회의", body); setWriting(false); setTitle(""); setBody(""); setTab("결정"); }}
-                disabled={!body.trim()} className="rounded-md bg-primary px-3 py-1.5 text-sm text-white disabled:opacity-40">결정 뽑아내기</button>
-              <button onClick={() => setWriting(false)} className="rounded-md border border-border px-3 py-1.5 text-sm">취소</button>
-            </div>
-          </div>
-        ) : tab === "결정" ? (
-          p.decisions.length ? p.decisions.map((d) => (
-            <div key={d.id} className="mb-2 rounded-lg border border-border bg-background p-3">
-              <span className={`rounded px-1.5 py-0.5 text-[10px] ${d.state === "확정" ? "bg-green-100 text-green-700" : d.state === "기각" ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-700"}`}>{d.state}</span>
-              <p className="mt-1.5 text-sm">{d.text}</p>
-              <p className="mt-1 text-[11px] text-foreground-muted">근거: {d.source}</p>
-              {d.state === "확정" && (d.applied
-                ? <p className="mt-1.5 text-[11px] text-green-700">PRD에 반영됨</p>
-                : <button onClick={() => applyDecision(p.id, d.id)} disabled={!p.prd} className="mt-1.5 text-xs text-primary disabled:opacity-40">PRD에 반영</button>)}
-            </div>
-          )) : <Empty text="아직 정리된 결정이 없어요. 회의록을 올리면 결정만 골라 드려요." />
-        ) : p.notes.length ? p.notes.map((n) => (
-          <details key={n.id} className="mb-2 rounded-lg border border-border bg-background p-3">
-            <summary className="cursor-pointer text-sm">{n.title} <span className="text-[11px] text-foreground-muted">{fmt(n.at)}</span></summary>
-            <p className="mt-2 text-xs whitespace-pre-line text-foreground-support">{n.body}</p>
-          </details>
-        )) : <Empty text="아직 올린 회의록이 없어요." />}
-      </div>
-      {!writing && (
-        <button onClick={() => setWriting(true)} className="m-3 rounded-md bg-primary py-2 text-sm font-medium text-white">+ 회의록 올리기</button>
-      )}
-    </div>
-  );
-}
-
-// --- Comments -------------------------------------------------------------------------------------
-
-export function CommentsPanel({ p }: { p: Project }) {
-  const [text, setText] = useState("");
-  const [target, setTarget] = useState("");
-  const [showResolved, setShowResolved] = useState(false);
-  const list = p.comments.filter((c) => showResolved || !c.resolved);
-  const items = flatten(p.spec).filter((x) => x.pending?.kind !== "new");
-  return (
-    <div className="flex h-full flex-col">
-      <label className="flex items-center gap-1.5 px-4 pt-3 text-xs text-foreground-support">
-        <input type="checkbox" checked={showResolved} onChange={(e) => setShowResolved(e.target.checked)} /> 해결된 코멘트도 보기
-      </label>
-      <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
-        {list.length ? list.map((c) => {
-          const it = c.featureId ? findItem(p.spec, c.featureId) : undefined;
-          return (
-            <div key={c.id} className={`rounded-lg border border-border bg-background p-3 ${c.resolved ? "opacity-50" : ""}`}>
-              {c.featureId && <p className="mb-1 text-[11px] text-primary">@ {it ? `${it.code} ${it.title}` : "삭제된 항목"}</p>}
-              <p className="text-sm whitespace-pre-line">{c.text}</p>
-              <div className="mt-1.5 flex items-center gap-3 text-[11px] text-foreground-muted">
-                <span className="mr-auto">{c.author} · {fmt(c.at)}</span>
-                <button onClick={() => toggleComment(p.id, c.id)}>{c.resolved ? "다시 열기" : "해결"}</button>
-                <button onClick={() => deleteComment(p.id, c.id)} className="hover:text-red-500">삭제</button>
-              </div>
-            </div>
-          );
-        }) : <Empty text="아직 코멘트가 없어요. 기능명세서 항목에서도 남길 수 있어요." />}
-      </div>
-      <form className="m-3 space-y-1.5" onSubmit={(e) => { e.preventDefault(); if (text.trim()) { addComment(p.id, text.trim(), target || undefined); setText(""); } }}>
-        {items.length > 0 && (
-          <select value={target} onChange={(e) => setTarget(e.target.value)} aria-label="코멘트 대상"
-            className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs">
-            <option value="">프로젝트 전체</option>
-            {items.map((x) => <option key={x.id} value={x.id}>{"  ".repeat(x.level - 1)}{x.code} {x.title}</option>)}
-          </select>
-        )}
-        <div className="flex gap-2">
-          <input value={text} onChange={(e) => setText(e.target.value)} placeholder="코멘트 남기기" aria-label="코멘트 입력"
-            className="min-w-0 flex-1 rounded-md border border-border px-2 py-2 text-sm outline-none focus:border-primary" />
-          <button disabled={!text.trim()} className="rounded-md bg-primary px-3 text-sm text-white disabled:opacity-40">남기기</button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-// --- Versions -------------------------------------------------------------------------------------
 
 function VersionMenu({ onRestore, onDelete }: { onRestore: () => void; onDelete: () => void }) {
   const [open, setOpen] = useState(false);
