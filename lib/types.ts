@@ -164,7 +164,11 @@ export interface Finding {
   scenario?: string;
   evidence?: string;
   featureId?: string;
+  // How to resolve it, proposed with the finding; [해결] applies it.
+  fix?: string;
   state: "open" | "resolved" | "held";
+  // ai: [해결] applied the fix; chat: solved by picking an option in chat. Resolved findings stay closed.
+  resolvedBy?: "ai" | "chat";
 }
 
 export interface Comment {

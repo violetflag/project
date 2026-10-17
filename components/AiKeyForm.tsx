@@ -136,9 +136,20 @@ export function AiPicker({ up = false }: { up?: boolean }) {
   const s = useAiSettings();
   const [open, setOpen] = useState(false);
   const [dialog, setDialog] = useState(false);
+  // Fixed to the viewport so a narrow or clipped parent (the chat panel) can't cut the menu off.
+  const [pos, setPos] = useState<React.CSSProperties>({});
   const close = useCallback(() => setOpen(false), []);
   const ref = useDismiss(open, close);
   const mobile = useIsMobile();
+  const toggle = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const w = 288, gap = 8;
+    const left = Math.max(gap, Math.min(r.left, window.innerWidth - w - gap));
+    const roomUp = r.top - gap * 2, roomDown = window.innerHeight - r.bottom - gap * 2;
+    const goUp = up ? roomUp > 240 || roomUp > roomDown : roomDown < 240 && roomUp > roomDown;
+    setPos(goUp ? { left, bottom: window.innerHeight - r.top + 4, maxHeight: roomUp } : { left, top: r.bottom + 4, maxHeight: roomDown });
+    setOpen((o) => !o);
+  };
   if (!key) {
     return (
       <>
@@ -153,14 +164,14 @@ export function AiPicker({ up = false }: { up?: boolean }) {
   const effort = EFFORTS.find((e) => e.id === s.effort)?.label;
   return (
     <div ref={ref} className="relative">
-      <button type="button" onClick={() => setOpen((o) => !o)} aria-label="AI 모델 선택"
+      <button type="button" onClick={toggle} aria-label="AI 모델 선택"
         className="inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-xs text-foreground-support hover:bg-surface hover:text-foreground">
         {modelLabel(s.model)} <span className="text-foreground-muted">· {effort}</span> <ChevronDown className="h-3 w-3" />
       </button>
       {open && (
         <div className={`animate-fade-up z-40 overflow-y-auto rounded-lg border border-border bg-background p-1 shadow-lg ${
           // On phones the menu is a bottom sheet so every section fits on screen.
-          mobile ? "fixed inset-x-2 bottom-2 max-h-[80dvh] pb-[env(safe-area-inset-bottom)]" : `absolute right-0 max-h-[70dvh] w-72 ${up ? "bottom-full mb-1" : "top-full mt-1"}`}`}>
+          mobile ? "fixed inset-x-2 bottom-2 max-h-[80dvh] pb-[env(safe-area-inset-bottom)]" : "fixed w-72"}`} style={mobile ? undefined : pos}>
           <Section title="모델" value={s.model} options={MODELS} onPick={(model) => setAiSettings({ model })} />
           <div className="border-t border-border" />
           <Section title="노력" value={s.effort} options={EFFORTS} onPick={(effort) => setAiSettings({ effort })} />

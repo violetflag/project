@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from "react";
 import {
-  addComment, applyDecision, deleteComment, deleteVersion, extractDecisions, isBusy, resolveFindingInChat, review,
+  addComment, applyDecision, deleteComment, deleteVersion, extractDecisions, fixFinding, isBusy, resolveFindingInChat, review,
   setFinding, setSettings, toggleComment,
 } from "@/lib/actions";
 import { findItem, flatten } from "@/lib/spec-model";
@@ -86,6 +86,11 @@ export function ReviewPanel({ p, onChat, usable, onGotoSpec }: { p: Project; onC
                   <span className="mb-0.5 block text-[10px] text-foreground-muted">예시 상황</span>{f.scenario}
                 </div>
               )}
+              {f.fix && (
+                <div className="mt-2 rounded-md border border-green-200 bg-green-50 px-2.5 py-2 text-xs leading-relaxed text-green-900">
+                  <span className="mb-0.5 block text-[10px] text-green-700">해결 방법</span>{f.fix}
+                </div>
+              )}
               {f.evidence && (
                 <details className="mt-1.5 text-xs">
                   <summary className="cursor-pointer text-foreground-muted">근거 인용</summary>
@@ -95,14 +100,17 @@ export function ReviewPanel({ p, onChat, usable, onGotoSpec }: { p: Project; onC
               {f.state === "open" ? (
                 <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
                   <button onClick={() => setFinding(p.id, f.id, "held")} aria-label="보류" className="rounded border border-border px-2 py-1">보류</button>
-                  <button onClick={() => setFinding(p.id, f.id, "resolved")} aria-label="해결" className="rounded border border-border px-2 py-1 text-green-700">✓ 해결</button>
+                  <button disabled={busy} onClick={() => { void fixFinding(p.id, f.id); onChat(); }} aria-label="해결"
+                    title="해결 방법대로 AI가 문서를 고쳐요" className="rounded border border-border px-2 py-1 text-green-700 disabled:opacity-50">✓ 해결</button>
                   <button disabled={busy} onClick={() => { resolveFindingInChat(p.id, f.id); onChat(); }} aria-label="채팅에서 해결하기"
                     className="rounded border border-primary/40 px-2 py-1 text-primary disabled:opacity-50">채팅에서 해결하기</button>
                 </div>
+              ) : f.state === "resolved" ? (
+                <p className="mt-2 text-xs font-medium text-green-700">
+                  ✓ {f.resolvedBy === "chat" ? "채팅에서 해결됨" : f.resolvedBy === "ai" ? "해결 방법대로 해결됨" : "해결됨"}
+                </p>
               ) : (
-                <button onClick={() => setFinding(p.id, f.id, "open")} className="mt-2 text-xs text-foreground-muted underline">
-                  {f.state === "resolved" ? "해결됨" : "보류됨"} · 다시 열기
-                </button>
+                <button onClick={() => setFinding(p.id, f.id, "open")} className="mt-2 text-xs text-foreground-muted underline">보류됨 · 다시 열기</button>
               )}
             </div>
           );

@@ -9,7 +9,7 @@ import { makeQuestions, shortName, summarizeAnswers } from "./generator";
 import {
   aiQuestions, aiSummary, ask, contextLimit, describeError, estTokens, fitHistory, materialText, prdText, styleOf,
 } from "./ai";
-import { ai, aiEnabled, me, withAi } from "./run";
+import { ai, aiEnabled, isBusy, me, withAi } from "./run";
 import { autoVersion } from "./versions";
 import { chatFlowPlan, flowOutline, localChatFlowPlan, type FlowPlan } from "./flow";
 import { matchPage, pageNodes, regeneratePage } from "./wire";
@@ -131,6 +131,7 @@ export const ReviewSchema = z.object({
     body: z.string(),
     scenario: z.string(),
     evidence: z.string(),
+    fix: z.string(),
     code: z.string(),
   })),
 });
@@ -164,13 +165,14 @@ ${specText(x.spec, true)}
 - title은 한 줄, body는 무엇이 문제이고 무엇을 정해야 하는지 2~3문장.
 - scenario는 이 서비스에서 실제로 벌어질 수 있는 구체적 상황 하나를 사람과 행동으로 씁니다.
 - evidence는 위 문서에서 근거가 되는 문장을 그대로 짧게 인용합니다. 빠진 것이 문제라면 가장 가까운 문장을 인용합니다.
+- fix는 이 문제를 해결하는 구체적인 방법 1~2문장입니다. 어떤 문서의 어떤 항목(코드와 이름)을 어떻게 바꾸거나 무엇을 새로 추가하는지 씁니다.
 - code는 가장 관련 있는 항목 코드(예: F-ABCDEF), 없으면 빈 문자열.
 ${styleOf(x)}`);
     step("검토 의견 정리 완료");
     const items = flatten(x.spec);
     const findings: Finding[] = out.findings.map((f) => ({
       id: uid("r_"), perspective: f.perspective, level: f.level, title: f.title, body: f.body,
-      scenario: f.scenario || undefined, evidence: f.evidence || undefined,
+      scenario: f.scenario || undefined, evidence: f.evidence || undefined, fix: f.fix || undefined,
       featureId: items.find((i) => i.code === f.code.trim())?.id, state: "open",
     }));
     updateProject(id, (y) => ({
@@ -196,7 +198,8 @@ function reviewLocal(p: Project): Finding[] {
   const quote = (x?: SpecItem) => (x ? `${x.code} ${x.title}: ${x.summary || "(설명 없음)"}` : undefined);
   const out: Finding[] = [];
   const add = (perspective: Perspective, level: Finding["level"], x: SpecItem | undefined, title: string, body: string, scenario: string) =>
-    out.push({ id: uid("r_"), perspective, level, title, body, scenario, evidence: quote(x), featureId: x?.id, state: "open" });
+    out.push({ id: uid("r_"), perspective, level, title, body, scenario, evidence: quote(x), featureId: x?.id, state: "open",
+      fix: x ? `${x.code} '${x.title}'의 설명과 수용 기준에 이 기준을 적어 넣어요: ${body}` : body });
   const roleOf = (x?: SpecItem) => x?.roles[0] ?? "사용자";
 
   // 개발
@@ -252,8 +255,36 @@ function reviewLocal(p: Project): Finding[] {
 }
 const slotFillZero = (x: SpecItem) => !Object.values(x.slots ?? {}).some((v) => v?.some((s) => s.trim()));
 
-export function setFinding(id: string, fid: string, state: Finding["state"]) {
-  updateProject(id, (p) => ({ ...p, findings: p.findings?.map((f) => (f.id === fid ? { ...f, state } : f)) ?? null }));
+export function setFinding(id: string, fid: string, state: Finding["state"], resolvedBy?: Finding["resolvedBy"]) {
+  updateProject(id, (p) => ({
+    ...p, findings: p.findings?.map((f) => (f.id !== fid || f.state === "resolved" ? f : { ...f, state, resolvedBy: state === "resolved" ? resolvedBy : undefined })) ?? null,
+  }));
+}
+
+// [해결]: the AI applies the finding's proposed fix across the documents, then the finding closes for good.
+export async function fixFinding(id: string, fid: string) {
+  const p = getProject(id);
+  const f = p?.findings?.find((x) => x.id === fid);
+  if (!p || !f || f.state === "resolved" || isBusy(p)) return;
+  const fix = f.fix || f.body;
+  const before = p.chat.length;
+  if (aiEnabled()) {
+    await sendChat(id, `검토 의견을 해결해 주세요: ${f.title}\n문제: ${f.body}${f.scenario ? `\n예시 상황: ${f.scenario}` : ""}\n해결 방법: ${fix}\n이 해결 방법대로 필요한 문서(PRD, 기능명세서, 유저플로우, 와이어프레임)를 고쳐 주세요.`);
+    const failed = getProject(id)!.chat.slice(before).some((m) => m.error);
+    if (failed) return;
+  } else {
+    const x = getProject(id)!;
+    const t = relatedItem(x, f);
+    if (t && x.spec) {
+      const r = applyProposals(x.spec, [{ code: t.code, title: "", reason: `검토 의견 해결: ${f.title}`,
+        summary: `${t.summary ? t.summary.replace(/\s*$/, " ") : ""}(${f.title}: ${fix})`.trim(),
+        criteria: [...(t.criteria ?? []), `${f.title}에 대한 기준대로 처리된다`] }], []);
+      updateProject(id, (y) => ({ ...y, spec: r.spec, chat: [...y.chat, me(`검토 의견을 해결해 주세요: ${f.title}`), ai(`해결 방법대로 '${t.title}'${josa(t.title, "을/를")} 고쳤어요.` + changedText(r.lines), { actions: ["goto-features"] })] }));
+    }
+  }
+  setFinding(id, fid, "resolved", "ai");
+  updateProject(id, (y) => ({ ...y, chat: [...y.chat, ai(`✓ 검토 의견을 해결했어요: ${f.title}`)] }), "검토 의견을 해결했어요");
+  saveToDrive();
 }
 
 // --- Applying AI proposals to the spec as pending items ------------------------------------
@@ -393,8 +424,9 @@ export function applyChoice(id: string, mid: string, choice?: string) {
   const finish = (spec: SpecItem[], lines: string[], text: string) => {
     updateProject(id, (x) => ({
       ...x, spec,
-      findings: x.findings?.map((f) => (f.id === finding?.id ? { ...f, state: "resolved" as const } : f)) ?? null,
-      chat: [...x.chat, ai(text + changedText(lines), { actions: lines.length ? ["goto-features"] : undefined })],
+      findings: x.findings?.map((f) => (f.id === finding?.id ? { ...f, state: "resolved" as const, resolvedBy: "chat" as const } : f)) ?? null,
+      chat: [...x.chat, ai(text + changedText(lines), { actions: lines.length ? ["goto-features"] : undefined }),
+        ...(finding ? [ai(`✓ 채팅에서 검토 의견을 해결했어요: ${finding.title}`)] : [])],
     }), "검토 의견을 채팅에서 해결했어요");
     saveToDrive();
   };
