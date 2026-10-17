@@ -11,6 +11,7 @@ import { ChatPanel } from "./ChatPanel";
 import { FeaturesView } from "./FeaturesView";
 import { FlowView } from "./FlowView";
 import { PrdView } from "./PrdView";
+import { SaveButton } from "../SaveButton";
 import { ShareDialog } from "./ShareDialog";
 import { CommentsPanel, DocsPanel, ReviewPanel, SettingsPanel, VersionsPanel } from "./SidePanels";
 import { WireframeView } from "./WireframeView";
@@ -109,6 +110,7 @@ export function EditorShell({ p }: { p: Project }) {
         <header className="flex h-12 shrink-0 items-center gap-1 border-b border-border px-2">
           <Link href="/" aria-label="홈으로" className="rounded p-1.5 text-foreground-muted hover:bg-surface"><ArrowLeft className="h-5 w-5" /></Link>
           <NameInput p={p} className="min-w-0 flex-1" />
+          <SaveButton />
           {exportBtn}
         </header>
         {share && <ShareDialog p={p} onClose={() => setShare(false)} />}
@@ -190,7 +192,7 @@ export function EditorShell({ p }: { p: Project }) {
           <NameInput p={p} className="mr-3 w-56 shrink-0" />
           {tabs}
           <div className="ml-auto flex shrink-0 items-center gap-2 pl-2">
-            <span className="hidden text-[11px] text-foreground-assistive lg:inline">자동 저장됨</span>
+            <SaveButton label />
             {exportBtn}
             <button onClick={() => setPanel("settings")} aria-label="설정 열기" className="rounded p-1 text-foreground-muted hover:bg-surface"><Gear className="h-4 w-4" /></button>
           </div>

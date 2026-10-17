@@ -2,6 +2,7 @@
 
 import { uid } from "./id";
 import { getProject, updateProject } from "./store";
+import { saveToDrive } from "./sync";
 import {
   interpret, makeFeatures, makeFlow, makePrd, makeQuestions, makeScreens, runReview, summarizeAnswers,
 } from "./generator";
@@ -119,6 +120,7 @@ export function generatePrd(id: string) {
       const { prd, groups } = await aiPlan(p);
       updateProject(id, (x) => ({ ...x, prd: withLater(x, prd), groups, chat: [...x.chat, ai(planDone(groups), { actions: ["goto-features", "run-review"] })] }),
         "AI가 PRD와 기능명세서 초안을 만들었어요");
+      saveToDrive();
     }, () => generatePrdLocal(id));
     return;
   }
@@ -142,22 +144,29 @@ function generatePrdLocal(id: string) {
         { actions: ["goto-features", "run-review"] })],
     };
   }, "PRD와 기능명세서 초안을 만들었어요");
+  saveToDrive();
 }
 
 export function generateFlow(id: string) {
   updateProject(id, (p) => (p.groups ? { ...p, flow: makeFlow(p.groups) } : p), "유저플로우를 만들었어요");
+  saveToDrive();
 }
 
 export function generateScreens(id: string) {
   updateProject(id, (p) => (p.groups ? { ...p, screens: makeScreens(p.groups) } : p), "와이어프레임을 만들었어요");
+  saveToDrive();
 }
 
 export function review(id: string) {
-  const local = () => updateProject(id, (p) => (p.groups ? { ...p, findings: runReview(p.groups) } : p), "기획 검토를 실행했어요");
+  const local = () => {
+    updateProject(id, (p) => (p.groups ? { ...p, findings: runReview(p.groups) } : p), "기획 검토를 실행했어요");
+    saveToDrive();
+  };
   if (!aiEnabled() || !getProject(id)?.groups) return local();
   withAi(id, "여섯 관점에서 기획서를 검토하고 있어요…", async (p) => {
     const findings = await aiReview(p);
     updateProject(id, (x) => ({ ...x, findings, chat: [...x.chat, ai(`검토를 마쳤어요. 의견 ${findings.length}개를 [검토] 패널에 정리했어요.`)] }), "AI가 기획 검토를 실행했어요");
+    saveToDrive();
   }, local);
 }
 

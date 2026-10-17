@@ -44,15 +44,19 @@ function set(next: SyncState) {
   state = next;
   listeners.forEach((l) => l());
 }
+const subscribe = (l: () => void) => {
+  listeners.add(l);
+  return () => listeners.delete(l);
+};
 export function useSync() {
-  return useSyncExternalStore(
-    (l) => {
-      listeners.add(l);
-      return () => listeners.delete(l);
-    },
-    () => state,
-    () => state,
-  );
+  return useSyncExternalStore(subscribe, () => state, () => state);
+}
+
+// Local changes are counted so the save button can tell whether Drive is behind.
+let changes = 0;
+let savedChanges = 0;
+export function useUnsaved() {
+  return useSyncExternalStore(subscribe, () => changes > savedChanges, () => false);
 }
 
 function readAuth(): Auth | null {
@@ -242,6 +246,7 @@ async function syncOnce() {
   if (!auth) return set(GOOGLE_CLIENT_ID ? { status: "signed-out" } : { status: "off" });
   if (!valid(auth)) return set({ status: "expired", user: auth });
   set({ status: "syncing", user: auth });
+  const seen = changes;
   try {
     const { remote, fromLegacy } = await pull(auth);
     const purged = [...new Set([...getPurged(), ...(remote?.purged ?? [])])];
@@ -260,6 +265,7 @@ async function syncOnce() {
 
     const next: Remote = { version: 1, savedAt: Date.now(), projects, purged, apiKey, ai, aiAt };
     if (!remote || fromLegacy || !same({ ...remote, savedAt: 0 }, { ...next, savedAt: 0 })) await push(auth, next);
+    savedChanges = seen;
     set({ status: "synced", user: auth, at: Date.now() });
   } catch (e) {
     if (e instanceof Expired) return set({ status: "expired", user: auth });
@@ -313,15 +319,25 @@ const soon = () => {
   timer = setTimeout(syncNow, 1500);
 };
 
+// Drive is written when a deliverable is made (PRD, flow, wireframe, review),
+// when the save button is pressed, and when the app opens or signs in, never on every edit.
+export function saveToDrive() {
+  if (!readAuth()) return;
+  clearTimeout(timer);
+  timer = setTimeout(syncNow, 300);
+}
+
 // Called once from the app shell.
 export function startSync() {
   if (started || typeof window === "undefined") return;
   started = true;
   if (!GOOGLE_CLIENT_ID) return set({ status: "off" });
-  onLocalProjectsChange(soon);
+  onLocalProjectsChange(() => {
+    changes++;
+    listeners.forEach((l) => l());
+  });
+  // The key and AI settings are small and rarely change, so they still save on their own.
   onLocalAiChange(soon);
-  document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && syncNow());
-  setInterval(() => document.visibilityState === "visible" && syncNow(), 60_000);
   // An expired token is renewed on the next tap anywhere, since that counts as a click.
   document.addEventListener("pointerdown", () => {
     if (state.status === "expired") renew().catch(() => {});

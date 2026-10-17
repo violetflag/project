@@ -67,3 +67,6 @@ export const HelpIcon = ({ className = base }: P) => (
 export const ArrowLeft = ({ className = base }: P) => (
   <svg viewBox="0 0 20 20" className={className} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M12.5 4.5 7 10l5.5 5.5" /></svg>
 );
+export const FloppyIcon = ({ className = base }: P) => (
+  <svg viewBox="0 0 20 20" className={className} fill="currentColor"><path d="M3 3h11l3 3v11H3zm3 1.5V8h7V4.5zM6 11v4.5h8V11z" /></svg>
+);

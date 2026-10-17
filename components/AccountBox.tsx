@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { renew, signIn, signOut, syncNow, useSync } from "@/lib/sync";
+import { renew, signIn, signOut, syncNow, useSync, useUnsaved } from "@/lib/sync";
 
 const ago = (t: number) => {
   const s = Math.round((Date.now() - t) / 1000);
@@ -11,6 +11,7 @@ const ago = (t: number) => {
 // Google sign-in, shown at the bottom of the sidebar.
 export function AccountBox() {
   const s = useSync();
+  const unsaved = useUnsaved();
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   if (s.status === "off") return null;
@@ -42,8 +43,8 @@ export function AccountBox() {
 
   const { user } = s;
   const line = {
-    syncing: "동기화 중…",
-    synced: s.status === "synced" ? `동기화됨 · ${ago(s.at)}` : "",
+    syncing: "드라이브에 저장 중…",
+    synced: s.status === "synced" ? (unsaved ? "아직 드라이브에 안 올린 변경이 있어요" : `드라이브에 저장됨 · ${ago(s.at)}`) : "",
     expired: "로그인 연장이 필요해요",
     error: s.status === "error" ? s.message : "",
   }[s.status];
@@ -62,7 +63,7 @@ export function AccountBox() {
         {s.status === "expired" ? (
           <button onClick={run(renew)} disabled={busy} className="flex-1 rounded-md bg-primary py-1.5 text-white disabled:opacity-50">다시 연결</button>
         ) : (
-          <button onClick={run(syncNow)} disabled={busy || s.status === "syncing"} className="flex-1 rounded-md border border-border py-1.5 hover:border-border-strong disabled:opacity-50">지금 동기화</button>
+          <button onClick={run(syncNow)} disabled={busy || s.status === "syncing"} className="flex-1 rounded-md border border-border py-1.5 hover:border-border-strong disabled:opacity-50">지금 저장</button>
         )}
         <button onClick={run(signOut)} disabled={busy} className="flex-1 rounded-md border border-border py-1.5 hover:border-border-strong disabled:opacity-50">로그아웃</button>
       </div>

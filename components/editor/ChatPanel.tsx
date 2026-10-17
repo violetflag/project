@@ -109,7 +109,9 @@ export function ChatPanel({ p, onGoto }: { p: Project; onGoto: (tab: string) => 
   const [text, setText] = useState("");
   const busy = isBusy(p);
   const end = useRef<HTMLDivElement>(null);
-  useEffect(() => end.current?.scrollIntoView({ behavior: "smooth" }), [p.chat.length]);
+  useEffect(() => {
+    end.current?.scrollIntoView({ behavior: "smooth" });
+  }, [p.chat.length]);
   const send = () => {
     if (!text.trim() || busy) return;
     sendChat(p.id, text.trim());
