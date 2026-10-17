@@ -274,7 +274,7 @@ const AddSchema = z.object({
 // Prompt lines shared by every call that returns edits/additions.
 const editRules = `- slots: 바뀌는 개발 준비 슬롯 칸만 한 줄에 {slot: 영문 키, text: 문장} 하나씩, 그 칸의 문장 전체를 다시 씁니다(${slotGuide}). 안 바꾸면 빈 배열. 새 항목(기능·상세 기능)은 9칸을 모두 씁니다.
 - 결정이 바뀌면 설명뿐 아니라 그 결정이 적힌 슬롯 문장도 함께 고쳐 서로 어긋나지 않게 합니다.
-- reason과 summary에서는 영문 키 대신 한국어 칸 이름(예: 규칙, 예외)을 씁니다.`;
+- reason과 summary에서는 영문 키 대신 한국어 칸 이름(예: 규칙, 예외)을 씁니다. 새 항목의 코드는 앱이 붙이므로 지어내지 말고 이름으로 부릅니다.`;
 type Slots = z.infer<typeof SlotsSchema>;
 type Edit = Omit<z.infer<typeof EditSchema>, "slots"> & { slots?: Slots };
 type Add = Omit<z.infer<typeof AddSchema>, "slots"> & { slots?: Slots };
