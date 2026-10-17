@@ -14,7 +14,7 @@ import { cloneItem, localAnswer, localEnhance, localFill, localPrd, localSpec, t
 import { getProject, updateProject } from "./store";
 import { saveToDrive } from "./sync";
 import { SLOTS } from "./types";
-import type { PrdProps, PrdSection, Project, SlotKey, SlotQuestion, SpecCore, SpecItem } from "./types";
+import type { PrdChange, PrdProps, PrdSection, Project, SlotKey, SlotQuestion, SpecCore, SpecItem } from "./types";
 import { autoVersion } from "./versions";
 
 const SLOT_KEYS = SLOTS.map(([k]) => k) as [SlotKey, ...SlotKey[]];
@@ -78,34 +78,48 @@ ${styleOf(x)}`, await materialBlocks(x));
 }
 
 // Direct PRD edits from the PRD tab.
-// Each change is remembered so the chat can later check whether the spec, flow and wireframes need it too.
-const editPrd = (id: string, fn: (s: PrdSection[]) => PrdSection[], change: (p: PrdSection[]) => string) => updateProject(id, (p) => {
-  if (!p.prd) return p;
-  const line = change(p.prd);
-  const prd = fn(p.prd);
-  if (JSON.stringify(prd) === JSON.stringify(p.prd)) return p;
-  return { ...p, prd, stale: p.spec?.length && line ? { ...p.stale, prd: [...(p.stale?.prd ?? []).filter((x) => x !== line), line].slice(-12) } : p.stale };
-});
-const blockName = (ss: PrdSection[], sid: string, idx: number) => { const s = ss.find((x) => x.id === sid); return `${s?.title ?? ""} · ${s?.blocks[idx]?.label ?? ""}`; };
+// Each change is remembered (first "before", latest "after") so the chat can later check whether
+// the spec, flow and wireframes need it too.
+function remember(p: Project, c: PrdChange | null): Project["stale"] {
+  if (!p.spec?.length || !c) return p.stale;
+  const list = (p.stale?.prd ?? []).filter((x) => typeof x === "object");
+  const old = list.find((x) => x.what === c.what);
+  const merged = { what: c.what, before: old?.before ?? c.before, after: c.after };
+  const rest = list.filter((x) => x.what !== c.what);
+  return { ...p.stale, prd: merged.before === merged.after ? rest : [...rest, merged].slice(-12) };
+}
+const editPrd = (id: string, fn: (s: PrdSection[]) => PrdSection[], change: (before: PrdSection[], after: PrdSection[]) => PrdChange | null) =>
+  updateProject(id, (p) => {
+    if (!p.prd) return p;
+    const prd = fn(p.prd);
+    if (JSON.stringify(prd) === JSON.stringify(p.prd)) return p;
+    return { ...p, prd, stale: remember(p, change(p.prd, prd)) };
+  });
+const blockOf = (ss: PrdSection[], sid: string, idx: number) => { const s = ss.find((x) => x.id === sid); return { s, b: s?.blocks[idx] }; };
 export function setPrdBlock(id: string, sid: string, idx: number, patch: Partial<{ label: string; body: string }>) {
   editPrd(id, (ss) => ss.map((s) => (s.id === sid ? { ...s, blocks: s.blocks.map((b, i) => (i === idx ? { ...b, ...patch } : b)) } : s)),
-    (ss) => `${blockName(ss, sid, idx)}${patch.label ? ` (이름 → ${patch.label})` : ""}: ${patch.body ?? ss.find((s) => s.id === sid)?.blocks[idx]?.body ?? ""}`.slice(0, 600));
+    (before, after) => {
+      const a = blockOf(before, sid, idx), z = blockOf(after, sid, idx);
+      return a.b && z.b ? { what: `${a.s!.title} · ${a.b.label}`, before: `${a.b.label}: ${a.b.body}`, after: `${z.b.label}: ${z.b.body}` } : null;
+    });
 }
 export function addPrdBlock(id: string, sid: string) {
-  editPrd(id, (ss) => ss.map((s) => (s.id === sid ? { ...s, blocks: [...s.blocks, { label: "새 항목", body: "" }] } : s)),
-    () => "");
+  editPrd(id, (ss) => ss.map((s) => (s.id === sid ? { ...s, blocks: [...s.blocks, { label: "새 항목", body: "" }] } : s)), () => null);
 }
 export function deletePrdBlock(id: string, sid: string, idx: number) {
   editPrd(id, (ss) => ss.map((s) => (s.id === sid ? { ...s, blocks: s.blocks.filter((_, i) => i !== idx) } : s)),
-    (ss) => `${blockName(ss, sid, idx)} 항목 삭제`);
+    (before) => { const a = blockOf(before, sid, idx); return a.b ? { what: `${a.s!.title} · ${a.b.label}`, before: `${a.b.label}: ${a.b.body}`, after: "(항목 삭제)" } : null; });
 }
+const PROP_NAME: Record<string, string> = { category: "카테고리", roles: "사용자 역할", devices: "지원 기기" };
 export function setPrdProps(id: string, patch: Partial<PrdProps>) {
   updateProject(id, (p) => {
-    const line = Object.entries(patch).map(([k, v]) => `PRD 속성 · ${({ category: "카테고리", roles: "사용자 역할", devices: "지원 기기" } as Record<string, string>)[k] ?? k}: ${Array.isArray(v) ? v.join(", ") : v}`).join(" / ");
-    return {
-      ...p, prdProps: { category: "", roles: [], devices: [], ...p.prdProps, ...patch },
-      stale: p.spec?.length && line ? { ...p.stale, prd: [...(p.stale?.prd ?? []).filter((x) => x !== line), line].slice(-12) } : p.stale,
-    };
+    const props = { category: "", roles: [], devices: [], ...p.prdProps, ...patch };
+    let stale = p.stale;
+    for (const k of Object.keys(patch) as (keyof PrdProps)[]) {
+      const show = (v: unknown) => (Array.isArray(v) ? v.join(", ") : String(v ?? ""));
+      stale = remember({ ...p, stale }, { what: `PRD 속성 · ${PROP_NAME[k] ?? k}`, before: show(p.prdProps?.[k]), after: show(props[k]) });
+    }
+    return { ...p, prdProps: props, stale };
   });
 }
 

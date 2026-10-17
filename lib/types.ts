@@ -52,6 +52,9 @@ export interface SpecItem extends SpecCore {
 
 // --- PRD ---------------------------------------------------------------------
 
+// One PRD edit made in the PRD tab: what changed, the text before the first edit and the text now.
+export interface PrdChange { what: string; before: string; after: string }
+
 export interface PrdSection {
   id: string;
   title: string;
@@ -242,7 +245,7 @@ export interface Project {
   wireId?: string;
   // Later tabs whose source changed since they were made; the sync button refreshes them.
   // prd: PRD edits made in the PRD tab that the chat has not yet checked against the other documents.
-  stale?: { flow?: boolean; wire?: boolean; prd?: string[] };
+  stale?: { flow?: boolean; wire?: boolean; prd?: PrdChange[] };
   findings: Finding[] | null;
   comments: Comment[];
   decisions: Decision[];

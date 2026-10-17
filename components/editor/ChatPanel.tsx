@@ -133,7 +133,7 @@ function PendingBar({ p, onGoto }: { p: Project; onGoto: (tab: string) => void }
 }
 
 export function PrdChangeBar({ p }: { p: Project }) {
-  const n = p.stale?.prd?.length ?? 0;
+  const n = p.stale?.prd?.filter((c) => typeof c === "object").length ?? 0;
   if (!n) return null;
   const busy = isBusy(p);
   return (

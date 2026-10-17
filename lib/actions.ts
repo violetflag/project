@@ -11,7 +11,7 @@ import {
 } from "./ai";
 import { ai, aiEnabled, isBusy, me, withAi } from "./run";
 import { autoVersion } from "./versions";
-import { chatFlowPlan, flowOutline, localChatFlowPlan, type FlowPlan } from "./flow";
+import { chatFlowPlan, flowOutline, localChatFlowPlan, setChatFlowPlan, type FlowPlan } from "./flow";
 import { matchPage, pageNodes, regeneratePage } from "./wire";
 import { cleanSlots, generatePrd, slotGuide, SlotsSchema, slotWords } from "./spec";
 import {
@@ -270,8 +270,10 @@ export async function fixFinding(id: string, fid: string) {
   const before = p.chat.length;
   if (aiEnabled()) {
     await sendChat(id, `검토 의견을 해결해 주세요: ${f.title}\n문제: ${f.body}${f.scenario ? `\n예시 상황: ${f.scenario}` : ""}\n해결 방법: ${fix}\n이 해결 방법대로 필요한 문서(PRD, 기능명세서, 유저플로우, 와이어프레임)를 고쳐 주세요.`);
-    const failed = getProject(id)!.chat.slice(before).some((m) => m.error);
-    if (failed) return;
+    const made = getProject(id)!.chat.slice(before);
+    if (made.some((m) => m.error)) return;
+    // [해결] means "do it": a user-flow plan made for this fix is applied right away.
+    for (const m of made) if (m.flowPlan && !m.flowPlan.done) setChatFlowPlan(id, m.id, "applied");
   } else {
     const x = getProject(id)!;
     const t = relatedItem(x, f);
@@ -554,7 +556,11 @@ export function checkPrdChanges(id: string) {
     }));
     return;
   }
-  return sendChat(id, `PRD를 이렇게 고쳤어요. 기능명세서, 유저플로우, 와이어프레임 중 함께 고쳐야 할 곳이 있는지 판단해서 필요한 곳만 고쳐 주세요. 없으면 없다고 알려 주세요.\n${changes.map((c) => `- ${c}`).join("\n")}`);
+  const list = changes.filter((c) => typeof c === "object").map((c) => `■ ${c.what}\n이전: ${c.before.slice(0, 800)}\n이후: ${c.after.slice(0, 800)}`).join("\n\n");
+  return sendChat(id, `PRD 탭에서 PRD를 직접 고쳤어요. 위 [PRD]에는 이미 '이후' 내용이 들어가 있어요.
+이 변경 때문에 기능명세서, 유저플로우, 와이어프레임에서 어긋나거나 새로 필요해진 부분을 모두 찾아 고쳐 주세요. 영향이 없으면 없다고 알려 주세요.
+
+${list}`);
 }
 export const dismissPrdChanges = (id: string) => updateProject(id, (x) => ({ ...x, stale: { ...x.stale, prd: undefined } }));
 
@@ -627,6 +633,7 @@ ${plainText(text)}
 - 기능을 고치거나 더해 달라는 요청이면 edits(기존 항목, code는 위 코드 그대로, 바꾸지 않는 칸은 빈 문자열/빈 배열)와 additions(parentCode는 부모 코드, 요구사항을 새로 만들 때만 빈 문자열)에 담고, reply에는 무엇을 바꿨는지 짧게 씁니다. 바뀐 내용은 사용자가 승인해야 반영됩니다.
 - 기획 전체 검토를 원하면 review를 true로 합니다.
 - 당신은 PRD, 기능명세서, 유저플로우, 와이어프레임 전체를 알고 있습니다. 어느 한 곳을 바꾸는 요청이라도 나머지 문서와 어긋나게 되면, 함께 고쳐야 할 곳을 스스로 판단해 같이 고칩니다. 특히 PRD가 바뀌면 그 내용이 기능명세서, 유저플로우, 와이어프레임에 영향을 주는지 꼭 확인합니다. 영향이 없는 곳은 비워 둡니다.
+- 유저플로우는 flow에 적은 요청으로 변경 계획만 만들어지고, 사용자가 적용해야 반영됩니다. reply에서 유저플로우를 이미 고쳤다고 쓰지 말고 변경 계획을 보여 준다고 씁니다.
 - PRD를 고쳐야 하면 prd에 {section: 위 PRD의 ## 제목 그대로, label: 항목 이름 그대로(새 항목이면 새 이름), body: 고친 뒤 전체 내용}을 담습니다. 아니면 빈 배열입니다.
 - 유저플로우(화면 흐름, 노드, 연결, 분기)를 바꿔 달라는 요청이면 flow에 무엇을 어떻게 바꿀지 한두 문장으로 씁니다. 아니면 빈 문자열입니다. 유저플로우가 아직 없으면 빈 문자열로 두고 reply에서 먼저 만들자고 안내합니다.
 - 와이어프레임 화면을 바꿔 달라는 요청이면 pages에 {page: 위 [와이어프레임 페이지]에 있는 이름 그대로, request: 그 화면에서 바꿀 내용}을 담습니다. 아니면 빈 배열입니다.
