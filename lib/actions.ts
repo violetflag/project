@@ -116,6 +116,11 @@ export function generatePrd(id: string) {
 function generatePrdLocal(id: string) {
   updateProject(id, (p) => {
     const prd = makePrd(p.idea, p.answers);
+    // The template generator can't read material, so it at least cites it.
+    if (p.materials?.length) {
+      const excerpt = p.materials.filter((m) => m.text).map((m) => `${m.name}: ${m.text!.slice(0, 300)}`).join("\n");
+      prd[0].blocks.push({ label: "참고 자료", body: `${p.materials.map((m) => m.name).join(", ")}${excerpt ? `\n${excerpt}` : ""}` });
+    }
     const groups = makeFeatures(p.idea, p.answers);
     const count = groups.reduce((n, g) => n + g.features.length, 0);
     return {

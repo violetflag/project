@@ -31,19 +31,26 @@ export function WireframeView({ p }: { p: Project }) {
   );
   const s = p.screens[Math.min(i, p.screens.length - 1)];
   return (
-    <div className="flex h-full">
-      <aside className="w-52 shrink-0 overflow-y-auto border-r border-border bg-background px-2 py-3">
+    <div className="flex h-full flex-col md:flex-row">
+      <div className="flex items-center gap-2 border-b border-border bg-background px-3 py-2 md:hidden">
+        <select value={Math.min(i, p.screens.length - 1)} onChange={(e) => setI(Number(e.target.value))} aria-label="화면 고르기"
+          className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm">
+          {p.screens.map((x, j) => <option key={x.id} value={j}>{x.name}</option>)}
+        </select>
+        <button onClick={() => generateScreens(p.id)} className="text-xs text-primary">다시 만들기</button>
+      </div>
+      <aside className="hidden w-52 shrink-0 md:block overflow-y-auto border-r border-border bg-background px-2 py-3">
         <p className="mb-2 px-2 text-xs text-foreground-muted">화면 {p.screens.length}개</p>
         {p.screens.map((x, j) => (
-          <button key={x.id} onClick={() => setI(j)} className={`block w-full truncate rounded px-2 py-1 text-left text-xs ${j === i ? "bg-surface font-medium" : "text-foreground-support hover:bg-surface"}`}>{x.name}</button>
+          <button key={x.id} onClick={() => setI(j)} className={`block w-full truncate rounded px-2 py-1 text-left text-xs ${j === Math.min(i, p.screens!.length - 1) ? "bg-surface font-medium" : "text-foreground-support hover:bg-surface"}`}>{x.name}</button>
         ))}
         <button onClick={() => generateScreens(p.id)} className="mt-3 px-2 text-xs text-primary">다시 만들기</button>
       </aside>
-      <div className="flex-1 overflow-auto bg-background-canvas p-8">
+      <div className="min-h-0 flex-1 overflow-auto bg-background-canvas p-3 md:p-8">
         <p className="mb-3 text-xs text-foreground-muted">{s.name}</p>
-        <div className="mx-auto flex max-w-4xl gap-6 rounded-xl border border-border bg-background p-8 grayscale">
+        <div className="mx-auto flex max-w-4xl flex-col gap-6 rounded-xl border border-border bg-background p-5 grayscale md:flex-row md:p-8">
           <div className="flex-1">{s.main.map((b, k) => <Block key={k} b={b} />)}</div>
-          <div className="w-56">{s.side.map((b, k) => <Block key={k} b={b} />)}</div>
+          <div className="md:w-56">{s.side.map((b, k) => <Block key={k} b={b} />)}</div>
         </div>
       </div>
     </div>

@@ -58,3 +58,12 @@ export const Chat = ({ className = base }: P) => (
 export const Megaphone = ({ className = base }: P) => (
   <svg viewBox="0 0 20 20" className={className} fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M3 8v4h3l6 4V4L6 8zm12 0a3 3 0 0 1 0 4" /></svg>
 );
+export const MenuIcon = ({ className = base }: P) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M3 5.5h14M3 10h14M3 14.5h14" /></svg>
+);
+export const HelpIcon = ({ className = base }: P) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="10" cy="10" r="7.5" /><path d="M7.8 7.8a2.2 2.2 0 1 1 3 2c-.6.3-.8.7-.8 1.3" strokeLinecap="round" /><circle cx="10" cy="13.8" r=".6" fill="currentColor" /></svg>
+);
+export const ArrowLeft = ({ className = base }: P) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M12.5 4.5 7 10l5.5 5.5" /></svg>
+);

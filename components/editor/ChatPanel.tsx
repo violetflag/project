@@ -4,9 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import {
   addMoreQuestions, answerQuestion, editAnswer, generatePrd, isBusy, pickChoice, review, sendChat,
 } from "@/lib/actions";
-import { AiBadge, AiKeyDialog } from "../AiKeyForm";
+import { AiPicker } from "../AiKeyForm";
 import type { ChatMessage, Project, Question } from "@/lib/types";
-import { ArrowUp, Paperclip, Sparkle } from "../icons";
+import { ArrowUp, Sparkle } from "../icons";
 
 function QuestionCard({ p, q, answered }: { p: Project; q: Question; answered?: string[] }) {
   const [sel, setSel] = useState<string[]>([]);
@@ -106,7 +106,6 @@ function Message({ p, m, onGoto }: { p: Project; m: ChatMessage; onGoto: (tab: s
 
 export function ChatPanel({ p, onGoto }: { p: Project; onGoto: (tab: string) => void }) {
   const [text, setText] = useState("");
-  const [keyOpen, setKeyOpen] = useState(false);
   const busy = isBusy(p);
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => end.current?.scrollIntoView({ behavior: "smooth" }), [p.chat.length]);
@@ -127,15 +126,13 @@ export function ChatPanel({ p, onGoto }: { p: Project; onGoto: (tab: string) => 
           placeholder="예: 리뷰 기능 추가해줘 / 회원가입과 로그인 더 구체화해줘"
           className="w-full resize-none bg-transparent px-1 text-sm outline-none placeholder:text-foreground-assistive" />
         <div className="flex items-center gap-2">
-          <Paperclip className="h-4 w-4 text-foreground-muted" />
-          <AiBadge onClick={() => setKeyOpen(true)} />
+          <AiPicker up />
           <button onClick={send} disabled={!text.trim() || busy} aria-label="보내기"
-            className="ml-auto grid h-7 w-7 place-items-center rounded-full bg-foreground text-background disabled:bg-border-strong">
+            className="ml-auto grid h-8 w-8 place-items-center rounded-full bg-foreground text-background disabled:bg-border-strong">
             <ArrowUp className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
-      <AiKeyDialog open={keyOpen} onClose={() => setKeyOpen(false)} />
     </div>
   );
 }

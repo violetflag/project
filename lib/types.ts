@@ -149,6 +149,8 @@ export interface Project {
   id: string;
   name: string;
   idea: string;
+  // Files attached on the home screen. Text is kept here; PDFs and images live in IndexedDB.
+  materials?: { name: string; kind: "text" | "pdf" | "image"; text?: string }[];
   createdAt: number;
   updatedAt: number;
   starred?: boolean;

@@ -18,9 +18,9 @@ function Detail({ p, f, group, onClose }: { p: Project; f: Feature; group: Featu
   const comments = p.comments.filter((c) => c.featureId === f.id);
   const set = (patch: Partial<Feature>) => updateFeature(p.id, f.id, patch);
   return (
-    <aside className="animate-fade-up absolute top-0 right-0 bottom-0 z-20 w-[420px] overflow-y-auto border-l border-border bg-background shadow-xl">
+    <aside className="animate-fade-up absolute inset-0 z-20 overflow-y-auto border-l border-border bg-background shadow-xl md:left-auto md:w-[420px]">
       <div className="flex items-center gap-2 border-b border-border px-4 py-2.5 text-xs text-foreground-muted">
-        <button onClick={onClose} aria-label="닫기"><Close className="h-3.5 w-3.5" /></button>
+        <button onClick={onClose} aria-label="닫기" className="p-1"><Close className="h-4 w-4" /></button>
         <span className="truncate">{group.title} / {f.title}</span>
         <button onClick={() => { deleteFeature(p.id, f.id); onClose(); }} className="ml-auto text-foreground-muted hover:text-red-500">삭제</button>
       </div>
@@ -53,7 +53,7 @@ function Detail({ p, f, group, onClose }: { p: Project; f: Feature; group: Featu
           <p className="mb-1 text-xs text-foreground-support">수용 기준</p>
           {f.criteria.map((c, i) => (
             <div key={i} className="mb-1 flex items-start gap-2 text-sm">
-              <input type="checkbox" className="mt-1" />
+              <span className="mt-0.5 text-foreground-muted">•</span>
               <input value={c} onChange={(e) => set({ criteria: f.criteria.map((x, j) => (j === i ? e.target.value : x)) })} className="flex-1 outline-none" />
               <button onClick={() => set({ criteria: f.criteria.filter((_, j) => j !== i) })} className="text-xs text-foreground-muted">✕</button>
             </div>
@@ -121,8 +121,46 @@ function Graph({ p, groups, onOpen, pendingIds }: { p: Project; groups: FeatureG
   );
 }
 
+function PendingBar({ p, pi, setPi, onOpen, title }: {
+  p: Project; pi: number; setPi: (n: number) => void; onOpen: (id: string) => void; title: (id: string) => string | undefined;
+}) {
+  const [peek, setPeek] = useState(false);
+  const idx = Math.min(pi, p.pending.length - 1);
+  const c = p.pending[idx];
+  const name = (c.after.title as string | undefined) ?? title(c.featureId);
+  return (
+    <div className="animate-fade-up absolute inset-x-2 bottom-2 z-30 rounded-lg border border-border bg-background text-sm shadow-lg md:inset-x-auto md:bottom-4 md:left-1/2 md:w-[560px] md:-translate-x-1/2">
+      {peek && (
+        <div className="max-h-56 overflow-y-auto border-b border-border px-3 py-2 text-xs">
+          <p className="mb-1 text-foreground-muted">{c.kind === "add" ? "새로 추가될 기능" : "바뀔 내용"} · {c.reason}</p>
+          {c.after.summary && <p className="mb-1">{c.after.summary as string}</p>}
+          {(c.after.criteria as string[] | undefined)?.map((x) => <p key={x} className="text-foreground-support">• {x}</p>)}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+        <span className="text-xs text-foreground-muted">AI 수정안</span>
+        <button onClick={() => setPi(Math.max(0, idx - 1))} disabled={idx === 0} aria-label="이전 수정안" className="px-1 text-foreground-muted disabled:opacity-30">‹</button>
+        <span className="text-xs">{idx + 1} / {p.pending.length}</span>
+        <button onClick={() => setPi(Math.min(p.pending.length - 1, idx + 1))} disabled={idx === p.pending.length - 1} aria-label="다음 수정안" className="px-1 text-foreground-muted disabled:opacity-30">›</button>
+        <button onClick={() => { setPeek((v) => !v); if (c.kind === "edit") onOpen(c.featureId); }} className="min-w-0 flex-1 truncate text-left" title="내용 미리 보기">
+          <span className="mr-1 rounded bg-primary-soft px-1 text-[10px] text-primary">{c.kind === "add" ? "추가" : "수정"}</span>
+          {name} <span className="text-[11px] text-foreground-muted">{peek ? "▴" : "▾"}</span>
+        </button>
+        <span className="flex items-center gap-1.5">
+          <button onClick={() => resolvePending(p.id, c.id, false)} className="rounded border border-border px-2 py-1 text-xs">✕ 거절</button>
+          <button onClick={() => resolvePending(p.id, c.id, true)} className="rounded bg-primary px-2 py-1 text-xs text-white">✓ 승인</button>
+          {p.pending.length > 1 && (
+            <button onClick={() => p.pending.forEach((x) => resolvePending(p.id, x.id, true))} className="text-xs text-primary">모두 승인</button>
+          )}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function FeaturesView({ p }: { p: Project }) {
-  const [view, setView] = useState<View>("graph");
+  // Phones start on the list; the graph needs a wide screen.
+  const [view, setView] = useState<View>(() => (typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches ? "tree" : "graph"));
   const [open, setOpen] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>({ status: "all", role: "all", priority: 0 });
   const [pi, setPi] = useState(0);
@@ -143,11 +181,11 @@ export function FeaturesView({ p }: { p: Project }) {
   const allFeatures = p.groups.flatMap((g) => g.features.map((f) => ({ f, g })));
   const current = open ? allFeatures.find((x) => x.f.id === open) : null;
   const pendingIds = new Set(p.pending.map((c) => c.featureId));
-  const pending = p.pending[Math.min(pi, p.pending.length - 1)];
+  const pending = p.pending.length > 0;
 
   return (
     <div className="relative flex h-full">
-      <aside className="w-56 shrink-0 overflow-y-auto border-r border-border bg-background px-2 py-3">
+      <aside className="hidden w-56 shrink-0 overflow-y-auto border-r border-border bg-background px-2 py-3 md:block">
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="기능 이름으로 찾기" className="mb-2 w-full rounded border border-border px-2 py-1 text-xs outline-none" />
         {p.groups.map((g) => (
           <div key={g.id} className="mb-1">
@@ -164,11 +202,12 @@ export function FeaturesView({ p }: { p: Project }) {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center gap-2 border-b border-border bg-background px-3 py-1.5 text-xs">
+        <div className="flex flex-wrap items-center gap-2 border-b border-border bg-background px-3 py-1.5 text-xs">
           {([["graph", "그래프"], ["tree", "디렉터리"], ["doc", "문서"]] as const).map(([k, l]) => (
             <button key={k} onClick={() => setView(k)} className={`rounded px-2 py-1 ${view === k ? "bg-border font-medium" : "text-foreground-support"}`}>{l}</button>
           ))}
-          <div className="ml-auto flex items-center gap-1.5">
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="기능 찾기" className="w-24 rounded border border-border px-2 py-1 outline-none md:hidden" />
+          <div className="flex flex-wrap items-center gap-1.5 md:ml-auto">
             <select value={filter.status} onChange={(e) => setFilter({ ...filter, status: e.target.value as Filter["status"] })} className="rounded border border-border px-1 py-0.5">
               <option value="all">진행 상태 전체</option>
               {Object.entries(STATUS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
@@ -186,7 +225,7 @@ export function FeaturesView({ p }: { p: Project }) {
         <div className="flex-1 overflow-auto bg-[radial-gradient(var(--color-border)_1px,transparent_1px)] [background-size:16px_16px]">
           {view === "graph" && <div className="p-6"><Graph p={p} groups={groups} onOpen={setOpen} pendingIds={pendingIds} /></div>}
           {view === "tree" && (
-            <div className="mx-auto max-w-3xl p-6">
+            <div className="mx-auto max-w-3xl p-3 md:p-6">
               {groups.map((g) => (
                 <div key={g.id} className="mb-3 rounded-lg border border-border bg-background">
                   <p className="border-b border-border px-4 py-2 text-sm font-medium">{g.code}. {g.title} <span className="text-xs text-foreground-muted">{g.features.length}</span></p>
@@ -194,18 +233,20 @@ export function FeaturesView({ p }: { p: Project }) {
                     <button key={f.id} onClick={() => setOpen(f.id)} className="flex w-full items-center gap-3 px-4 py-2 text-left text-sm hover:bg-surface">
                       <span className="w-8 text-xs text-foreground-muted">{f.code}</span>
                       <span className="flex-1">{f.title}</span>
-                      <span className="text-xs text-foreground-muted">{f.roles.join(", ")}</span>
+                      <span className="hidden text-xs text-foreground-muted sm:inline">{f.roles.join(", ")}</span>
                       <span className="rounded bg-surface px-1.5 text-[11px]">{STATUS[f.status]}</span>
                     </button>
                   ))}
+                  <button onClick={() => addFeature(p.id, g.id)} className="w-full px-4 py-2 text-left text-xs text-foreground-muted hover:text-primary">+ 기능 추가</button>
                 </div>
               ))}
+              <button onClick={() => addGroup(p.id)} className="text-xs text-foreground-muted hover:text-primary">+ 기능 묶음 추가</button>
             </div>
           )}
           {view === "doc" && (
-            <div className="mx-auto max-w-3xl space-y-4 p-6">
+            <div className="mx-auto max-w-3xl space-y-4 p-3 md:p-6">
               {groups.map((g) => (
-                <section key={g.id} className="rounded-xl border border-border bg-background px-7 py-6">
+                <section key={g.id} className="rounded-xl border border-border bg-background px-4 py-5 md:px-7 md:py-6">
                   <h2 className="mb-4 text-lg font-semibold">{g.code}. {g.title}</h2>
                   {g.features.map((f) => (
                     <div key={f.id} className="mb-5 cursor-pointer" onClick={() => setOpen(f.id)}>
@@ -223,23 +264,7 @@ export function FeaturesView({ p }: { p: Project }) {
 
       {current && <Detail p={p} f={current.f} group={current.g} onClose={() => setOpen(null)} />}
 
-      {pending && (
-        <div className="animate-fade-up absolute bottom-4 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 rounded-lg border border-border bg-background px-3 py-2 text-sm shadow-lg">
-          <span className="text-xs text-foreground-muted">AI 수정안</span>
-          <button onClick={() => setPi(Math.max(0, pi - 1))} className="text-foreground-muted">‹</button>
-          <span className="text-xs">{Math.min(pi, p.pending.length - 1) + 1} / {p.pending.length}</span>
-          <button onClick={() => setPi(Math.min(p.pending.length - 1, pi + 1))} className="text-foreground-muted">›</button>
-          <button onClick={() => setOpen(pending.kind === "edit" ? pending.featureId : null)} className="max-w-56 truncate text-left">
-            <span className="mr-1 rounded bg-primary-soft px-1 text-[10px] text-primary">{pending.kind === "add" ? "추가" : "수정"}</span>
-            {(pending.after.title as string) ?? allFeatures.find((x) => x.f.id === pending.featureId)?.f.title}
-          </button>
-          <button onClick={() => resolvePending(p.id, pending.id, false)} className="rounded border border-border px-2 py-1 text-xs">✕ 거절</button>
-          <button onClick={() => resolvePending(p.id, pending.id, true)} className="rounded bg-primary px-2 py-1 text-xs text-white">✓ 승인</button>
-          {p.pending.length > 1 && (
-            <button onClick={() => p.pending.forEach((c) => resolvePending(p.id, c.id, true))} className="text-xs text-primary">모두 승인</button>
-          )}
-        </div>
-      )}
+      {pending && <PendingBar p={p} pi={pi} setPi={setPi} onOpen={setOpen} title={(id) => allFeatures.find((x) => x.f.id === id)?.f.title} />}
     </div>
   );
 }

@@ -39,9 +39,9 @@ export function FlowView({ p }: { p: Project }) {
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 border-b border-border bg-background px-4 py-2 text-xs">
-        <span className="font-medium">{p.name}</span>
+        <span className="truncate font-medium">{p.name}</span>
         <div className="ml-auto flex items-center gap-3 text-foreground-support">
-          {LEGEND.map(([k, l]) => <span key={k} className="flex items-center gap-1"><svg width={18} height={12}><Shape kind={k} x={0} y={0} label="" /></svg>{l}</span>)}
+          {LEGEND.map(([k, l]) => <span key={k} className="hidden items-center gap-1 md:flex"><svg width={18} height={12}><Shape kind={k} x={0} y={0} label="" /></svg>{l}</span>)}
           <button onClick={() => generateFlow(p.id)} className="rounded border border-border px-2 py-0.5">다시 그리기</button>
         </div>
       </div>

@@ -137,11 +137,11 @@ export function CommentsPanel({ p, featureTitle }: { p: Project; featureTitle: (
           </div>
         )) : <Empty text="아직 코멘트가 없어요. 기능 상세 화면에서도 남길 수 있어요." />}
       </div>
-      <div className="m-3 flex gap-2">
+      <form className="m-3 flex gap-2" onSubmit={(e) => { e.preventDefault(); if (text.trim()) { addComment(p.id, text.trim()); setText(""); } }}>
         <input value={text} onChange={(e) => setText(e.target.value)} placeholder="프로젝트 전체에 코멘트 남기기"
-          onKeyDown={(e) => { if (e.key === "Enter" && text.trim() && !e.nativeEvent.isComposing) { addComment(p.id, text.trim()); setText(""); } }}
-          className="flex-1 rounded-md border border-border px-2 py-1.5 text-sm outline-none focus:border-primary" />
-      </div>
+          className="min-w-0 flex-1 rounded-md border border-border px-2 py-2 text-sm outline-none focus:border-primary" />
+        <button disabled={!text.trim()} className="rounded-md bg-primary px-3 text-sm text-white disabled:opacity-40">남기기</button>
+      </form>
     </div>
   );
 }
@@ -184,8 +184,10 @@ export function VersionsPanel({ p }: { p: Project }) {
 
 export function SettingsPanel({ p }: { p: Project }) {
   const [s, setS] = useState(p.settings);
+  const [saved, setSaved] = useState(false);
   return (
-    <div className="space-y-4 px-4 py-4 text-sm">
+    <div className="h-full space-y-4 overflow-y-auto px-4 py-4 text-sm">
+      <p className="font-medium">이 프로젝트의 문서</p>
       <label className="block">
         <span className="text-xs text-foreground-support">문서 언어</span>
         <select value={s.language} onChange={(e) => setS({ ...s, language: e.target.value })} className="mt-1 w-full rounded-md border border-border px-2 py-1.5">
@@ -198,10 +200,10 @@ export function SettingsPanel({ p }: { p: Project }) {
           <option>간결하게</option><option>자세하게</option><option>보고서체</option>
         </select>
       </label>
-      <button onClick={() => setSettings(p.id, s)} className="w-full rounded-md bg-primary py-2 text-white">저장</button>
-      <p className="text-xs text-foreground-muted">이 설정은 다음에 만드는 문서부터 적용돼요.</p>
+      <button onClick={() => { setSettings(p.id, s); setSaved(true); setTimeout(() => setSaved(false), 1500); }} className="w-full rounded-md bg-primary py-2 text-white">{saved ? "저장했어요" : "저장"}</button>
+      <p className="text-xs text-foreground-muted">AI가 다음에 쓰는 글부터 적용돼요. 기본 생성기는 한국어로만 써요.</p>
       <div className="border-t border-border pt-4">
-        <p className="mb-2 font-medium">AI 연결</p>
+        <p className="mb-2 font-medium">AI 설정 (모든 프로젝트 공통)</p>
         <AiKeyForm />
       </div>
     </div>

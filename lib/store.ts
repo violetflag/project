@@ -49,7 +49,7 @@ export function useProject(id: string | null) {
   return all.find((p) => p.id === id) ?? null;
 }
 
-export function createProject(idea: string, startFrom: "ask" | "files" = "ask", withAi = false): Project {
+export function createProject(idea: string, startFrom: "ask" | "files" = "ask", withAi = false, materials: Project["materials"] = []): Project {
   const now = Date.now();
   // With AI on, questions arrive asynchronously (see initQuestions).
   const questions = withAi ? [] : makeQuestions();
@@ -57,13 +57,14 @@ export function createProject(idea: string, startFrom: "ask" | "files" = "ask", 
     id: uid("p_"),
     name: shortName(idea),
     idea,
+    materials,
     createdAt: now,
     updatedAt: now,
     questions,
     answers: {},
     chat: [
       { id: uid("m_"), from: "ai", text: startFrom === "files"
-        ? "올려 주신 자료를 기준으로 기획을 시작할게요. 빠진 부분을 채우기 위해 몇 가지만 여쭤볼게요."
+        ? `올려 주신 자료(${materials.map((m) => m.name).join(", ") || "없음"})를 기준으로 기획을 시작할게요. 빠진 부분을 채우기 위해 몇 가지만 여쭤볼게요.`
         : "안녕하세요. 기획을 함께 정리할 AI 어시스턴트예요. 범위와 대상을 분명히 하기 위해 여섯 가지만 여쭤볼게요." },
       withAi
         ? { id: uid("m_"), from: "ai", text: "아이디어에 맞는 질문을 만들고 있어요…", thinking: true }
@@ -104,4 +105,14 @@ export function restoreProject(id: string) {
 }
 export function purgeProject(id: string) {
   save(load().filter((p) => p.id !== id));
+}
+
+// Restores a project from a "JSON 백업" file. A clashing id gets a fresh one.
+export function importProject(json: string): Project {
+  const p = JSON.parse(json) as Project;
+  if (!p || typeof p.idea !== "string" || !Array.isArray(p.chat)) throw new Error("Planspace 백업 파일이 아니에요.");
+  const all = load();
+  const next: Project = { ...p, id: all.some((x) => x.id === p.id) ? uid("p_") : p.id, deletedAt: undefined, updatedAt: Date.now() };
+  save([next, ...all]);
+  return next;
 }

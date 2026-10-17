@@ -4,9 +4,12 @@ function download(name: string, text: string, type: string) {
   const blob = new Blob([text], { type });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = name;
+  a.download = name.replace(/[\\/:*?"<>|]/g, "_");
+  // Some browsers (iOS Safari, older Chrome) ignore the file name on a detached link.
+  document.body.appendChild(a);
   a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
 
 export function toMarkdown(p: Project) {
@@ -41,7 +44,7 @@ export function exportMarkdown(p: Project) {
 export function exportCsv(p: Project) {
   const rows = [["번호", "기능 묶음", "기능", "설명", "역할", "중요도", "상태", "수용 기준"]];
   p.groups?.forEach((g) => g.features.forEach((f) =>
-    rows.push([f.code, g.title, f.title, f.summary, f.roles.join(", "), String(f.priority), f.status, f.criteria.join(" / ")])));
+    rows.push([f.code, g.title, f.title, f.summary, f.roles.join(", "), ({ 3: "높음", 2: "보통", 1: "낮음" } as const)[f.priority], ({ draft: "작성 중", review: "검토 중", done: "확정" } as const)[f.status], f.criteria.join(" / ")])));
   // BOM so Excel opens Korean text correctly.
   download(`${p.name}-기능명세서.csv`, "﻿" + rows.map((r) => r.map(csvCell).join(",")).join("\n"), "text/csv");
 }
