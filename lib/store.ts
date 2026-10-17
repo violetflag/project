@@ -3,6 +3,7 @@
 import { useSyncExternalStore } from "react";
 import { uid } from "./id";
 import { makeQuestions, shortName } from "./generator";
+import { migrate } from "./migrate";
 import type { Project } from "./types";
 
 // Projects live in localStorage so the app works on static hosting.
@@ -19,7 +20,7 @@ export const onLocalProjectsChange = (l: () => void) => {
 function load(): Project[] {
   if (cache) return cache;
   try {
-    cache = JSON.parse(localStorage.getItem(KEY) || "[]");
+    cache = (JSON.parse(localStorage.getItem(KEY) || "[]") as Project[]).map(migrate);
   } catch {
     cache = [];
   }
@@ -60,7 +61,7 @@ function setPurged(ids: string[]) {
 
 export function applySyncedProjects(projects: Project[], purged: string[]) {
   setPurged(purged);
-  save(projects, true);
+  save(projects.map(migrate), true);
 }
 
 const subscribe = (l: () => void) => {
@@ -104,17 +105,17 @@ export function createProject(idea: string, startFrom: "ask" | "files" = "ask", 
         : { id: uid("m_"), from: "ai", text: "", question: questions[0] },
     ],
     prd: null,
-    groups: null,
-    flow: null,
-    screens: null,
+    spec: null,
+    flows: [],
+    wires: [],
     findings: null,
-    pending: [],
     comments: [],
     decisions: [],
     notes: [],
     versions: [],
     log: [{ id: uid("l_"), at: now, text: "프로젝트를 만들었어요" }],
     settings: { language: "한국어", tone: "간결하게" },
+    schema: 2,
   };
   save([p, ...load()]);
   return p;
