@@ -7,6 +7,7 @@ import { aiEnabled, isBusy } from "@/lib/run";
 import type { Project, WireEl } from "@/lib/types";
 import { useIsMobile } from "@/lib/useMedia";
 import {
+  defaultDevice,
   deleteEl, deleteSet, finishEditing, generateWires, isDrawing, moveEl, openSet, pageNodes, regeneratePage,
   setPageEls, syncWires, updateEl, useDrawing,
 } from "@/lib/wire";
@@ -19,12 +20,6 @@ import { FRAME, Screen } from "./wire/Screen";
 const Spinner = () => <span className="inline-block h-3 w-3 shrink-0 animate-spin rounded-full border-[1.5px] border-primary border-t-transparent" />;
 const tool = "rounded-md border border-border bg-background px-2.5 py-1 text-xs hover:bg-surface disabled:opacity-40";
 
-function defaultDevice(p: Project): "mobile" | "desktop" {
-  const d = (p.prdProps?.devices ?? []).join(" ");
-  if (/모바일|앱|iOS|Android|휴대폰/i.test(d)) return "mobile";
-  if (/웹|데스크톱|PC/i.test(d)) return "desktop";
-  return "mobile";
-}
 
 const fmt = (t: number) => new Date(t).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 

@@ -91,7 +91,7 @@ function addFlow(id: string, body: FlowBody, how: string) {
     summary = `${flow.name} 생성 · 노드 ${flow.nodes.length}개 · 연결 ${flow.edges.length}개`;
     return {
       ...p, flows: [...p.flows, flow], flowId: flow.id, stale: { ...p.stale, flow: false },
-      chat: [...p.chat, ai(`${flow.name}${josa(flow.name, "을/를")} ${how}. 구역 ${flow.sections.length}개, 노드 ${flow.nodes.length}개, 연결 ${flow.edges.length}개예요. 노드를 눌러 고치거나 [수정본 생성]으로 크게 바꿀 수 있어요.`)],
+      chat: [...p.chat, ai(`${flow.name}${josa(flow.name, "을/를")} ${how}. 구역 ${flow.sections.length}개, 노드 ${flow.nodes.length}개, 연결 ${flow.edges.length}개예요. 노드를 눌러 고치거나 [수정본 생성]으로 크게 바꿀 수 있어요.\n다음은 와이어프레임이에요. 유저플로우의 페이지마다 화면을 하나씩 그려요.`, { actions: ["make-wire"] })],
     };
   }, "유저플로우를 만들었어요");
   autoVersion(id, summary);

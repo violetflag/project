@@ -190,6 +190,7 @@ function applyPlan(id: string, plan: SpecPlan, step?: (s: string) => void) {
       examples ? `예: ${examples}` : "",
       qs ? `정하지 못한 부분은 질문 카드 ${qs}개로 슬롯 안에 남겨 두었어요.` : "",
       "모든 변경은 승인 대기 중이에요. 기능명세서 아래 검토 바에서 하나씩 또는 한꺼번에 승인·거절해 주세요.",
+      "승인을 마치면 다음 단계인 유저플로우를 안내해 드릴게요.",
     ].filter(Boolean).join("\n");
   updateProject(id, (p) => ({ ...p, chat: [...p.chat, ai(text, { actions: ["goto-features"], steps: added.length ? ["문서 읽음", "요구사항 작성 완료", "기능 작성 완료", "상세 기능 작성 완료"] : undefined })] }));
   saveToDrive();
@@ -425,7 +426,16 @@ function afterReview(id: string, approved: SpecItem[], summary: string) {
     updateProject(id, (p) => (p.flows.length ? { ...p, stale: { ...p.stale, flow: true, wire: p.wires.length > 0 } } : p));
   }
   if (summary) autoVersion(id, summary);
+  nextAfterSpec(id);
   saveToDrive();
+}
+
+// Once the spec has no pending suggestions and there is no flow yet, the chat points at the next step, once.
+function nextAfterSpec(id: string) {
+  updateProject(id, (p) => {
+    if (!p.spec?.length || pendingItems(p.spec).length || p.flows.length || p.chat.some((m) => m.actions?.includes("make-flow"))) return p;
+    return { ...p, chat: [...p.chat, ai("기능명세서가 정리됐어요. 다음은 유저플로우예요. 기능명세서를 바탕으로 사용자가 어떤 화면을 거쳐 움직이는지 그려 드릴게요.", { actions: ["make-flow"] })] };
+  });
 }
 
 // Items whose pending state changes when id is decided (a new parent takes its new children along).
@@ -447,6 +457,7 @@ export function approve(id: string, itemId: string) {
 }
 export function reject(id: string, itemId: string) {
   updateProject(id, (x) => (x.spec ? { ...x, spec: rejectItem(x.spec, itemId) } : x), "AI 제안을 거절했어요");
+  nextAfterSpec(id);
   saveToDrive();
 }
 export function approveAllPending(id: string) {
@@ -458,6 +469,7 @@ export function approveAllPending(id: string) {
 }
 export function rejectAllPending(id: string) {
   updateProject(id, (x) => (x.spec ? { ...x, spec: rejectAll(x.spec) } : x), "AI 제안을 모두 거절했어요");
+  nextAfterSpec(id);
   saveToDrive();
 }
 

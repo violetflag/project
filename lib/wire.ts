@@ -141,6 +141,26 @@ ${styleOf(p)}`);
 
 // --- Generate -----------------------------------------------------------------------
 
+export function defaultDevice(p: Project): Device {
+  const d = (p.prdProps?.devices ?? []).join(" ");
+  if (/모바일|앱|iOS|Android|휴대폰/i.test(d)) return "mobile";
+  if (/웹|데스크톱|PC/i.test(d)) return "desktop";
+  return "mobile";
+}
+
+// Every page of the open flow, in the device the PRD targets. Used by the chat's next-step button.
+export function generateAllWires(id: string) {
+  const p = getProject(id);
+  const flow = p && (p.flows.find((f) => f.id === p.flowId) ?? p.flows.at(-1));
+  if (!p || !flow) return;
+  const nodeIds = pageNodes(flow).map((n) => n.id);
+  if (!nodeIds.length) {
+    updateProject(id, (x) => ({ ...x, chat: [...x.chat, ai("유저플로우에 페이지 노드가 없어서 그릴 화면이 없어요. 유저플로우에서 노드 종류를 [페이지]로 바꾸거나 페이지를 추가한 뒤 다시 눌러 주세요.")] }));
+    return;
+  }
+  return generateWires(id, { flowId: flow.id, device: defaultDevice(p), nodeIds });
+}
+
 export async function generateWires(id: string, opts: { flowId: string; device: Device; nodeIds: string[]; note?: string }) {
   const p0 = getProject(id);
   const flow = p0 && findFlow(p0, opts.flowId);
@@ -162,7 +182,7 @@ export async function generateWires(id: string, opts: { flowId: string; device: 
     setDrawing(setId, nodes.map((n) => n.id), false);
     autoVersion(id, `와이어프레임 ${nodes.length}페이지 생성`);
     const note = failed ? ` 그중 ${failed}페이지는 AI 호출이 실패해 기본 생성기로 그렸어요. [재생성]으로 다시 그릴 수 있어요.` : "";
-    updateProject(id, (p) => ({ ...p, chat: [...p.chat, ai(`와이어프레임 ${nodes.length}페이지를 그렸어요. 화면의 버튼을 누르면 연결된 다음 화면으로 넘어가요.${note}`)] }));
+    updateProject(id, (p) => ({ ...p, chat: [...p.chat, ai(`와이어프레임 ${nodes.length}페이지를 그렸어요. 화면의 버튼을 누르면 연결된 다음 화면으로 넘어가요.${note}\n마지막으로 PRD와 기능명세서를 여러 관점에서 검토해 빠진 부분을 찾아볼 수 있어요. 다 되면 오른쪽 위 [내보내기]로 기획서 전체를 받을 수 있어요.`, { actions: ["run-review"] })] }));
     saveToDrive();
   };
   const local = () => {

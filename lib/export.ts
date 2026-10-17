@@ -1,6 +1,6 @@
 import { flatten, LEVEL_LABEL, numbering } from "./spec-model";
 import { SLOTS, STATUS_LABEL } from "./types";
-import type { Flow, Project, SpecItem } from "./types";
+import type { Flow, Project, SpecItem, WireEl, WireSet } from "./types";
 
 function download(name: string, text: string, type: string) {
   const blob = new Blob([text], { type });
@@ -74,6 +74,31 @@ function flowList(f: Flow) {
   return out;
 }
 
+// One line per wireframe element, so a reader (or another AI) can rebuild the screen.
+function wireLine(e: WireEl, link: (id?: string) => string) {
+  const to = link(e.to);
+  switch (e.t) {
+    case "bar": return `상단바: ${e.title}${e.back ? " (뒤로가기)" : ""}${to}`;
+    case "heading": return `제목: ${e.text}${to}`;
+    case "text": return `${e.muted ? "보조 문구" : "문구"}: ${e.text}${to}`;
+    case "image": return `이미지: ${e.label}${to}`;
+    case "input": return `입력: ${e.label}${e.placeholder ? ` (예: ${e.placeholder})` : ""}${to}`;
+    case "button": return `${e.primary ? "주 버튼" : "버튼"}: ${e.text}${to}`;
+    case "chips": return `칩: ${e.items.join(" · ")}${to}`;
+    case "card": return `카드: ${e.title}${e.lines.length ? ` — ${e.lines.join(" / ")}` : ""}${to}`;
+    case "list": return `목록: ${e.items.map((x) => x.title + (x.sub ? ` (${x.sub})` : "")).join(" · ")}${to}`;
+    case "rows": return `정보: ${e.items.map((x) => `${x.label} ${x.value}`).join(" · ")}${to}`;
+    case "tabs": return `탭: ${e.items.join(" · ")}${to}`;
+    case "nav": return `하단 메뉴: ${e.items.join(" · ")}${to}`;
+    case "divider": return "구분선";
+  }
+}
+
+const wireLinker = (w: WireSet) => {
+  const names = new Map(w.pages.map((x) => [x.nodeId, x.name]));
+  return (id?: string) => (id && names.has(id) ? ` → ${names.get(id)}` : "");
+};
+
 export interface ExportOptions { mermaid?: boolean }
 
 export function toMarkdown(p: Project, opts: ExportOptions = {}) {
@@ -101,11 +126,13 @@ export function toMarkdown(p: Project, opts: ExportOptions = {}) {
   const w = currentWires(p);
   if (w) {
     out.push(`## 와이어프레임 (${w.device === "mobile" ? "모바일" : "데스크톱"}, ${w.pages.length}페이지)`, "");
+    const link = wireLinker(w);
     const sections = [...new Set(w.pages.map((x) => x.section))];
     sections.forEach((s) => {
       out.push(`### ${s}`, "");
-      w.pages.filter((x) => x.section === s).forEach((x) => out.push(`- ${x.name} (요소 ${x.els.length}개)`));
-      out.push("");
+      w.pages.filter((x) => x.section === s).forEach((x) => {
+        out.push(`#### ${x.name}`, "", ...x.els.map((e) => `- ${wireLine(e, link)}`), "");
+      });
     });
   }
   return out.join("\n");
@@ -121,11 +148,12 @@ export function toDeliverablesJson(p: Project) {
   });
   const f = currentFlow(p);
   const w = currentWires(p);
+  const link = w ? wireLinker(w) : () => "";
   return JSON.stringify({
     name: p.name, idea: p.idea, prd: p.prd, prdProps: p.prdProps,
     spec: (p.spec ?? []).filter((x) => x.pending?.kind !== "new").map(strip),
     flow: f ? { name: f.name, sections: f.sections, nodes: f.nodes, edges: f.edges, mermaid: flowMermaid(f) } : null,
-    wireframe: w ? { device: w.device, pages: w.pages.map((x) => ({ name: x.name, section: x.section, nodeId: x.nodeId, elements: x.els.length })) } : null,
+    wireframe: w ? { device: w.device, pages: w.pages.map((x) => ({ name: x.name, section: x.section, nodeId: x.nodeId, elements: x.els.map((e) => wireLine(e, link)) })) } : null,
   }, null, 2);
 }
 

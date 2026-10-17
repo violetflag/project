@@ -18,7 +18,7 @@ export function ShareDialog({ p, onClose }: { p: Project; onClose: () => void })
     setTimeout(() => setCopied(""), 1800);
   };
   const items: [string, string, () => void][] = [
-    ["Markdown 파일", "PRD, 3단계 기능명세서(개발 준비·수용 기준 포함), 유저플로우, 와이어프레임 페이지 목록", () => exportMarkdown(p, { mermaid })],
+    ["Markdown 파일", "PRD, 3단계 기능명세서(개발 준비·수용 기준 포함), 유저플로우, 와이어프레임 화면별 구성", () => exportMarkdown(p, { mermaid })],
     ["JSON 기획서", "결과물만 구조화해 담아요. 다른 도구나 AI 코딩 도구에 넘기기 좋아요", () => exportDeliverables(p)],
     ["엑셀(CSV) 기능명세서", "요구사항·기능·상세 기능을 한 줄씩 표로 받아요", () => exportCsv(p)],
     ["JSON 백업", "프로젝트 전체를 보관해요. [전체 프로젝트]에서 다시 불러올 수 있어요", () => exportJson(p)],

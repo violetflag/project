@@ -4,6 +4,8 @@ import { useEffect, useRef } from "react";
 import { addMoreQuestions, createPrd, editAnswer, isBusy, review } from "@/lib/actions";
 import { approveAllPending, completeSpec, rejectAllPending } from "@/lib/spec";
 import { pendingItems } from "@/lib/spec-model";
+import { generateFlow } from "@/lib/flow";
+import { generateAllWires } from "@/lib/wire";
 import type { ChatMessage, Project } from "@/lib/types";
 import { Sparkle } from "../icons";
 import { ChoiceCard, QuestionCard, RichText, ThinkingBubble } from "./assist/cards";
@@ -35,6 +37,18 @@ function Actions({ p, m, onGoto }: { p: Project; m: ChatMessage; onGoto: (tab: s
       )}
       {a.includes("goto-features") && (
         <button onClick={() => onGoto("features")} className={btn}>→ 기능명세서에서 확인하기</button>
+      )}
+      {a.includes("make-flow") && (
+        <button disabled={busy || !p.spec?.length} onClick={() => { generateFlow(p.id); onGoto("flow"); }} aria-label="다음 단계: 유저플로우 만들기"
+          className="flex items-center justify-center gap-1.5 rounded-md bg-primary py-2 text-sm font-medium text-white disabled:opacity-50">
+          <Sparkle className="h-3.5 w-3.5" /> 유저플로우 만들기
+        </button>
+      )}
+      {a.includes("make-wire") && (
+        <button disabled={busy || !p.flows.length} onClick={() => { generateAllWires(p.id); onGoto("wire"); }} aria-label="다음 단계: 와이어프레임 전체 만들기"
+          className="flex items-center justify-center gap-1.5 rounded-md bg-primary py-2 text-sm font-medium text-white disabled:opacity-50">
+          <Sparkle className="h-3.5 w-3.5" /> 와이어프레임 전체 만들기
+        </button>
       )}
       {a.includes("run-review") && (
         <button disabled={busy || !p.spec?.length} onClick={() => { review(p.id); onGoto("review"); }} className={btn}>→ 기획서 전체 검토하기</button>

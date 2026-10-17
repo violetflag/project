@@ -147,7 +147,7 @@ export interface ChatMessage {
   question?: Question;
   answered?: string[];
   choices?: { question: string; options: ChatOption[]; picked?: string };
-  actions?: ("generate-prd" | "more-questions" | "goto-features" | "run-review" | "complete-spec")[];
+  actions?: ("generate-prd" | "more-questions" | "goto-features" | "run-review" | "complete-spec" | "make-flow" | "make-wire")[];
 }
 
 export type Perspective = "개발" | "사업" | "UX" | "디자인" | "QA" | "보안";
