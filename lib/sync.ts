@@ -9,7 +9,8 @@ import { applySyncedAi, getAiSettings, getAiUpdatedAt, getApiKey, onLocalAiChang
 import { applySyncedProjects, getAllProjects, getPurged, onLocalProjectsChange } from "./store";
 import type { Project } from "./types";
 
-export const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
+// Public OAuth client id (not a secret); allowed origin is https://violetflag.github.io.
+export const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "506759743876-b9p88u1n8k2ra0u7q5h67oqvika7043c.apps.googleusercontent.com";
 const SCOPE = "https://www.googleapis.com/auth/drive.appdata openid email profile";
 const FILE = "planspace.json";
 const AUTH = "planspace.google";
