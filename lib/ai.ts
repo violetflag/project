@@ -42,7 +42,31 @@ const KEY = "planspace.anthropic.key";
 const SETTINGS = "planspace.ai.settings";
 
 const listeners = new Set<() => void>();
-const emit = () => listeners.forEach((l) => l());
+const PREFS_AT = "planspace.ai.updatedAt";
+const localListeners = new Set<() => void>();
+export const onLocalAiChange = (l: () => void) => {
+  localListeners.add(l);
+  return () => localListeners.delete(l);
+};
+// A change made on this device: remember when, so the newest wins when syncing.
+const emit = (fromSync = false) => {
+  if (!fromSync) {
+    try {
+      localStorage.setItem(PREFS_AT, String(Date.now()));
+    } catch {
+      // Not critical.
+    }
+    localListeners.forEach((l) => l());
+  }
+  listeners.forEach((l) => l());
+};
+export function getAiUpdatedAt() {
+  try {
+    return Number(localStorage.getItem(PREFS_AT) || 0);
+  } catch {
+    return 0;
+  }
+}
 const subscribe = (l: () => void) => {
   listeners.add(l);
   return () => listeners.delete(l);
@@ -95,6 +119,20 @@ export function setAiSettings(patch: Partial<AiSettings>) {
   }
   emit();
 }
+// Apply the key and settings saved from another device.
+export function applySyncedAi(key: string, settings: AiSettings, at: number) {
+  try {
+    if (key) localStorage.setItem(KEY, key);
+    else localStorage.removeItem(KEY);
+    localStorage.setItem(SETTINGS, JSON.stringify(settings));
+    localStorage.setItem(PREFS_AT, String(at));
+  } catch {
+    // Storage blocked.
+  }
+  settingsCache = null;
+  emit(true);
+}
+
 export function useAiSettings() {
   return useSyncExternalStore(subscribe, getAiSettings, () => DEFAULTS);
 }

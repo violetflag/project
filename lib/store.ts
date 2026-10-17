@@ -9,6 +9,12 @@ import type { Project } from "./types";
 const KEY = "planspace.projects.v1";
 let cache: Project[] | null = null;
 const listeners = new Set<() => void>();
+// Called after a change made on this device (not one pulled from Google Drive).
+const localListeners = new Set<() => void>();
+export const onLocalProjectsChange = (l: () => void) => {
+  localListeners.add(l);
+  return () => localListeners.delete(l);
+};
 
 function load(): Project[] {
   if (cache) return cache;
@@ -20,7 +26,7 @@ function load(): Project[] {
   return cache!;
 }
 
-function save(next: Project[]) {
+function save(next: Project[], fromSync = false) {
   cache = next;
   try {
     localStorage.setItem(KEY, JSON.stringify(next));
@@ -28,6 +34,33 @@ function save(next: Project[]) {
     // Storage full or blocked: keep working in memory.
   }
   listeners.forEach((l) => l());
+  if (!fromSync) localListeners.forEach((l) => l());
+}
+
+export function getAllProjects() {
+  return load();
+}
+
+// Ids of projects deleted for good, so a sync doesn't bring them back.
+const PURGED = "planspace.purged.v1";
+export function getPurged(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(PURGED) || "[]");
+  } catch {
+    return [];
+  }
+}
+function setPurged(ids: string[]) {
+  try {
+    localStorage.setItem(PURGED, JSON.stringify([...new Set(ids)].slice(-500)));
+  } catch {
+    // Not critical.
+  }
+}
+
+export function applySyncedProjects(projects: Project[], purged: string[]) {
+  setPurged(purged);
+  save(projects, true);
 }
 
 const subscribe = (l: () => void) => {
@@ -104,6 +137,7 @@ export function restoreProject(id: string) {
   updateProject(id, (p) => ({ ...p, deletedAt: undefined }));
 }
 export function purgeProject(id: string) {
+  setPurged([...getPurged(), id]);
   save(load().filter((p) => p.id !== id));
 }
 

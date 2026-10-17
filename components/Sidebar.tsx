@@ -6,6 +6,7 @@ import { useState } from "react";
 import { EFFORTS, modelLabel, useAiSettings, useApiKey } from "@/lib/ai";
 import { brand } from "@/lib/brand";
 import { useProjects } from "@/lib/store";
+import { AccountBox } from "./AccountBox";
 import { AiKeyDialog } from "./AiKeyForm";
 import { HelpDialog } from "./HelpDialog";
 import { FolderIcon, Gear, HelpIcon, HomeIcon, Plus, Sparkle, TrashIcon } from "./icons";
@@ -56,6 +57,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         {recent.length ? list(recent) : <p className="px-2.5 py-3 text-xs text-foreground-muted">아직 프로젝트가 없어요</p>}
       </div>
       <div className="flex flex-col gap-1 pb-1">
+        <AccountBox />
         <button onClick={() => setAiOpen(true)} className="flex w-full items-center gap-3 rounded-md border border-border bg-background px-3 py-2.5 text-left hover:border-border-strong">
           <span className="flex-1">
             <span className="block text-sm font-medium">AI 설정</span>
