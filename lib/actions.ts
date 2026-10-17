@@ -10,7 +10,7 @@ import {
   aiQuestions, aiSummary, ask, describeError, historySize, materialText, prdText, styleOf,
 } from "./ai";
 import { ai, aiEnabled, me, withAi } from "./run";
-import { generatePrd } from "./spec";
+import { cleanSlots, generatePrd, slotGuide, SlotsSchema, slotWords } from "./spec";
 import {
   blankItem, findItem, flatten, insertItem, LEVEL_LABEL, pathTo, proposeEdit, specText,
 } from "./spec-model";
@@ -260,6 +260,7 @@ const EditSchema = z.object({
   title: z.string(),
   summary: z.string(),
   criteria: z.array(z.string()),
+  slots: SlotsSchema,
   reason: z.string(),
 });
 const AddSchema = z.object({
@@ -267,10 +268,16 @@ const AddSchema = z.object({
   title: z.string(),
   summary: z.string(),
   criteria: z.array(z.string()),
+  slots: SlotsSchema,
   reason: z.string(),
 });
-type Edit = z.infer<typeof EditSchema>;
-type Add = z.infer<typeof AddSchema>;
+// Prompt lines shared by every call that returns edits/additions.
+const editRules = `- slots: 바뀌는 개발 준비 슬롯 칸만 한 줄에 {slot: 영문 키, text: 문장} 하나씩, 그 칸의 문장 전체를 다시 씁니다(${slotGuide}). 안 바꾸면 빈 배열. 새 항목(기능·상세 기능)은 9칸을 모두 씁니다.
+- 결정이 바뀌면 설명뿐 아니라 그 결정이 적힌 슬롯 문장도 함께 고쳐 서로 어긋나지 않게 합니다.
+- reason과 summary에서는 영문 키 대신 한국어 칸 이름(예: 규칙, 예외)을 씁니다.`;
+type Slots = z.infer<typeof SlotsSchema>;
+type Edit = Omit<z.infer<typeof EditSchema>, "slots"> & { slots?: Slots };
+type Add = Omit<z.infer<typeof AddSchema>, "slots"> & { slots?: Slots };
 
 // Empty strings and empty lists mean "keep as is". Returns the new tree and lines describing what changed.
 function applyProposals(spec: SpecItem[], edits: Edit[], adds: Add[]) {
@@ -283,9 +290,12 @@ function applyProposals(spec: SpecItem[], edits: Edit[], adds: Add[]) {
     if (e.title.trim()) patch.title = e.title.trim();
     if (e.summary.trim()) patch.summary = e.summary.trim();
     if (e.criteria.length) patch.criteria = e.criteria;
+    const slots = cleanSlots(e.slots ?? []);
+    if (t.level > 1 && Object.keys(slots).length) patch.slots = { ...t.slots, ...slots };
     if (!Object.keys(patch).length) continue;
-    next = proposeEdit(next, t.id, patch, e.reason || undefined);
-    lines.push(`수정 · ${LEVEL_LABEL[t.level]} ${t.code} ${patch.title ?? t.title}${e.reason ? ` — ${e.reason}` : ""}`);
+    const reason = slotWords(e.reason);
+    next = proposeEdit(next, t.id, patch, reason || undefined);
+    lines.push(`수정 · ${LEVEL_LABEL[t.level]} ${t.code} ${patch.title ?? t.title}${reason ? ` — ${reason}` : ""}`);
   }
   for (const a of adds) {
     const parent = a.parentCode.trim() ? flatten(next).find((x) => x.code === a.parentCode.trim()) : undefined;
@@ -294,6 +304,8 @@ function applyProposals(spec: SpecItem[], edits: Edit[], adds: Add[]) {
       ...blankItem(level, a.title.trim() || "새 항목", { kind: "new", reason: a.reason || undefined }),
       summary: a.summary, criteria: a.criteria.length ? a.criteria : undefined, roles: parent?.roles ?? [],
     };
+    const slots = cleanSlots(a.slots ?? []);
+    if (item.level > 1 && Object.keys(slots).length) item.slots = slots;
     const host = parent && parent.level === 3 ? pathTo(next, parent.id).at(-2) : parent;
     next = insertItem(next, host?.id ?? null, item, parent && parent.level === 3 ? parent.id : undefined);
     lines.push(`추가 · ${LEVEL_LABEL[item.level]} ${item.code} ${item.title}${host ? ` (${host.title} 아래)` : ""}`);
@@ -351,7 +363,7 @@ function resolveOptionsLocal(id: string, f: Finding, prefix: ReturnType<typeof m
     const options: ChatOption[] = [
       { title: "가장 단순한 규칙으로 정하기", detail: `${name}의 설명에 기본 규칙 한 가지를 적고, 수용 기준에 정상·예외 경우를 하나씩 추가해요. 새 항목은 생기지 않아요.` },
       { title: "사용자가 직접 고르게 하기", detail: `${name}에 사용자가 기준을 바꾸는 설정을 넣고, 그 아래에 '${f.perspective} 기준 설정' 상세 기능을 새로 추가해요. 화면이 하나 늘어요.` },
-      { title: "자동 처리와 알림을 함께 쓰기", detail: `${name}이 조건을 넘으면 자동으로 처리하도록 설명을 고치고, 관련된 사람에게 알리는 '처리 결과 알림' 상세 기능을 추가해요.` },
+      { title: "자동 처리와 알림을 함께 쓰기", detail: `${name}${josa(name, "이/가")} 조건을 넘으면 자동으로 처리하도록 설명을 고치고, 관련된 사람에게 알리는 '처리 결과 알림' 상세 기능을 추가해요.` },
     ];
     return { ...p, chat: [...p.chat, ...prefix, ai("해결 방법을 세 가지로 정리했어요. 하나를 고르면 바뀔 내용을 미리 보여 드려요.", { choices: { question: f.title, options } })] };
   });
@@ -422,6 +434,7 @@ ${specText(x.spec, true)}
 - edits: 바꿀 기존 항목. code는 위 코드 그대로, 바꾸지 않는 칸은 빈 문자열이나 빈 배열. criteria를 바꿀 때는 기존 기준을 포함한 전체 목록을 씁니다.
 - additions: 새로 필요한 기능이나 상세 기능. parentCode는 부모 항목 코드(요구사항 아래 기능, 기능 아래 상세 기능).
 - 꼭 필요한 항목만 바꿉니다. reason에는 왜 바꾸는지 한 줄.
+${editRules}
 - summary는 무엇을 바꿨는지 사용자에게 알려 주는 2~3문장.
 ${styleOf(x)}`);
     if (!choice) mark(out.picked || options[0]?.title || "AI 선택");
@@ -494,6 +507,7 @@ ${plainText(text)}
 - 질문이면 reply에 답만 하고 edits/additions는 빈 배열로 둡니다.
 - 기능을 고치거나 더해 달라는 요청이면 edits(기존 항목, code는 위 코드 그대로, 바꾸지 않는 칸은 빈 문자열/빈 배열)와 additions(parentCode는 부모 코드, 요구사항을 새로 만들 때만 빈 문자열)에 담고, reply에는 무엇을 바꿨는지 짧게 씁니다. 바뀐 내용은 사용자가 승인해야 반영됩니다.
 - 기획 전체 검토를 원하면 review를 true로 합니다.
+${editRules}
 ${styleOf(x)}`);
     let lines: string[] = [];
     if (x.spec && (out.edits.length || out.additions.length)) {

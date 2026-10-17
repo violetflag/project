@@ -7,7 +7,7 @@ import { useSyncExternalStore } from "react";
 import { z } from "zod";
 import { ask, prdText, styleOf } from "./ai";
 import { uid } from "./id";
-import { aiEnabled, withAi } from "./run";
+import { ai, aiEnabled, withAi } from "./run";
 import { specText } from "./spec-model";
 import { getProject, updateProject } from "./store";
 import { saveToDrive } from "./sync";
@@ -158,9 +158,11 @@ export async function generateWires(id: string, opts: { flowId: string; device: 
   }
   const setId = set.id;
   const nodes = pageNodes(flow).filter((n) => opts.nodeIds.includes(n.id));
-  const done = () => {
+  const done = (failed = 0) => {
     setDrawing(setId, nodes.map((n) => n.id), false);
     autoVersion(id, `와이어프레임 ${nodes.length}페이지 생성`);
+    const note = failed ? ` 그중 ${failed}페이지는 AI 호출이 실패해 기본 생성기로 그렸어요. [재생성]으로 다시 그릴 수 있어요.` : "";
+    updateProject(id, (p) => ({ ...p, chat: [...p.chat, ai(`와이어프레임 ${nodes.length}페이지를 그렸어요. 화면의 버튼을 누르면 연결된 다음 화면으로 넘어가요.${note}`)] }));
     saveToDrive();
   };
   const local = () => {
@@ -187,6 +189,7 @@ export async function generateWires(id: string, opts: { flowId: string; device: 
         els = await aiPage(p, flow, node, opts.device, opts.note);
       } catch (e) {
         fails++; first ??= e;
+        console.error(e);
         els = localPage(getProject(id)!, flow, node, opts.device);
       }
       putPage(id, setId, node, els);
@@ -196,7 +199,7 @@ export async function generateWires(id: string, opts: { flowId: string; device: 
     if (fails === nodes.length) throw first;
   }, local);
   if (!ran) { setDrawing(setId, nodes.map((n) => n.id), false); return; } // another AI job was running
-  done();
+  done(fails < nodes.length ? fails : 0);
 }
 
 export async function regeneratePage(id: string, setId: string, pageId: string, request: string) {

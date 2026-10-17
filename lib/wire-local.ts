@@ -9,7 +9,12 @@ import type { Flow, FlowNode, Project, SpecItem, WireEl } from "./types";
 type Device = "mobile" | "desktop";
 type ElBody = WireEl extends infer U ? (U extends WireEl ? Omit<U, "id"> : never) : never;
 
-export const pageNodes = (flow: Flow) => flow.nodes.filter((n) => n.kind === "page");
+// Page nodes in section order, so a page added later to an early section still sits with it.
+export const pageNodes = (flow: Flow) => {
+  const sec = (name: string) => { const i = flow.sections.indexOf(name); return i < 0 ? flow.sections.length : i; };
+  return flow.nodes.map((n, i) => ({ n, i })).filter(({ n }) => n.kind === "page")
+    .sort((a, b) => sec(a.n.section) - sec(b.n.section) || a.i - b.i).map(({ n }) => n);
+};
 
 // Pages reachable from a page, walking through data/branch/action nodes in between.
 export function nextPages(flow: Flow, nodeId: string): { node: FlowNode; label?: string }[] {

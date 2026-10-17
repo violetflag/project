@@ -1,5 +1,6 @@
 "use client";
 
+import { josa } from "./josa";
 import { z } from "zod";
 import { ask, materialText, prdText, styleOf } from "./ai";
 import { applyOps, edgeId, localFlow, localPlan, localSyncPlan, nodeId, opsSummary, type FlowBody, type FlowPlan, type FlowPlanOp } from "./flow-local";
@@ -90,7 +91,7 @@ function addFlow(id: string, body: FlowBody, how: string) {
     summary = `${flow.name} 생성 · 노드 ${flow.nodes.length}개 · 연결 ${flow.edges.length}개`;
     return {
       ...p, flows: [...p.flows, flow], flowId: flow.id, stale: { ...p.stale, flow: false },
-      chat: [...p.chat, ai(`${flow.name}를 ${how}. 구역 ${flow.sections.length}개, 노드 ${flow.nodes.length}개, 연결 ${flow.edges.length}개예요. 노드를 눌러 고치거나 [수정본 생성]으로 크게 바꿀 수 있어요.`)],
+      chat: [...p.chat, ai(`${flow.name}${josa(flow.name, "을/를")} ${how}. 구역 ${flow.sections.length}개, 노드 ${flow.nodes.length}개, 연결 ${flow.edges.length}개예요. 노드를 눌러 고치거나 [수정본 생성]으로 크게 바꿀 수 있어요.`)],
     };
   }, "유저플로우를 만들었어요");
   autoVersion(id, summary);

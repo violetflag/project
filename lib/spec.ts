@@ -18,7 +18,7 @@ import type { PrdProps, PrdSection, Project, SlotKey, SlotQuestion, SpecCore, Sp
 import { autoVersion } from "./versions";
 
 const SLOT_KEYS = SLOTS.map(([k]) => k) as [SlotKey, ...SlotKey[]];
-const slotGuide = SLOTS.map(([k, l]) => `${k}=${l}`).join(", ");
+export const slotGuide = SLOTS.map(([k, l]) => `${k}=${l}`).join(", ");
 const qid = () => `sq_${Math.random().toString(36).slice(2, 9)}`;
 const clampP = (n: number) => (Math.min(3, Math.max(1, Math.round(n || 2))) as 1 | 2 | 3);
 
@@ -116,17 +116,20 @@ export const SpecSchema = z.object({
   edits: z.array(EditSchema),
 });
 
+// AI text mentions slots by key ("exception"); readers see the Korean label ("예외").
+export const slotWords = (t: string) => t.replace(/\b(pre|trigger|action|result|exception|display|access|rule|data)\b/g, (k) => SLOTS.find(([x]) => x === k)?.[1] ?? k);
+
 // Accepts a slot's key ("trigger") or label ("트리거").
 const slotKey = (s: string): SlotKey | undefined => {
   const t = s.trim();
   return SLOTS.find(([k, l]) => k === t || l === t || l.replace(/\s/g, "") === t.replace(/\s/g, ""))?.[0];
 };
-const cleanSlots = (lines: z.infer<typeof SlotsSchema>) => {
+export const cleanSlots = (lines: z.infer<typeof SlotsSchema>) => {
   const out: Partial<Record<SlotKey, string[]>> = {};
   for (const l of lines) {
     const k = slotKey(l.slot);
-    const v = l.text.trim();
-    if (k && v) (out[k] ??= []).push(v);
+    const v = l.text.split("\n").map((x) => x.trim()).filter(Boolean);
+    if (k && v.length) (out[k] ??= []).push(...v);
   }
   return out;
 };
@@ -140,8 +143,11 @@ const toQs = (qs: z.infer<typeof QSchema>[]): SlotQuestion[] | undefined => {
   });
   return out.length ? out : undefined;
 };
+// Maps the AI's role names onto the PRD roles; "모임장" matches "모임장(구독 결제자)".
 const fixRoles = (rs: string[], allowed: string[]) => {
-  const ok = rs.filter((r) => !allowed.length || allowed.includes(r));
+  if (!allowed.length) return rs;
+  const base = (x: string) => x.replace(/\(.*\)/, "").trim();
+  const ok = [...new Set(rs.flatMap((r) => allowed.filter((a) => a === r || base(a) === base(r) || a.includes(base(r)) || r.includes(base(a)))))];
   return ok.length ? ok : allowed.slice(0, 1);
 };
 
@@ -179,7 +185,7 @@ function applyPlan(id: string, plan: SpecPlan, step?: (s: string) => void) {
   const text = !added.length && !plan.edits.length
     ? "지금 기능명세서에서 더 보탤 부분을 찾지 못했어요. 특정 항목을 고치고 싶다면 그 항목의 [보강]을 눌러 주세요."
     : [
-      parts ? `기능명세서에 ${parts}를 새로 제안했어요.` : "",
+      parts ? `기능명세서에 ${parts}${josa(parts, "을/를")} 새로 제안했어요.` : "",
       plan.edits.length ? `기존 항목 ${plan.edits.length}개도 보완하는 수정안을 만들었어요.` : "",
       examples ? `예: ${examples}` : "",
       qs ? `정하지 못한 부분은 질문 카드 ${qs}개로 슬롯 안에 남겨 두었어요.` : "",
@@ -221,6 +227,7 @@ ${materialNote(p)}
 - features(요구사항마다 2~3개): ref는 F1, F2…, parent는 속한 요구사항의 ref(또는 기존 R-코드). roles는 위 사용자 역할 중에서만 고릅니다. summary, rationale(이 기능이 필요한 근거), success(측정 가능한 성공 기준), priority.
 - details: 따로 검증할 수 있는 동작만 기능 아래에 0~3개 둡니다. parent는 기능의 ref(또는 기존 F-코드).
 - slots는 개발 준비 슬롯입니다. 한 줄에 {slot, text} 하나씩, slot은 ${slotGuide} 중 영문 키를 씁니다. 기능과 상세 기능마다 9칸을 모두 쓰고 칸마다 1~3줄, 개발자가 바로 구현할 수 있는 구체적인 문장(숫자·조건 포함)으로 씁니다.
+- 문장 안에서 다른 항목을 가리킬 때는 ref(R1, F2)나 영문 키가 아니라 항목 이름과 한국어 칸 이름을 씁니다.
 - 아직 정해지지 않아 사람이 골라야 하는 점은 questions로 남깁니다: slot은 위 영문 키, text는 "~할까요?" 질문, options 3~4개, recommended는 추천 보기의 0부터 시작하는 번호. 전체에서 4~8개 정도.
 ${styleOf(p)}`, await materialBlocks(p));
     const cur = getProject(id)!;
@@ -262,7 +269,7 @@ ${styleOf(p)}`, await materialBlocks(p));
       if (Object.keys(s).length) patch.slots = { ...t.slots, ...s };
       const q = toQs(e.questions);
       if (q) patch.questions = [...(t.questions ?? []), ...q];
-      if (Object.keys(patch).length) plan.edits.push({ id: t.id, patch, reason: e.reason });
+      if (Object.keys(patch).length) plan.edits.push({ id: t.id, patch, reason: slotWords(e.reason) });
     }
     applyPlan(id, plan, step);
   }, local);
@@ -329,8 +336,9 @@ ${styleOf(p)}`);
       return x.level === 1 ? { ...c, level: 2 as const, code: blankItem(2).code } : c;
     });
     step("수정안 작성 완료");
-    proposeItem(id, itemId, patch, kids, o.reason || `요청: ${request}`);
-    updateProject(id, (q2) => ({ ...q2, chat: [...q2.chat, ai(`'${x.title}' 수정안을 만들었어요. ${o.reason}\n바뀐 부분을 확인하고 승인해 주세요.`)] }));
+    const reason = slotWords(o.reason);
+    proposeItem(id, itemId, patch, kids, reason || `요청: ${request}`);
+    updateProject(id, (q2) => ({ ...q2, chat: [...q2.chat, ai(`'${x.title}' 수정안을 만들었어요. ${reason}\n바뀐 부분을 확인하고 승인해 주세요.`)] }));
   }, local);
 }
 
