@@ -9,6 +9,18 @@ export const ai = (text: string, extra: Partial<ChatMessage> = {}): ChatMessage 
 export const me = (text: string): ChatMessage => ({ id: uid("m_"), from: "user", text });
 
 export const aiEnabled = () => !!getApiKey();
+// Keeps the last AI failures (with the API's own message) for debugging.
+function logAiError(label: string, e: unknown) {
+  console.error(e);
+  try {
+    const list = JSON.parse(localStorage.getItem("planspace.aiErrors") || "[]");
+    list.unshift({ at: new Date().toISOString(), label, message: e instanceof Error ? e.message.slice(0, 600) : String(e) });
+    localStorage.setItem("planspace.aiErrors", JSON.stringify(list.slice(0, 10)));
+  } catch {
+    // Not critical.
+  }
+}
+
 export const isBusy = (p: Project) => p.chat.some((m) => m.thinking);
 
 // Runs a Claude call behind a "thinking" chat bubble whose steps the caller can advance
@@ -32,6 +44,7 @@ export async function withAi(
     drop();
   } catch (e) {
     drop();
+    logAiError(label, e);
     updateProject(id, (x) => ({ ...x, chat: [...x.chat, ai(`${describeError(e)} 이번에는 로컬 생성기로 대신 만들었어요.`, { error: true })] }));
     fallback();
   }

@@ -47,7 +47,7 @@ ${f.edges.map((e) => `${e.id} | ${e.from} → ${e.to} | ${e.label ?? ""}`).join(
 
 // --- Generate -------------------------------------------------------------------------
 
-const FlowSchema = z.object({
+export const FlowSchema = z.object({
   sections: z.array(z.string()),
   nodes: z.array(z.object({ key: z.string(), section: z.string(), kind: z.enum(KINDS), label: z.string() })),
   edges: z.array(z.object({ from: z.string(), to: z.string(), label: z.string() })),
@@ -111,7 +111,7 @@ export function generateFlow(id: string) {
 
 // --- Revision plans --------------------------------------------------------------------
 
-const PlanSchema = z.object({
+export const PlanSchema = z.object({
   summary: z.string(),
   ops: z.array(z.object({
     op: z.enum(["addNode", "removeNode", "renameNode", "addEdge", "removeEdge", "setEdgeLabel"]),

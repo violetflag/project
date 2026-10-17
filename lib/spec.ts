@@ -24,7 +24,7 @@ const clampP = (n: number) => (Math.min(3, Math.max(1, Math.round(n || 2))) as 1
 
 // --- PRD -------------------------------------------------------------------------------
 
-const PrdSchema = z.object({
+export const PrdSchema = z.object({
   oneLiner: z.string(), goal: z.string(), background: z.string(),
   problem: z.string(), solution: z.string(), differentiation: z.string(),
   target: z.string(), scenario: z.string(),
@@ -96,34 +96,50 @@ export function setPrdProps(id: string, patch: Partial<PrdProps>) {
 
 // --- Spec schemas ------------------------------------------------------------------------
 
-const SlotsSchema = z.object(Object.fromEntries(SLOT_KEYS.map((k) => [k, z.array(z.string())])) as Record<SlotKey, z.ZodArray<z.ZodString>>);
-const QSchema = z.object({ slot: z.enum(SLOT_KEYS), text: z.string(), options: z.array(z.string()), recommended: z.number() });
+// Kept small on purpose: the API compiles the schema into a grammar and rejects big ones
+// ("compiled grammar is too large"), so slots are slot/text lines and the tree comes back flat.
+export const SlotsSchema = z.array(z.object({ slot: z.string(), text: z.string() }));
+const QSchema = z.object({ slot: z.string(), text: z.string(), options: z.array(z.string()), recommended: z.number() });
 const DetailSchema = z.object({ title: z.string(), summary: z.string(), slots: SlotsSchema, questions: z.array(QSchema) });
 const FeatureSchema = z.object({
   title: z.string(), summary: z.string(), roles: z.array(z.string()), priority: z.number(),
-  rationale: z.string(), success: z.string(), slots: SlotsSchema, questions: z.array(QSchema), details: z.array(DetailSchema),
+  rationale: z.string(), success: z.string(), slots: SlotsSchema, questions: z.array(QSchema),
 });
-const ReqSchema = z.object({ title: z.string(), summary: z.string(), criteria: z.array(z.string()), priority: z.number(), features: z.array(FeatureSchema) });
 const EditSchema = z.object({
   code: z.string(), reason: z.string(), summary: z.string(), rationale: z.string(), success: z.string(),
   criteria: z.array(z.string()), slots: SlotsSchema, questions: z.array(QSchema),
 });
-const SpecSchema = z.object({
-  requirements: z.array(ReqSchema),
-  newFeatures: z.array(z.object({ parentCode: z.string(), feature: FeatureSchema })),
-  newDetails: z.array(z.object({ parentCode: z.string(), detail: DetailSchema })),
+export const SpecSchema = z.object({
+  requirements: z.array(z.object({ ref: z.string(), title: z.string(), summary: z.string(), criteria: z.array(z.string()), priority: z.number() })),
+  features: z.array(FeatureSchema.extend({ ref: z.string(), parent: z.string() })),
+  details: z.array(DetailSchema.extend({ parent: z.string() })),
   edits: z.array(EditSchema),
 });
 
-const cleanSlots = (s: z.infer<typeof SlotsSchema>) => {
+// Accepts a slot's key ("trigger") or label ("트리거").
+const slotKey = (s: string): SlotKey | undefined => {
+  const t = s.trim();
+  return SLOTS.find(([k, l]) => k === t || l === t || l.replace(/\s/g, "") === t.replace(/\s/g, ""))?.[0];
+};
+const cleanSlots = (lines: z.infer<typeof SlotsSchema>) => {
   const out: Partial<Record<SlotKey, string[]>> = {};
-  for (const k of SLOT_KEYS) { const v = (s[k] ?? []).map((x) => x.trim()).filter(Boolean); if (v.length) out[k] = v; }
+  for (const l of lines) {
+    const k = slotKey(l.slot);
+    const v = l.text.trim();
+    if (k && v) (out[k] ??= []).push(v);
+  }
   return out;
 };
-const toQs = (qs: z.infer<typeof QSchema>[]): SlotQuestion[] | undefined => (qs.length ? qs.map((q) => ({
-  id: qid(), slot: q.slot, text: q.text, options: q.options.slice(0, 4),
-  recommended: q.recommended >= 0 && q.recommended < q.options.length ? Math.round(q.recommended) : undefined,
-})) : undefined);
+const toQs = (qs: z.infer<typeof QSchema>[]): SlotQuestion[] | undefined => {
+  const out = qs.flatMap((q) => {
+    const slot = slotKey(q.slot);
+    return slot && q.text.trim() && q.options.length ? [{
+      id: qid(), slot, text: q.text, options: q.options.slice(0, 4),
+      recommended: q.recommended >= 0 && q.recommended < q.options.length ? Math.round(q.recommended) : undefined,
+    }] : [];
+  });
+  return out.length ? out : undefined;
+};
 const fixRoles = (rs: string[], allowed: string[]) => {
   const ok = rs.filter((r) => !allowed.length || allowed.includes(r));
   return ok.length ? ok : allowed.slice(0, 1);
@@ -137,12 +153,7 @@ function featureItem(f: z.infer<typeof FeatureSchema>, allowed: string[]): SpecI
   return {
     ...blankItem(2, f.title, { kind: "new" }), summary: f.summary, roles, priority: clampP(f.priority),
     rationale: f.rationale, success: f.success, slots: cleanSlots(f.slots), questions: toQs(f.questions),
-    children: f.details.map((d) => detailItem(d, roles)),
   };
-}
-function reqItem(r: z.infer<typeof ReqSchema>, allowed: string[]): SpecItem {
-  const children = r.features.map((f) => featureItem(f, allowed));
-  return { ...blankItem(1, r.title, { kind: "new" }), summary: r.summary, criteria: r.criteria, priority: clampP(r.priority), roles: [...new Set(children.flatMap((c) => c.roles))], children };
 }
 
 // --- Applying a plan ---------------------------------------------------------------------------
@@ -195,9 +206,8 @@ export async function completeSpec(id: string): Promise<void> {
     step("문서 읽음");
     const roles = p.prdProps?.roles ?? [];
     const existing = has ? `\n지금 기능명세서(코드 포함, 슬롯 포함):\n${specText(p.spec, true)}\n
-이미 있는 내용은 다시 만들지 말고 빠진 것만 더합니다.
-- 빠진 요구사항은 requirements에, 기존 요구사항(R-코드) 아래 빠진 기능은 newFeatures(parentCode=R-코드)에, 기존 기능(F-코드) 아래 빠진 상세 기능은 newDetails(parentCode=F-코드)에 넣습니다.
-- 기존 항목을 고쳐야 하면 edits에 그 code와 고친 전체 내용(바꾸지 않는 칸은 빈 문자열/빈 배열)과 reason을 넣습니다.` : "\n아직 기능명세서가 없어요. requirements에 전체를 쓰고 newFeatures, newDetails, edits는 빈 배열로 둡니다.";
+이미 있는 내용은 다시 만들지 말고 빠진 것만 더합니다. 기존 항목 아래에 넣을 때는 parent에 그 코드(R-…, F-…)를 씁니다.
+기존 항목을 고쳐야 하면 edits에 그 code와 고친 내용(바꾸지 않는 칸은 빈 문자열/빈 배열)과 reason을 넣습니다.` : "\n아직 기능명세서가 없어요. 전체를 새로 쓰고 edits는 빈 배열로 둡니다.";
     const out = await ask(SpecSchema, `아이디어: ${p.idea}${materialText(p)}
 질문 답변:
 ${answersText(p)}
@@ -206,18 +216,40 @@ ${prdText(p)}
 사용자 역할: ${roles.join(", ") || "일반 사용자, 관리자"}
 ${existing}
 ${materialNote(p)}
-요구사항 → 기능 → 상세 기능 3단계 기능명세서를 써 주세요.
-- 요구사항(5~8개): summary는 사용자가 이뤄야 할 것, criteria는 검증 가능한 수용 기준 3~5개, priority 1~3(3이 가장 중요).
-- 기능(요구사항마다 2~3개): roles는 위 사용자 역할 중에서만 고릅니다. summary, rationale(이 기능이 필요한 근거), success(측정 가능한 성공 기준), priority.
-- 상세 기능: 따로 검증할 수 있는 동작만 기능 아래에 0~3개 둡니다.
-- slots는 개발 준비 슬롯입니다(${slotGuide}). 기능과 상세 기능의 9칸을 각 1~3문장, 개발자가 바로 구현할 수 있는 구체적인 문장(숫자·조건 포함)으로 채웁니다.
-- 아직 정해지지 않아 사람이 골라야 하는 점은 해당 slot에 questions로 남깁니다: text는 "~할까요?" 질문, options 3~4개, recommended는 추천 보기의 0부터 시작하는 번호. 전체에서 4~8개 정도.
+요구사항 → 기능 → 상세 기능 3단계 기능명세서를 써 주세요. 세 단계를 각각 평평한 목록으로 쓰고 parent로 잇습니다.
+- requirements(${has ? "빠진 것만" : "5~8개"}): ref는 R1, R2…처럼 이 답 안에서 쓰는 이름. summary는 사용자가 이뤄야 할 것, criteria는 검증 가능한 수용 기준 3~5개, priority 1~3(3이 가장 중요).
+- features(요구사항마다 2~3개): ref는 F1, F2…, parent는 속한 요구사항의 ref(또는 기존 R-코드). roles는 위 사용자 역할 중에서만 고릅니다. summary, rationale(이 기능이 필요한 근거), success(측정 가능한 성공 기준), priority.
+- details: 따로 검증할 수 있는 동작만 기능 아래에 0~3개 둡니다. parent는 기능의 ref(또는 기존 F-코드).
+- slots는 개발 준비 슬롯입니다. 한 줄에 {slot, text} 하나씩, slot은 ${slotGuide} 중 영문 키를 씁니다. 기능과 상세 기능마다 9칸을 모두 쓰고 칸마다 1~3줄, 개발자가 바로 구현할 수 있는 구체적인 문장(숫자·조건 포함)으로 씁니다.
+- 아직 정해지지 않아 사람이 골라야 하는 점은 questions로 남깁니다: slot은 위 영문 키, text는 "~할까요?" 질문, options 3~4개, recommended는 추천 보기의 0부터 시작하는 번호. 전체에서 4~8개 정도.
 ${styleOf(p)}`, await materialBlocks(p));
     const cur = getProject(id)!;
     const byCode = (code: string) => flatten(cur.spec).find((x) => x.code === code.trim());
-    const plan: SpecPlan = { roots: out.requirements.map((r) => reqItem(r, roles)), under: [], edits: [] };
-    for (const f of out.newFeatures) { const t = byCode(f.parentCode); if (t?.level === 1) plan.under.push({ parentId: t.id, item: featureItem(f.feature, roles) }); }
-    for (const d of out.newDetails) { const t = byCode(d.parentCode); if (t?.level === 2) plan.under.push({ parentId: t.id, item: detailItem(d.detail, t.roles) }); }
+    const plan: SpecPlan = { roots: [], under: [], edits: [] };
+    // New requirements and features by ref; parents may also be existing codes.
+    const reqs = new Map<string, SpecItem>();
+    for (const r of out.requirements) {
+      const item: SpecItem = { ...blankItem(1, r.title, { kind: "new" }), summary: r.summary, criteria: r.criteria, priority: clampP(r.priority) };
+      reqs.set(r.ref.trim(), item);
+      plan.roots.push(item);
+    }
+    const feats = new Map<string, SpecItem>();
+    for (const f of out.features) {
+      const item = featureItem(f, roles);
+      const parent = reqs.get(f.parent.trim());
+      const existing = !parent && byCode(f.parent);
+      if (parent) parent.children.push(item);
+      else if (existing && existing.level === 1) plan.under.push({ parentId: existing.id, item });
+      else continue;
+      feats.set(f.ref.trim(), item);
+    }
+    for (const d of out.details) {
+      const parent = feats.get(d.parent.trim());
+      const existing = !parent && byCode(d.parent);
+      if (parent) parent.children.push(detailItem(d, parent.roles));
+      else if (existing && existing.level === 2) plan.under.push({ parentId: existing.id, item: detailItem(d, existing.roles) });
+    }
+    for (const r of plan.roots) r.roles = [...new Set(r.children.flatMap((c) => c.roles))];
     for (const e of out.edits) {
       const t = byCode(e.code);
       if (!t) continue;
@@ -238,7 +270,7 @@ ${styleOf(p)}`, await materialBlocks(p));
 
 // --- One item ------------------------------------------------------------------------------
 
-const ItemSchema = z.object({
+export const ItemSchema = z.object({
   reason: z.string(), title: z.string(), summary: z.string(), rationale: z.string(), success: z.string(),
   criteria: z.array(z.string()), slots: SlotsSchema, questions: z.array(QSchema), newChildren: z.array(DetailSchema),
 });
@@ -279,8 +311,8 @@ export async function enhanceItem(id: string, itemId: string, request: string): 
 
 요청: ${request}
 이 항목만 요청에 맞게 고쳐 전체 내용을 다시 써 주세요. 바꿀 필요 없는 칸은 원래 내용을 그대로 씁니다.
-- slots(${slotGuide})는 ${x.level === 1 ? "요구사항이라 빈 배열로 둡니다" : "켜진 칸을 구체적인 문장으로 씁니다"}. criteria는 ${x.level === 1 ? "수용 기준" : "빈 배열"}.
-- 새로 정해야 할 점이 생기면 questions에 넣습니다(보기 3~4개, recommended 번호). 기존 질문은 다시 넣지 않습니다.
+- slots는 한 줄에 {slot: 영문 키(${slotGuide}), text: 문장} 하나씩입니다. ${x.level === 1 ? "요구사항이라 빈 배열로 둡니다" : "켜진 칸마다 1~3줄, 구체적인 문장으로 씁니다"}. criteria는 ${x.level === 1 ? "수용 기준" : "빈 배열"}.
+- 새로 정해야 할 점이 생기면 questions에 넣습니다(slot은 영문 키, 보기 3~4개, recommended 번호). 기존 질문은 다시 넣지 않습니다.
 - 따로 검증할 동작이 새로 생기면 newChildren에 ${x.level === 1 ? "기능" : "상세 기능"}으로 넣습니다(${x.level === 3 ? "상세 기능은 자식을 둘 수 없으니 빈 배열" : "없으면 빈 배열"}).
 - reason: 무엇을 왜 바꿨는지 한 문장.
 ${styleOf(p)}`);
@@ -320,7 +352,7 @@ export async function fillSlots(id: string, itemId: string): Promise<void> {
     const o = await ask(z.object({ slots: SlotsSchema }), `${itemContext(p, x)}
 
 이 항목의 개발 준비 슬롯 중 비어 있는 칸(${empty.join(", ")})만 채워 주세요. (${slotGuide})
-각 칸 1~3문장, 숫자와 조건이 들어간 구체적인 문장으로 씁니다. 나머지 칸은 빈 배열로 둡니다.
+slots에는 한 줄에 {slot: 영문 키, text: 문장} 하나씩 씁니다. 칸마다 1~3줄, 숫자와 조건이 들어간 구체적인 문장으로 씁니다.
 ${styleOf(p)}`);
     const add = cleanSlots(o.slots);
     const slots = { ...x.slots };

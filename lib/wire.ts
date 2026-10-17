@@ -84,7 +84,7 @@ const ElSchema = z.object({
   items: z.array(z.string()),
   pairs: z.array(z.object({ a: z.string(), b: z.string() })),
 });
-const PageSchema = z.object({ els: z.array(ElSchema) });
+export const PageSchema = z.object({ els: z.array(ElSchema) });
 
 function toEl(x: z.infer<typeof ElSchema>, valid: Set<string>): WireEl {
   const to = valid.has(x.to) ? x.to : undefined;

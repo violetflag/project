@@ -209,7 +209,7 @@ export const materialNote = (p: Src) => (p.materials?.length ? "\n사용자가 �
 
 // --- Questions -------------------------------------------------------------
 
-const QuestionsSchema = z.object({
+export const QuestionsSchema = z.object({
   questions: z.array(z.object({
     text: z.string(),
     multi: z.boolean(),

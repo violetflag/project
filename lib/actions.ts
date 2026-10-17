@@ -120,7 +120,7 @@ export function updatePrdBlock(id: string, sid: string, idx: number, body: strin
 
 // --- Review -----------------------------------------------------------------------------
 
-const ReviewSchema = z.object({
+export const ReviewSchema = z.object({
   findings: z.array(z.object({
     perspective: z.enum(["개발", "사업", "UX", "디자인", "QA", "보안"]),
     level: z.enum(["주의", "제안"]),
@@ -307,7 +307,7 @@ const changedText = (lines: string[]) => (lines.length
 
 // --- Resolving a review finding in chat --------------------------------------------------------
 
-const OptionsSchema = z.object({
+export const OptionsSchema = z.object({
   intro: z.string(),
   options: z.array(z.object({ title: z.string(), detail: z.string() })),
 });
@@ -357,7 +357,7 @@ function resolveOptionsLocal(id: string, f: Finding, prefix: ReturnType<typeof m
   });
 }
 
-const ApplySchema = z.object({
+export const ApplySchema = z.object({
   picked: z.string(),
   edits: z.array(EditSchema),
   additions: z.array(AddSchema),
@@ -464,7 +464,7 @@ function chatContext(p: Project, text: string) {
   return `사용자가 다음 항목을 집어서 물었어요. 이 항목을 중심으로 답합니다.\n${parts.join("\n\n")}\n\n[기능명세서 목차]\n${specText(p.spec)}`;
 }
 
-const ChatSchema = z.object({
+export const ChatSchema = z.object({
   reply: z.string(),
   edits: z.array(EditSchema),
   additions: z.array(AddSchema),
