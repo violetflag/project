@@ -14,6 +14,7 @@ import { PrdView } from "./PrdView";
 import { SaveButton } from "../SaveButton";
 import { ShareDialog } from "./ShareDialog";
 import { CustomizePanel, ReviewPanel, VersionsPanel } from "./SidePanels";
+import { ProjectInfo } from "./ProjectInfo";
 import { SyncDialog, SyncIcon, filledDocs } from "./SyncDialog";
 import { WireframeView } from "./WireframeView";
 
@@ -90,6 +91,11 @@ export function EditorShell({ p }: { p: Project }) {
   const anyStale = stale.flow || stale.wire;
   const busy = isBusy(p);
   const [syncOpen, setSyncOpen] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
+  const infoBtn = (
+    <button type="button" onClick={() => setInfoOpen(true)} aria-label="프로젝트 정보" title="프로젝트 정보"
+      className="shrink-0 rounded p-1 text-xs text-foreground-muted hover:bg-surface">정보</button>
+  );
   const canSync = Object.values(filledDocs(p)).filter(Boolean).length >= 2;
   const openFindings = p.findings?.filter((f) => f.state === "open").length ?? 0;
 
@@ -146,10 +152,12 @@ export function EditorShell({ p }: { p: Project }) {
         <header className="flex h-12 shrink-0 items-center gap-1 border-b border-border px-2">
           <Link href="/" aria-label="홈으로" className="rounded p-1.5 text-foreground-muted hover:bg-surface"><ArrowLeft className="h-5 w-5" /></Link>
           <NameInput p={p} className="min-w-0 flex-1" />
+          {infoBtn}
           <SaveButton />
           {exportBtn}
         </header>
         {share && <ShareDialog p={p} onClose={() => setShare(false)} />}
+        {infoOpen && <ProjectInfo p={p} onClose={() => setInfoOpen(false)} />}
         {mobilePane === "doc" ? (
           <>
             <div className="shrink-0 border-b border-border px-2 py-1.5">{tabs}</div>
@@ -224,7 +232,9 @@ export function EditorShell({ p }: { p: Project }) {
       <div className="relative flex min-w-0 flex-1 flex-col">
         <header className="flex h-11 items-center gap-1 border-b border-border px-3">
           <button onClick={() => setPanel(panel ? null : "chat")} className="mr-1 rounded p-1 text-foreground-muted hover:bg-surface" title={panel ? "패널 접기" : "채팅 열기"} aria-label={panel ? "패널 접기" : "채팅 열기"}><Chat className="h-4 w-4" /></button>
-          <NameInput p={p} className="mr-3 w-56 shrink-0" />
+          <NameInput p={p} className="mr-1 w-56 shrink-0" />
+          {infoBtn}
+          <span className="mr-2" />
           {tabs}
           <div className="ml-auto flex shrink-0 items-center gap-2 pl-2">
             <SaveButton label />
@@ -233,6 +243,7 @@ export function EditorShell({ p }: { p: Project }) {
           </div>
         </header>
         {share && <ShareDialog p={p} onClose={() => setShare(false)} />}
+        {infoOpen && <ProjectInfo p={p} onClose={() => setInfoOpen(false)} />}
         {doc}
       </div>
     </div>
