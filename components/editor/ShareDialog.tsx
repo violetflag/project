@@ -4,6 +4,7 @@ import { useState } from "react";
 import { download, exportCsv, exportDeliverables, exportJson, exportMarkdown, toMarkdown } from "@/lib/export";
 import type { Project } from "@/lib/types";
 import { printPdf, pdfHtmlFile } from "@/lib/pdf";
+import { exportWirePng } from "@/lib/wire-png";
 import { Close } from "../icons";
 
 export function ShareDialog({ p, onClose }: { p: Project; onClose: () => void }) {
@@ -25,6 +26,7 @@ export function ShareDialog({ p, onClose }: { p: Project; onClose: () => void })
       const f = pdfHtmlFile(p);
       download(f.name, f.text, "text/html");
     }],
+    ["와이어프레임 PNG", "화면마다 한 칸씩 그린 이미지 한 장이에요", () => { void exportWirePng(p).then((ok) => { if (!ok) window.alert("아직 그린 와이어프레임이 없어요."); }); }],
     ["JSON 기획서", "결과물만 구조화해 담아요. 다른 도구나 AI 코딩 도구에 넘기기 좋아요", () => exportDeliverables(p)],
     ["엑셀(CSV) 기능명세서", "요구사항·기능·상세 기능을 한 줄씩 표로 받아요", () => exportCsv(p)],
     ["JSON 백업", "프로젝트 전체를 보관해요. [전체 프로젝트]에서 다시 불러올 수 있어요", () => exportJson(p)],
