@@ -2,7 +2,7 @@ import { flatten, LEVEL_LABEL, numbering } from "./spec-model";
 import { SLOTS, STATUS_LABEL } from "./types";
 import type { Flow, Project, SpecItem, WireEl, WireSet } from "./types";
 
-function download(name: string, text: string, type: string) {
+export function download(name: string, text: string, type: string) {
   const blob = new Blob([text], { type });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
