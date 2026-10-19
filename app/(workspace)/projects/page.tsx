@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { importProject, trashProject, updateProject, useProjects } from "@/lib/store";
+import { duplicateProject, importProject, trashProject, updateProject, useProjects } from "@/lib/store";
 
 const fmt = (t: number) => new Date(t).toLocaleDateString("ko-KR", { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
@@ -69,6 +69,7 @@ export default function Projects() {
             <div className="absolute top-3 right-3 flex gap-1 md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100">
               <button onClick={() => updateProject(p.id, (x) => ({ ...x, starred: !x.starred }))}
                 className={`rounded px-1.5 text-base ${p.starred ? "text-amber-500" : "text-foreground-muted"}`} aria-label={p.starred ? "즐겨찾기 해제" : "즐겨찾기"}>★</button>
+              <button onClick={() => duplicateProject(p.id)} className="rounded px-1.5 text-xs text-foreground-muted hover:text-foreground" aria-label={`${p.name} 복제`}>복제</button>
               <button onClick={() => trashProject(p.id)} className="rounded px-1.5 text-xs text-foreground-muted hover:text-red-500">삭제</button>
             </div>
           </div>

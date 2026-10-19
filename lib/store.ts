@@ -143,6 +143,22 @@ export function purgeProject(id: string) {
 }
 
 // Restores a project from a "JSON 백업" file. A clashing id gets a fresh one.
+// Copy a whole project (all documents and chat) under a new id, as "<name> 사본".
+export function duplicateProject(id: string): Project | null {
+  const all = load();
+  const src = all.find((x) => x.id === id);
+  if (!src) return null;
+  const now = Date.now();
+  const copy: Project = {
+    ...JSON.parse(JSON.stringify(src)) as Project,
+    id: uid("p_"), name: `${src.name} 사본`, starred: false, deletedAt: undefined,
+    createdAt: now, updatedAt: now,
+    log: [{ id: uid("l_"), at: now, text: `'${src.name}'에서 복제했어요` }],
+  };
+  save([copy, ...all]);
+  return copy;
+}
+
 export function importProject(json: string): Project {
   const p = JSON.parse(json) as Project;
   if (!p || typeof p.idea !== "string" || !Array.isArray(p.chat)) throw new Error("Planspace 백업 파일이 아니에요.");
