@@ -11,7 +11,7 @@ import {
 } from "./ai";
 import { ai, aiEnabled, isBusy, me, withAi } from "./run";
 import { autoVersion } from "./versions";
-import { chatFlowPlan, flowOutline, localChatFlowPlan, setChatFlowPlan, type FlowPlan } from "./flow";
+import { chatFlowPlan, flowOutline, localChatFlowPlan, setChatFlowPlan, syncFlow, type FlowPlan } from "./flow";
 import { matchPage, pageNodes, regeneratePage } from "./wire";
 import { cleanSlots, generatePrd, slotGuide, SlotsSchema, slotWords } from "./spec";
 import {
@@ -563,6 +563,23 @@ export function checkPrdChanges(id: string) {
 ${list}`);
 }
 export const dismissPrdChanges = (id: string) => updateProject(id, (x) => ({ ...x, stale: { ...x.stale, prd: undefined } }));
+
+// --- Sync: bring one document in line with another (the 동기화 dialog) ----------------
+
+export const SYNC_NAME = { prd: "PRD", features: "기능명세서", flow: "유저플로우", wire: "와이어프레임" } as const;
+export type SyncDoc = keyof typeof SYNC_NAME;
+
+export async function syncDocs(id: string, base: SyncDoc, target: SyncDoc) {
+  const p = getProject(id);
+  if (!p || base === target || isBusy(p)) return;
+  if (!aiEnabled() && target === "flow") return syncFlow(id);
+  const b = SYNC_NAME[base];
+  const t = SYNC_NAME[target];
+  const before = p.chat.length;
+  await sendChat(id, `${b}를 기준으로 ${t}를 맞춰 주세요. ${b}와 어긋나거나 빠진 ${t} 내용만 찾아 고치고, ${b}에서 정한 내용은 바꾸지 마세요. ${t} 밖의 문서는 꼭 필요한 곳만 함께 고쳐 주세요.`);
+  // The dialog's 동기화 시작 is the user's go-ahead, so a flow plan made for it is applied right away.
+  for (const m of getProject(id)!.chat.slice(before)) if (m.flowPlan && !m.flowPlan.done) setChatFlowPlan(id, m.id, "applied");
+}
 
 // What the chat can see of the user flow and the wireframes it may change.
 function designContext(p: Project) {

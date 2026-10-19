@@ -14,6 +14,7 @@ import { PrdView } from "./PrdView";
 import { SaveButton } from "../SaveButton";
 import { ShareDialog } from "./ShareDialog";
 import { CustomizePanel, ReviewPanel, VersionsPanel } from "./SidePanels";
+import { SyncDialog, SyncIcon, filledDocs } from "./SyncDialog";
 import { WireframeView } from "./WireframeView";
 
 type Panel = "chat" | "review" | "custom" | "versions";
@@ -88,6 +89,8 @@ export function EditorShell({ p }: { p: Project }) {
   const stale: Record<Tab, boolean> = { prd: false, features: false, flow: !!p.stale?.flow && filled.flow, wire: !!p.stale?.wire && filled.wire };
   const anyStale = stale.flow || stale.wire;
   const busy = isBusy(p);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const canSync = Object.values(filledDocs(p)).filter(Boolean).length >= 2;
   const openFindings = p.findings?.filter((f) => f.state === "open").length ?? 0;
 
   const panelBody = (k: Panel) => (
@@ -111,6 +114,15 @@ export function EditorShell({ p }: { p: Project }) {
             {dot(k)}{l}
           </button>
         ))}
+      </div>
+      <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-border" />
+      <div className="relative shrink-0">
+        <button type="button" onClick={() => setSyncOpen((o) => !o)} disabled={!canSync} aria-label="동기화" aria-expanded={syncOpen}
+          title={canSync ? "문서를 기준 문서에 맞춰 동기화해요" : "문서를 두 개 이상 만들면 동기화할 수 있어요"}
+          className="flex items-center gap-1.5 rounded px-2 py-1 text-sm whitespace-nowrap text-foreground-support hover:bg-surface disabled:opacity-40">
+          <SyncIcon />동기화{anyStale && <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-amber-500" />}
+        </button>
+        {syncOpen && <SyncDialog p={p} onClose={() => setSyncOpen(false)} />}
       </div>
     </div>
   );
