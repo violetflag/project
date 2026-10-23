@@ -14,19 +14,20 @@ import { PrdView } from "./PrdView";
 import { SaveButton } from "../SaveButton";
 import { ShareDialog } from "./ShareDialog";
 import { CustomizePanel, ReviewPanel, VersionsPanel } from "./SidePanels";
+import { MaterialsPanel } from "./MaterialsPanel";
 import { ProjectInfo } from "./ProjectInfo";
 import { SyncDialog, SyncIcon, filledDocs } from "./SyncDialog";
 import { WireframeView } from "./WireframeView";
 
-type Panel = "chat" | "review" | "custom" | "versions";
+type Panel = "chat" | "review" | "files" | "custom" | "versions";
 type Tab = "prd" | "features" | "flow" | "wire";
 
 const RAIL: [Panel, string, string][] = [
-  ["chat", "채팅", "💬"], ["review", "검토", "🔍"], ["custom", "커스텀", "🎛"], ["versions", "버전", "🕘"],
+  ["chat", "채팅", "💬"], ["review", "검토", "🔍"], ["files", "자료", "📎"], ["custom", "커스텀", "🎛"], ["versions", "버전", "🕘"],
 ];
 const TABS: [Tab, string][] = [["prd", "PRD"], ["features", "기능명세서"], ["flow", "유저플로우"], ["wire", "와이어프레임"]];
 const PANEL_TITLE: Record<Panel, string> = {
-  chat: "채팅", review: "검토", custom: "프로젝트 커스터마이징", versions: "버전",
+  chat: "채팅", review: "검토", files: "자료", custom: "프로젝트 커스터마이징", versions: "버전",
 };
 const REVIEW_ONLY = "검토는 PRD와 기능명세서 탭에서 쓸 수 있어요";
 
@@ -76,6 +77,14 @@ export function EditorShell({ p }: { p: Project }) {
     if (t === "review") { setTab((x) => (x === "flow" || x === "wire" ? "features" : x)); showPanel("review"); }
   };
 
+  // A source badge (e.g. "기획안.pdf p.3") opens the 자료 panel on that file.
+  const [fileFocus, setFileFocus] = useState<string | null>(null);
+  useEffect(() => {
+    const on = (e: Event) => { setFileFocus((e as CustomEvent<string>).detail); setPanel("files"); setMobilePane("files"); };
+    window.addEventListener("planspace:material", on);
+    return () => window.removeEventListener("planspace:material", on);
+  }, []);
+
   // Documents ask for a tab change with a "planspace:goto" event, e.g. the PRD's 기능명세서로 이동.
   useEffect(() => {
     const on = (e: Event) => {
@@ -103,6 +112,7 @@ export function EditorShell({ p }: { p: Project }) {
     <>
       {k === "chat" && <ChatPanel p={p} onGoto={goto} />}
       {k === "review" && <ReviewPanel p={p} usable={reviewUsable} onGotoSpec={() => setTab("features")} onChat={() => showPanel("chat")} />}
+      {k === "files" && <MaterialsPanel p={p} focus={fileFocus} />}
       {k === "custom" && <CustomizePanel key={p.id} p={p} />}
       {k === "versions" && <VersionsPanel p={p} />}
     </>

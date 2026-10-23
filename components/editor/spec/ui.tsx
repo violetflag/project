@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { SpecItem, Status } from "@/lib/types";
+import { materialKey, materialOfSource, openMaterial } from "@/lib/materials";
+import type { ProjectMaterial, SpecItem, Status } from "@/lib/types";
 
 // Click-to-edit text that saves on blur (Enter saves single-line fields, Esc cancels).
 export function InlineText({
@@ -86,4 +87,17 @@ export function highlight(text: string, q: string) {
   if (!q.trim()) return text;
   const parts = text.split(new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"));
   return parts.map((s, i) => (i % 2 ? <mark key={i} data-hit="1" className="rounded-sm bg-amber-200 text-foreground">{s}</mark> : s));
+}
+
+// "기획안.pdf p.3": where the AI took this from in the attached material; opens that file in 자료.
+export function SourceBadge({ list, src }: { list?: ProjectMaterial[]; src?: string }) {
+  if (!src) return null;
+  const m = materialOfSource(list, src);
+  return (
+    <button type="button" onClick={() => m && openMaterial(materialKey(m))} disabled={!m} aria-label={`근거 자료 ${src}`}
+      title={m ? "자료에서 열기" : "이 자료는 지금 프로젝트에 없어요"}
+      className="inline-flex max-w-full shrink-0 items-center gap-1 rounded border border-border bg-surface px-1.5 py-0.5 text-[10px] font-normal text-foreground-support hover:border-primary hover:text-primary disabled:cursor-default disabled:hover:border-border disabled:hover:text-foreground-support">
+      <span aria-hidden>📄</span><span className="truncate">{src}</span>
+    </button>
+  );
 }

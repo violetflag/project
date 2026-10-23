@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { addSpecItem } from "@/lib/spec";
+import { addSpecItem, canMoveSpec, moveSpecItem } from "@/lib/spec";
 import { counts } from "@/lib/spec-model";
 import type { Project, SpecItem } from "@/lib/types";
 import { Plus } from "../../icons";
@@ -14,6 +14,16 @@ export function Tree({ p, num, shown, dim, selected, onSelect, starOnly, setStar
 }) {
   const [q, setQ] = useState("");
   const [closed, setClosed] = useState<Set<string>>(new Set());
+  // Drag to reorder: drop on the top or bottom half of a same-level row, or onto a parent row.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [over, setOver] = useState<{ id: string; where: "before" | "after" | "inside" } | null>(null);
+  const whereOf = (e: React.DragEvent, x: SpecItem) => {
+    if (!dragId) return null;
+    if (canMoveSpec(spec, dragId, x.id, "inside")) return "inside" as const;
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const w = e.clientY < r.top + r.height / 2 ? "before" as const : "after" as const;
+    return canMoveSpec(spec, dragId, x.id, w) ? w : null;
+  };
   const spec = p.spec ?? [];
   const c = counts(spec);
   const query = q.trim().toLowerCase();
@@ -30,8 +40,17 @@ export function Tree({ p, num, shown, dim, selected, onSelect, starOnly, setStar
     const open = !closed.has(x.id) || !!query;
     return (
       <li key={x.id}>
-        <div className={`group flex items-center gap-1 rounded pr-1 ${big ? "py-2" : "py-1"} ${selected === x.id ? "bg-primary-soft" : "hover:bg-surface"} ${dim?.has(x.id) ? "opacity-35" : ""}`}
+        <div draggable={!query} aria-grabbed={dragId === x.id || undefined}
+          onDragStart={(e) => { setDragId(x.id); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", x.title); }}
+          onDragEnd={() => { setDragId(null); setOver(null); }}
+          onDragOver={(e) => { const w = whereOf(e, x); if (!w) { if (over?.id === x.id) setOver(null); return; } e.preventDefault(); if (over?.id !== x.id || over.where !== w) setOver({ id: x.id, where: w }); }}
+          onDragLeave={() => { if (over?.id === x.id) setOver(null); }}
+          onDrop={(e) => { e.preventDefault(); const w = whereOf(e, x); if (dragId && w) { moveSpecItem(p.id, dragId, x.id, w); if (w === "inside") setClosed((c) => { const n = new Set(c); n.delete(x.id); return n; }); } setDragId(null); setOver(null); }}
+          className={`group relative flex items-center gap-1 rounded pr-1 ${big ? "py-2" : "py-1"} ${selected === x.id ? "bg-primary-soft" : "hover:bg-surface"} ${dim?.has(x.id) ? "opacity-35" : ""} ${dragId === x.id ? "opacity-40" : ""} ${over?.id === x.id && over.where === "inside" ? "ring-2 ring-primary ring-inset" : ""}`}
           style={{ paddingLeft: (x.level - 1) * 14 + 2 }}>
+          {over?.id === x.id && over.where !== "inside" && (
+            <span aria-hidden className={`pointer-events-none absolute right-1 h-0.5 rounded bg-primary ${over.where === "before" ? "top-0" : "bottom-0"}`} style={{ left: (x.level - 1) * 14 + 2 }} />
+          )}
           <button onClick={() => toggle(x.id)} aria-label={open ? "접기" : "펼치기"}
             className={`w-4 shrink-0 text-[10px] text-foreground-muted ${x.children.length ? "" : "invisible"}`}>{open ? "▾" : "▸"}</button>
           <button onClick={() => onSelect(x.id)} className={`flex min-w-0 flex-1 items-center gap-1.5 text-left ${big ? "text-sm" : "text-xs"}`} aria-label={`항목 ${x.title}`}>
@@ -56,7 +75,7 @@ export function Tree({ p, num, shown, dim, selected, onSelect, starOnly, setStar
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between px-3 pt-3 pb-1.5">
-        <p className="text-xs font-medium text-foreground-support">기능 구조</p>
+        <p className="text-xs font-medium text-foreground-support" title="항목을 끌어서 순서를 바꾸거나 다른 상위 항목으로 옮길 수 있어요">기능 구조</p>
         <div className="flex items-center gap-1 text-[11px]">
           <button onClick={() => setStarOnly(!starOnly)} aria-pressed={starOnly} aria-label="즐겨찾기만 보기"
             className={`rounded px-1.5 py-0.5 ${starOnly ? "bg-amber-50 text-amber-500" : "text-foreground-muted hover:bg-surface"}`}>★</button>

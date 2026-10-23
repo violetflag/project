@@ -8,6 +8,7 @@ import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { useSyncExternalStore } from "react";
 import { z } from "zod";
 import { loadBinary } from "./files";
+import { aiSignal } from "./run";
 import type { Project, Question } from "./types";
 
 export const MODELS = [
@@ -177,7 +178,7 @@ export async function ask<T extends z.ZodType>(schema: T, prompt: string, files:
     system: SYSTEM,
     output_config: { effort, format: betaZodOutputFormat(schema) },
     messages: [{ role: "user", content: [...files, { type: "text", text: prompt }] }],
-  }).finalMessage();
+  }, { signal: aiSignal() }).finalMessage();
   if (res.stop_reason === "refusal") throw new Error("AI가 이 요청에는 답하지 않았어요.");
   if (res.stop_reason === "max_tokens") throw new Error("답이 너무 길어 중간에 끊겼어요. AI 설정에서 컨텍스트 크기를 키워 보세요.");
   if (!res.parsed_output) throw new Error("AI 응답을 읽지 못했어요.");
@@ -197,17 +198,22 @@ export const answersText = (p: Pick<Project, "questions" | "answers">) =>
   p.questions.filter((q) => p.answers[q.id]).map((q) => `- ${q.text}: ${p.answers[q.id].join(", ")}`).join("\n") || "(답변 없음)";
 
 // Attached material: text goes into the prompt, PDFs and images as content blocks.
+// Files switched off in the 자료 panel are left out.
 type Src = Pick<Project, "id" | "materials">;
-export const materialText = (p: Src) => (p.materials ?? []).filter((m) => m.text)
+const used = (p: Src) => (p.materials ?? []).filter((m) => !m.off);
+export const materialText = (p: Src) => used(p).filter((m) => m.text)
   .map((m) => `\n[첨부 자료: ${m.name}]\n${m.text}`).join("\n");
 export async function materialBlocks(p: Src): Promise<Anthropic.Beta.BetaContentBlockParam[]> {
-  if (!p.materials?.some((m) => m.kind !== "text")) return [];
-  const bin = await loadBinary(p.id);
+  const on = used(p).filter((m) => m.kind !== "text");
+  if (!on.length) return [];
+  const bin = (await loadBinary(p.id)).filter((b) => on.some((m) => (m.id && b.id ? m.id === b.id : m.name === b.name)));
   return bin.map((m) => m.kind === "pdf"
     ? { type: "document" as const, title: m.name, source: { type: "base64" as const, media_type: "application/pdf" as const, data: m.data } }
     : { type: "image" as const, source: { type: "base64" as const, media_type: m.mediaType as "image/png", data: m.data } });
 }
-export const materialNote = (p: Src) => (p.materials?.length ? "\n사용자가 첨부한 자료를 꼼꼼히 읽고, 자료에 있는 내용은 다시 묻지 말고 그대로 반영합니다." : "");
+export const materialNote = (p: Src) => (used(p).length ? "\n사용자가 첨부한 자료를 꼼꼼히 읽고, 자료에 있는 내용은 다시 묻지 말고 그대로 반영합니다." : "");
+// How the AI marks where a sentence came from, e.g. "기획안.pdf p.3" or "회의.pptx 슬라이드 2".
+export const SOURCE_RULE = "src에는 그 내용의 근거가 된 첨부 자료를 \"파일명 p.쪽\"(PDF), \"파일명 슬라이드 N\", \"파일명 시트 이름\", 또는 \"파일명\" 형식으로 적습니다. 자료에서 온 내용이 아니면 빈 문자열입니다.";
 
 // --- Questions -------------------------------------------------------------
 

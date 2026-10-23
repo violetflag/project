@@ -6,10 +6,11 @@ import { isBusy } from "@/lib/run";
 import type { Project } from "@/lib/types";
 import { useIsMobile } from "@/lib/useMedia";
 import { ArrowRight, Plus, Sparkle } from "../icons";
-import { InlineText } from "./spec/ui";
+import { InlineText, SourceBadge } from "./spec/ui";
 import { PrdChangeBar } from "./ChatPanel";
+import { PrdTemplateDialog } from "./PrdTemplateDialog";
 
-export function EmptyDoc({ title, hint, action }: { title: string; hint: string; action?: React.ReactNode }) {
+export function EmptyDoc({ title, hint, action, extra }: { title: string; hint: string; action?: React.ReactNode; extra?: React.ReactNode }) {
   return (
     <div className="grid h-full place-items-center">
       <div className="mx-4 w-full max-w-[420px] rounded-xl border border-border bg-background px-8 py-10 text-center shadow-sm">
@@ -17,6 +18,7 @@ export function EmptyDoc({ title, hint, action }: { title: string; hint: string;
         <p className="font-medium">{title}</p>
         <p className="mt-1 text-xs leading-relaxed text-foreground-support">{hint}</p>
         {action && <div className="mt-5">{action}</div>}
+        {extra}
       </div>
     </div>
   );
@@ -76,6 +78,8 @@ function PropsCard({ p }: { p: Project }) {
 export function PrdView({ p }: { p: Project }) {
   const mobile = useIsMobile();
   const busy = isBusy(p);
+  const [tpl, setTpl] = useState(false);
+  const tplDialog = tpl && <PrdTemplateDialog p={p} onClose={() => setTpl(false)} />;
   if (!p.prd) {
     return (
       <EmptyDoc title="PRD가 여기에 생겨요" hint="채팅에서 질문에 답하면 PRD 초안을 만들어 드려요. 답을 다 하지 않았어도 지금까지의 내용으로 바로 만들 수 있어요."
@@ -84,7 +88,13 @@ export function PrdView({ p }: { p: Project }) {
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-medium text-white disabled:opacity-40">
             <Sparkle className="h-3.5 w-3.5" /> {busy ? "AI가 작업 중이에요…" : "PRD 만들기"}
           </button>
-        } />
+        }
+        extra={<>
+          <button onClick={() => setTpl(true)} aria-label="PRD 양식 편집" className="mt-3 text-xs text-primary hover:underline">
+            {p.prdTemplate ? `내 양식으로 만들어요 · 양식 편집` : "PRD 양식 고르기·편집"}
+          </button>
+          {tplDialog}
+        </>} />
     );
   }
   const blocks = p.prd.flatMap((s) => s.blocks);
@@ -118,6 +128,8 @@ export function PrdView({ p }: { p: Project }) {
           완성도
           <span className="h-1.5 w-32 overflow-hidden rounded-full bg-border"><span className="block h-full bg-primary transition-all" style={{ width: `${pct}%` }} /></span>
           {pct}% <span className="text-foreground-muted">({filled}/{blocks.length})</span>
+          <button onClick={() => setTpl(true)} disabled={busy} aria-label="PRD 양식 편집"
+            className="ml-auto rounded-md border border-border bg-background px-2 py-1 text-xs hover:border-primary hover:text-primary disabled:opacity-40">양식 편집</button>
         </div>
         <div className="mx-auto max-w-3xl space-y-4 px-3 py-4 md:px-6 md:py-6">
           {p.prd.map((s) => (
@@ -128,6 +140,7 @@ export function PrdView({ p }: { p: Project }) {
                   <div className="mb-1 flex items-center gap-1.5 text-sm font-medium">
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
                     <InlineText value={b.label} onSave={(label) => label && setPrdBlock(p.id, s.id, i, { label })} className="flex-1" ariaLabel={`${b.label} 이름`} />
+                    <SourceBadge list={p.materials} src={b.src} />
                     <button onClick={() => deletePrdBlock(p.id, s.id, i)} aria-label={`${b.label} 삭제`}
                       className="text-xs text-foreground-muted hover:text-red-500 md:opacity-0 md:group-hover:opacity-100">삭제</button>
                   </div>
@@ -156,6 +169,7 @@ export function PrdView({ p }: { p: Project }) {
         </div>
       </div>
     </div>
+    {tplDialog}
     </div>
   );
 }

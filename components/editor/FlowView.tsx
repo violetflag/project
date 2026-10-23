@@ -1,12 +1,13 @@
 "use client";
 
-import { useState } from "react";
-import { FLOW_BUSY, addSection, generateFlow, openFlow, syncFlow } from "@/lib/flow";
+import { useEffect, useState } from "react";
+import { FLOW_BUSY, addSection, openFlow, requestFlowDialog, syncFlow, takeFlowDialog } from "@/lib/flow";
 import { isBusy } from "@/lib/run";
 import type { Project } from "@/lib/types";
 import { Plus, Sparkle } from "@/components/icons";
 import { FlowCanvas } from "./flow/FlowCanvas";
 import { FlowList } from "./flow/FlowList";
+import { NewFlowDialog } from "./flow/NewFlowDialog";
 import { RevisionPanel } from "./flow/RevisionPanel";
 
 function Empty({ p, busy }: { p: Project; busy: boolean }) {
@@ -25,7 +26,7 @@ function Empty({ p, busy }: { p: Project; busy: boolean }) {
           {hasSpec ? "기능명세서를 읽고 사용자가 지나가는 화면과 판단 지점을 구역별로 이어 드려요."
             : "유저플로우는 기능명세서를 바탕으로 그려요. 기능명세서 탭에서 먼저 명세를 만들어 주세요."}
         </p>
-        <button onClick={() => generateFlow(p.id)} disabled={!hasSpec || busy} aria-label="유저플로우 만들기"
+        <button onClick={requestFlowDialog} disabled={!hasSpec || busy} aria-label="유저플로우 만들기"
           className="mt-5 rounded-md bg-primary px-4 py-2 text-sm font-medium text-white disabled:opacity-40">유저플로우 만들기</button>
       </div>
     </div>
@@ -54,7 +55,14 @@ function SectionAdder({ onAdd }: { onAdd: (name: string) => void }) {
 export function FlowView({ p }: { p: Project }) {
   const [revising, setRevising] = useState(false);
   const [picked, setPicked] = useState<string[]>([]);
+  const [asking, setAsking] = useState(takeFlowDialog);
+  useEffect(() => {
+    const on = () => { takeFlowDialog(); setAsking(true); };
+    window.addEventListener("planspace:flow-new", on);
+    return () => window.removeEventListener("planspace:flow-new", on);
+  }, []);
   const busy = isBusy(p);
+  const dialog = asking && <NewFlowDialog p={p} onClose={() => setAsking(false)} />;
   const running = p.chat.find((m) => m.thinking && Object.values(FLOW_BUSY).includes(m.text));
   const flow = openFlow(p);
 
@@ -67,7 +75,7 @@ export function FlowView({ p }: { p: Project }) {
     </div>
   );
 
-  if (!flow) return <div className="relative h-full"><Empty p={p} busy={busy} />{progress}</div>;
+  if (!flow) return <div className="relative h-full"><Empty p={p} busy={busy} />{progress}{dialog}</div>;
 
   const closeRevision = () => { setRevising(false); setPicked([]); };
   return (
@@ -96,13 +104,14 @@ export function FlowView({ p }: { p: Project }) {
             </div>
           )}
           {revising && (
-            <div data-ui className="absolute top-3 left-1/2 z-20 -translate-x-1/2 rounded-full bg-foreground/80 px-3 py-1 text-[11px] text-white">
+            <div data-ui className="absolute top-3 left-1/2 z-20 -translate-x-1/2 rounded-full bg-foreground/80 px-3 py-1 text-[11px] text-background">
               고칠 노드를 눌러 담아 보세요
             </div>
           )}
         </FlowCanvas>
         {progress}
       </div>
+      {dialog}
     </div>
   );
 }

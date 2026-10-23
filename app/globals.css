@@ -22,6 +22,78 @@
   --color-avatar: #f08a3c;
 }
 
+/* Flow canvas colors, swapped in dark mode below. */
+:root {
+  --flow-page-fill: #ffffff;
+  --flow-page-stroke: #bdb9b9;
+  --flow-data-fill: #e8f1fa;
+  --flow-data-stroke: #8fb2d4;
+  --flow-data-text: #2f4a63;
+  --flow-branch-fill: #fdf3df;
+  --flow-branch-stroke: #dcae55;
+  --flow-branch-text: #6b4a10;
+  --flow-action-fill: #e7f6ee;
+  --flow-action-stroke: #78bf97;
+  --flow-action-text: #245a3b;
+  --flow-lane-a: #fbfbfb;
+  --flow-lane-b: #f6f5f5;
+  --flow-lane-line: #e4e2e2;
+  --flow-edge: #a6a4a4;
+  --flow-edge-text: #6f6d6d;
+}
+
+/* 다크 모드 (lib/theme.ts toggles the class). Wireframe screens stay light, like paper mockups. */
+:root.dark {
+  color-scheme: dark;
+  --color-foreground: #e9e7e7;
+  --color-foreground-support: #c3c1c1;
+  --color-foreground-muted: #9a9898;
+  --color-foreground-assistive: #6c6a6a;
+  --color-background: #1d1d1f;
+  --color-background-canvas: #131314;
+  --color-surface: #262628;
+  --color-border: #353537;
+  --color-border-strong: #4b4b4e;
+  --color-primary: #9a7bef;
+  --color-primary-soft: rgb(154 123 239 / 0.16);
+
+  /* Tinted notices: light shades become dark tints, dark text shades become light. */
+  --color-amber-50: #33290f;
+  --color-amber-100: #41330f;
+  --color-amber-200: #5c4816;
+  --color-amber-300: #7a5f1c;
+  --color-amber-700: #f0c766;
+  --color-amber-800: #f3d58a;
+  --color-amber-900: #f8e4b0;
+  --color-red-50: #3a1717;
+  --color-red-100: #4a1c1c;
+  --color-red-600: #f68a8a;
+  --color-red-700: #f8a5a5;
+  --color-green-50: #13301f;
+  --color-green-200: #24563a;
+  --color-green-700: #7fd9a3;
+  --color-green-900: #b5ecc9;
+  --color-sky-100: #12324a;
+  --color-sky-700: #8cc8f0;
+
+  --flow-page-fill: #2a2a2d;
+  --flow-page-stroke: #5a5a5e;
+  --flow-data-fill: #1c2c3c;
+  --flow-data-stroke: #4f7499;
+  --flow-data-text: #b9d4ee;
+  --flow-branch-fill: #362b12;
+  --flow-branch-stroke: #a7843b;
+  --flow-branch-text: #f2d699;
+  --flow-action-fill: #173224;
+  --flow-action-stroke: #4f9470;
+  --flow-action-text: #a9e3c2;
+  --flow-lane-a: #1b1b1d;
+  --flow-lane-b: #202022;
+  --flow-lane-line: #303033;
+  --flow-edge: #77757a;
+  --flow-edge-text: #a8a6aa;
+}
+
 html,
 body {
   height: 100%;

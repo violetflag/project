@@ -1,3 +1,4 @@
+import { saveBlob, svgToPng } from "./diagram-png";
 import { currentWires } from "./export";
 import type { Project, WireEl, WirePage } from "./types";
 
@@ -64,37 +65,11 @@ export function wireSvg(p: Project): string | null {
 
 export async function wirePng(p: Project): Promise<Blob | null> {
   const svg = wireSvg(p);
-  if (!svg) return null;
-  const m = /width="(\d+)" height="(\d+)"/.exec(svg)!;
-  const scale = 2;
-  const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
-  try {
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const im = new Image();
-      im.onload = () => resolve(im);
-      im.onerror = () => reject(new Error("svg load failed"));
-      im.src = url;
-    });
-    const canvas = document.createElement("canvas");
-    canvas.width = Number(m[1]) * scale;
-    canvas.height = Number(m[2]) * scale;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-    ctx.scale(scale, scale);
-    ctx.drawImage(img, 0, 0);
-    return await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), "image/png"));
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+  return svg ? svgToPng(svg) : null;
 }
 
 export async function exportWirePng(p: Project): Promise<boolean> {
   const blob = await wirePng(p);
-  if (!blob) return false;
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${p.name}-와이어프레임.png`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  return true;
+  if (blob) saveBlob(`${p.name}-와이어프레임.png`, blob);
+  return !!blob;
 }

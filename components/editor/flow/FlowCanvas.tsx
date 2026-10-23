@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { addNodeAfter, addNodeBelow, deleteEdge, deleteNode, moveNodeSection, renameNode, renameSection, setEdgeLabel, setNodeKind } from "@/lib/flow";
+import { addEdge, addNodeAfter, addNodeBelow, deleteEdge, deleteNode, flowUndoKey, moveNodeSection, renameNode, renameSection, setEdgeLabel, setNodeKind, undoFlow } from "@/lib/flow";
+import { undoKey, useUndo } from "@/lib/undo";
 import { FLOW_KINDS, KIND_LABEL } from "@/lib/flow-local";
 import { LEFT, layoutFlow, routeEdge } from "@/lib/flow-layout";
 import type { Flow, FlowKind } from "@/lib/types";
@@ -75,15 +76,54 @@ export function FlowCanvas({ pid, flow, picking, picked, onPick, children }: {
     };
   }, [zoomAt]);
 
+  const undo = useUndo(flowUndoKey(pid, flow.id));
+  const selRef = useRef<Sel>(null);
+  selRef.current = sel;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { setSel(null); setMenu(null); setRenaming(false); }
+      if (e.key === "Escape") { setSel(null); setMenu(null); setRenaming(false); setLink(null); }
+      const k = undoKey(e);
+      if (k) { if (undoFlow(pid, flow.id, k === "redo")) { e.preventDefault(); setSel(null); } return; }
+      // Delete / Backspace removes the selected node or connection (⌘Z brings it back).
+      const t = e.target as HTMLElement | null;
+      const s = selRef.current;
+      if ((e.key === "Delete" || e.key === "Backspace") && s && !t?.closest("input, textarea, select, [contenteditable=true]")) {
+        e.preventDefault();
+        if (s.type === "node") deleteNode(pid, flow.id, s.id);
+        else deleteEdge(pid, flow.id, s.id);
+        setSel(null);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("keydown", onKey);
     };
-  }, []);
+  }, [pid, flow.id]);
+
+  // Connecting: drag from a node's connection point onto another node.
+  const [link, setLink] = useState<{ from: string; x: number; y: number } | null>(null);
+  const toCanvas = (cx: number, cy: number) => {
+    const r = wrap.current!.getBoundingClientRect();
+    return { x: (cx - r.left - view.x) / view.z, y: (cy - r.top - view.y) / view.z };
+  };
+  const nodeAt = (x: number, y: number) => flow.nodes.find((n) => {
+    const b = L.boxes[n.id];
+    return b && x >= b.x - 6 && x <= b.x + b.w + 6 && y >= b.y - 6 && y <= b.y + b.h + 6;
+  })?.id;
+  const linkTarget = link ? nodeAt(link.x, link.y) : undefined;
+  const startLink = (e: React.PointerEvent, from: string) => {
+    e.stopPropagation();
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    setLink({ from, ...toCanvas(e.clientX, e.clientY) });
+  };
+  const moveLink = (e: React.PointerEvent) => { if (link) setLink({ ...link, ...toCanvas(e.clientX, e.clientY) }); };
+  const endLink = (e: React.PointerEvent) => {
+    if (!link) return;
+    const p = toCanvas(e.clientX, e.clientY);
+    const to = nodeAt(p.x, p.y);
+    setLink(null);
+    if (to && to !== link.from && addEdge(pid, flow.id, link.from, to)) setSel({ type: "node", id: link.from });
+  };
 
   // Pan by dragging the background (mouse or one finger); pinch with two fingers.
   const pointers = useRef(new Map<number, { x: number; y: number }>());
@@ -172,6 +212,10 @@ export function FlowCanvas({ pid, flow, picking, picked, onPick, children }: {
           {FLOW_KINDS.map((k) => <span key={k} className="flex items-center gap-1"><LegendIcon kind={k} />{KIND_LABEL[k]}</span>)}
         </div>
         <div className="ml-auto flex items-center gap-1">
+          <button onClick={() => { if (undoFlow(pid, flow.id)) setSel(null); }} disabled={!undo.canUndo} aria-label="실행 취소" title="실행 취소 (⌘Z)"
+            className="h-6 w-6 rounded border border-border hover:bg-surface disabled:opacity-30">↶</button>
+          <button onClick={() => { if (undoFlow(pid, flow.id, true)) setSel(null); }} disabled={!undo.canRedo} aria-label="다시 실행" title="다시 실행 (⌘⇧Z)"
+            className="mr-2 h-6 w-6 rounded border border-border hover:bg-surface disabled:opacity-30">↷</button>
           <button onClick={() => zoomAt(1 / 1.2)} aria-label="축소" className="h-6 w-6 rounded border border-border hover:bg-surface">−</button>
           <span className="w-10 text-center tabular-nums text-foreground-muted">{Math.round(view.z * 100)}%</span>
           <button onClick={() => zoomAt(1.2)} aria-label="확대" className="h-6 w-6 rounded border border-border hover:bg-surface">+</button>
@@ -184,13 +228,13 @@ export function FlowCanvas({ pid, flow, picking, picked, onPick, children }: {
         <div style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.z})`, transformOrigin: "0 0" }} className="absolute top-0 left-0">
           <svg width={L.width} height={L.height} className="block overflow-visible">
             <defs>
-              <marker id="fl-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="#9b9b9b" /></marker>
+              <marker id="fl-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="var(--flow-edge)" /></marker>
               <marker id="fl-arr-on" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="var(--color-primary)" /></marker>
             </defs>
             {L.bands.map((b, i) => (
               <g key={b.section}>
-                <rect x={0} y={b.y} width={L.width} height={b.h} fill={i % 2 ? "#f6f5f5" : "#fbfbfb"} />
-                <line x1={0} x2={L.width} y1={b.y} y2={b.y} stroke="#e4e2e2" />
+                <rect x={0} y={b.y} width={L.width} height={b.h} fill={i % 2 ? "var(--flow-lane-b)" : "var(--flow-lane-a)"} />
+                <line x1={0} x2={L.width} y1={b.y} y2={b.y} stroke="var(--flow-lane-line)" />
                 <foreignObject x={10} y={b.y + 10} width={LEFT - 28} height={Math.min(60, b.h - 12)}>
                   <button data-ui onClick={() => !picking && setSectionEdit(b.section)} aria-label={`구역 이름 바꾸기: ${b.section}`}
                     className="block w-full text-left text-[12px] leading-snug font-medium text-foreground-support hover:text-primary">{b.section}</button>
@@ -209,10 +253,10 @@ export function FlowCanvas({ pid, flow, picking, picked, onPick, children }: {
               return (
                 <g key={e.id} data-edge opacity={dim ? 0.18 : 1} onClick={() => { if (!picking) { setSel({ type: "edge", id: e.id }); setMenu(null); } }} className="cursor-pointer">
                   <path d={r.d} fill="none" stroke="transparent" strokeWidth={12} />
-                  <path d={r.d} fill="none" stroke={on ? "var(--color-primary)" : "#a6a4a4"} strokeWidth={on ? 1.8 : 1.1}
+                  <path d={r.d} fill="none" stroke={on ? "var(--color-primary)" : "var(--flow-edge)"} strokeWidth={on ? 1.8 : 1.1}
                     strokeDasharray={L.back.has(e.id) ? "4 3" : undefined} markerEnd={`url(#${on ? "fl-arr-on" : "fl-arr"})`} />
                   {e.label && (
-                    <text x={r.lx} y={r.ly - 4} textAnchor="middle" fontSize={10} fill={on ? "var(--color-primary)" : "#6f6d6d"}
+                    <text x={r.lx} y={r.ly - 4} textAnchor="middle" fontSize={10} fill={on ? "var(--color-primary)" : "var(--flow-edge-text)"}
                       stroke="var(--color-background-canvas)" strokeWidth={4} paintOrder="stroke">{e.label.length > 16 ? `${e.label.slice(0, 15)}…` : e.label}</text>
                   )}
                 </g>
@@ -233,9 +277,14 @@ export function FlowCanvas({ pid, flow, picking, picked, onPick, children }: {
                     </div>
                   </foreignObject>
                   {isPicked && <circle cx={b.x + b.w} cy={b.y} r={6} fill="var(--color-primary)" />}
+                  {linkTarget === n.id && link?.from !== n.id && <rect x={b.x - 4} y={b.y - 4} width={b.w + 8} height={b.h + 8} rx={8} fill="none" stroke="var(--color-primary)" strokeWidth={2} strokeDasharray="5 3" />}
                 </g>
               );
             })}
+            {link && L.boxes[link.from] && (
+              <line x1={L.boxes[link.from].x + L.boxes[link.from].w} y1={L.boxes[link.from].cy} x2={link.x} y2={link.y}
+                stroke="var(--color-primary)" strokeWidth={1.8} strokeDasharray="5 3" markerEnd="url(#fl-arr-on)" pointerEvents="none" />
+            )}
           </svg>
         </div>
 
@@ -249,6 +298,12 @@ export function FlowCanvas({ pid, flow, picking, picked, onPick, children }: {
         )}
         {selNode && box && !picking && !renaming && (
           <>
+            <button data-ui aria-label="끌어서 다른 노드와 연결" title="끌어서 다른 노드에 놓으면 연결돼요"
+              onPointerDown={(e) => startLink(e, selNode.id)} onPointerMove={moveLink} onPointerUp={endLink} onPointerCancel={() => setLink(null)}
+              style={{ ...screen(box.x + box.w, box.y), transform: "translate(4px, -60%)" }}
+              className="absolute grid h-5 w-5 cursor-crosshair touch-none place-items-center rounded-full border-2 border-primary bg-background shadow-sm hover:bg-primary-soft">
+              <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+            </button>
             <button data-ui onClick={() => add("after")} aria-label="오른쪽에 노드 추가" title="연결된 노드를 오른쪽에 추가"
               style={{ ...screen(box.x + box.w, box.cy), transform: "translate(8px, -50%)" }}
               className="absolute grid h-6 w-6 place-items-center rounded-full border border-primary bg-background text-primary shadow-sm hover:bg-primary hover:text-white"><Plus className="h-3.5 w-3.5" /></button>
