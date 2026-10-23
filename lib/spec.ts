@@ -1,0 +1,646 @@
+"use client";
+
+// PRD and feature-spec actions: AI generation (with local fallbacks), the
+// approve/reject review of AI proposals, and direct item editing.
+import { josa } from "./josa";
+import { z } from "zod";
+import { answersText, ask, materialBlocks, materialNote, materialText, prdText, SOURCE_RULE, styleOf } from "./ai";
+import { ai, aiEnabled, isBusy, withAi } from "./run";
+import {
+  approveAll, approveItem, blankItem, coreOf, counts, findItem, flatten, insertItem, mapItems, pathTo, pendingItems,
+  proposeEdit, rejectAll, rejectItem, removeItem, specText, updateItem,
+} from "./spec-model";
+import { cloneItem, localAnswer, localEnhance, localFill, localPrd, localSpec, type SpecPlan } from "./spec-local";
+import { getProject, updateProject } from "./store";
+import { saveToDrive } from "./sync";
+import { SLOTS } from "./types";
+import type { PrdChange, PrdProps, PrdSection, PrdTemplate, Project, SlotKey, SlotQuestion, SpecCore, SpecItem } from "./types";
+import { remember as rememberUndo, takeRedo, takeUndo } from "./undo";
+import { autoVersion } from "./versions";
+import { localTemplatePrd, prdFromTemplate, templateLines, TemplatePrdSchema } from "./prd-template";
+
+const SLOT_KEYS = SLOTS.map(([k]) => k) as [SlotKey, ...SlotKey[]];
+export const slotGuide = SLOTS.map(([k, l]) => `${k}=${l}`).join(", ");
+const qid = () => `sq_${Math.random().toString(36).slice(2, 9)}`;
+const clampP = (n: number) => (Math.min(3, Math.max(1, Math.round(n || 2))) as 1 | 2 | 3);
+
+// --- PRD -------------------------------------------------------------------------------
+
+export const PrdSchema = z.object({
+  oneLiner: z.string(), goal: z.string(), background: z.string(),
+  problem: z.string(), solution: z.string(), differentiation: z.string(),
+  target: z.string(), scenario: z.string(),
+  metrics: z.string(), risks: z.string(),
+  category: z.string(), roles: z.array(z.string()), devices: z.array(z.string()),
+  // Where a field's content came from in the attached material (field = one of the keys above).
+  sources: z.array(z.object({ field: z.string(), src: z.string() })),
+});
+
+function prdFrom(o: z.infer<typeof PrdSchema>): { prd: PrdSection[]; props: PrdProps } {
+  const b = (field: keyof typeof o, label: string) => {
+    const src = o.sources.filter((s) => s.field.trim() === field && s.src.trim()).map((s) => s.src.trim()).join(", ");
+    return { label, body: String(o[field]), ...(src ? { src } : {}) };
+  };
+  return {
+    prd: [
+      { id: "overview", title: "개요", blocks: [b("oneLiner", "한 줄 정의"), b("goal", "제품 목표"), b("background", "배경")] },
+      { id: "problem", title: "문제 및 해결 방안", blocks: [b("problem", "사용자 문제"), b("solution", "해결 방안"), b("differentiation", "차별점")] },
+      { id: "target", title: "타겟 및 시나리오", blocks: [b("target", "타겟 사용자"), b("scenario", "사용자 시나리오")] },
+      { id: "metrics", title: "성공·위험 요소", blocks: [b("metrics", "핵심 지표"), b("risks", "리스크")] },
+    ],
+    props: { category: o.category, roles: o.roles.length ? o.roles : ["일반 사용자", "관리자"], devices: o.devices },
+  };
+}
+
+function applyPrd(id: string, out: { prd: PrdSection[]; props: PrdProps }) {
+  updateProject(id, (p) => ({
+    ...p, prd: out.prd, prdProps: out.props,
+    stale: p.spec ? { ...p.stale, flow: p.flows.length > 0, wire: p.wires.length > 0 } : p.stale,
+    chat: [...p.chat, p.prd && p.spec?.length
+      ? ai("PRD를 새 양식으로 다시 썼어요. 바뀌기 전 PRD는 [버전]에 남아 있어요. 기능명세서와 어긋난 곳은 위쪽 [동기화]로 맞출 수 있어요.")
+      : ai(`PRD 초안을 정리했어요. 오른쪽 문서에서 내용과 속성(카테고리·사용자 역할·기기)을 확인하고 고쳐 주세요.\n이 PRD와 역할(${out.props.roles.join(", ")})을 바탕으로 요구사항 → 기능 → 상세 기능까지 기능명세서를 이어서 만들 수 있어요.`, { actions: ["complete-spec"] })],
+  }), "PRD를 만들었어요");
+  autoVersion(id, "PRD 작성");
+  saveToDrive();
+}
+
+const localPrdFor = (p: Project) => {
+  const base = localPrd(p);
+  return p.prdTemplate ? { prd: localTemplatePrd(p.prdTemplate, base.prd), props: p.prdProps ?? base.props } : base;
+};
+
+// A PRD in the project's own 양식 (PRD 양식 편집). An existing PRD's content is carried over.
+async function templatePrd(x: Project, t: PrdTemplate, step: (s: string) => void) {
+  const old = x.prd ? `\n기존 PRD (이 내용을 새 양식에 옮겨 담고, 맞는 곳이 없는 내용은 가장 가까운 항목에 넣습니다):\n${prdText(x)}` : "";
+  step("양식 확인");
+  const o = await ask(TemplatePrdSchema, `아이디어: ${x.idea}${materialText(x)}
+질문 답변:
+${answersText(x)}${old}
+${materialNote(x)}
+이 서비스의 PRD를 아래 양식대로 씁니다. 항목마다 2~4문장, 이 서비스에만 해당하는 구체적인 내용으로 씁니다. 괄호 안은 그 항목에 쓸 내용 안내입니다.
+[양식] (key | 섹션 · 항목)
+${templateLines(t)}
+- blocks: 양식의 모든 key마다 하나씩 {key, body, src}. key는 위 key 그대로. src: ${SOURCE_RULE} 자료에서 가져오지 않았으면 빈 문자열.
+- category: 서비스 카테고리 한 단어 / roles: 사용자 역할 2~4개 / devices: 지원 기기
+${styleOf(x)}`, await materialBlocks(x));
+  const bodies = new Map(o.blocks.map((b) => [b.key.trim(), { body: b.body, src: b.src }]));
+  return {
+    prd: prdFromTemplate(t, bodies),
+    props: x.prdProps ?? { category: o.category, roles: o.roles.length ? o.roles : ["일반 사용자", "관리자"], devices: o.devices },
+  };
+}
+
+// Resolves once p.prd is written (AI or local). With a PRD already there (a new 양식), the old
+// one is kept as a version first.
+export async function generatePrd(id: string): Promise<void> {
+  const p = getProject(id);
+  if (!p || isBusy(p)) return;
+  if (p.prd) autoVersion(id, "PRD 양식 바꾸기 전");
+  if (!aiEnabled()) return applyPrd(id, localPrdFor(p));
+  await withAi(id, "PRD를 작성하고 있어요", async (x, step) => {
+    step("아이디어와 답변 읽음");
+    if (x.prdTemplate) {
+      const out = await templatePrd(x, x.prdTemplate, step);
+      step("PRD 작성 완료");
+      return applyPrd(id, out);
+    }
+    const o = await ask(PrdSchema, `아이디어: ${x.idea}${materialText(x)}
+질문 답변:
+${answersText(x)}${x.prd ? `\n기존 PRD (이 내용을 아래 필드에 옮겨 담습니다):\n${prdText(x)}` : ""}
+${materialNote(x)}
+이 서비스의 PRD를 써 주세요. 각 필드는 2~4문장, 이 서비스에만 해당하는 구체적인 내용으로 씁니다.
+- oneLiner: 한 줄 정의 / goal: 제품 목표(측정 가능한 목표 포함) / background: 배경
+- problem: 사용자 문제 / solution: 해결 방안 / differentiation: 기존 방법과의 차별점
+- target: 타겟 사용자(주·보조) / scenario: 대표 사용자 시나리오를 "1. … 2. …" 줄바꿈 목록으로
+- metrics: 핵심 지표(숫자 목표) / risks: 리스크와 대응
+- category: 서비스 카테고리 한 단어 / roles: 사용자 역할 2~4개(예: 일반 사용자, 운영자, 관리자) / devices: 지원 기기
+- sources: 첨부 자료에서 가져온 필드마다 {field: 위 필드 이름(예: problem), src}. ${SOURCE_RULE} 첨부 자료가 없으면 빈 배열입니다.
+${styleOf(x)}`, await materialBlocks(x));
+    step("PRD 작성 완료");
+    applyPrd(id, prdFrom(o));
+  }, () => applyPrd(id, localPrdFor(getProject(id)!)));
+}
+
+// Direct PRD edits from the PRD tab.
+// Each change is remembered (first "before", latest "after") so the chat can later check whether
+// the spec, flow and wireframes need it too.
+function remember(p: Project, c: PrdChange | null): Project["stale"] {
+  if (!p.spec?.length || !c) return p.stale;
+  const list = (p.stale?.prd ?? []).filter((x) => typeof x === "object");
+  const old = list.find((x) => x.what === c.what);
+  const merged = { what: c.what, before: old?.before ?? c.before, after: c.after };
+  const rest = list.filter((x) => x.what !== c.what);
+  return { ...p.stale, prd: merged.before === merged.after ? rest : [...rest, merged].slice(-12) };
+}
+const editPrd = (id: string, fn: (s: PrdSection[]) => PrdSection[], change: (before: PrdSection[], after: PrdSection[]) => PrdChange | null) =>
+  updateProject(id, (p) => {
+    if (!p.prd) return p;
+    const prd = fn(p.prd);
+    if (JSON.stringify(prd) === JSON.stringify(p.prd)) return p;
+    return { ...p, prd, stale: remember(p, change(p.prd, prd)) };
+  });
+const blockOf = (ss: PrdSection[], sid: string, idx: number) => { const s = ss.find((x) => x.id === sid); return { s, b: s?.blocks[idx] }; };
+export function setPrdBlock(id: string, sid: string, idx: number, patch: Partial<{ label: string; body: string }>) {
+  editPrd(id, (ss) => ss.map((s) => (s.id === sid ? { ...s, blocks: s.blocks.map((b, i) => (i === idx ? { ...b, ...patch } : b)) } : s)),
+    (before, after) => {
+      const a = blockOf(before, sid, idx), z = blockOf(after, sid, idx);
+      return a.b && z.b ? { what: `${a.s!.title} · ${a.b.label}`, before: `${a.b.label}: ${a.b.body}`, after: `${z.b.label}: ${z.b.body}` } : null;
+    });
+}
+export function addPrdBlock(id: string, sid: string) {
+  editPrd(id, (ss) => ss.map((s) => (s.id === sid ? { ...s, blocks: [...s.blocks, { label: "새 항목", body: "" }] } : s)), () => null);
+}
+export function deletePrdBlock(id: string, sid: string, idx: number) {
+  editPrd(id, (ss) => ss.map((s) => (s.id === sid ? { ...s, blocks: s.blocks.filter((_, i) => i !== idx) } : s)),
+    (before) => { const a = blockOf(before, sid, idx); return a.b ? { what: `${a.s!.title} · ${a.b.label}`, before: `${a.b.label}: ${a.b.body}`, after: "(항목 삭제)" } : null; });
+}
+const PROP_NAME: Record<string, string> = { category: "카테고리", roles: "사용자 역할", devices: "지원 기기" };
+export function setPrdProps(id: string, patch: Partial<PrdProps>) {
+  updateProject(id, (p) => {
+    const props = { category: "", roles: [], devices: [], ...p.prdProps, ...patch };
+    let stale = p.stale;
+    for (const k of Object.keys(patch) as (keyof PrdProps)[]) {
+      const show = (v: unknown) => (Array.isArray(v) ? v.join(", ") : String(v ?? ""));
+      stale = remember({ ...p, stale }, { what: `PRD 속성 · ${PROP_NAME[k] ?? k}`, before: show(p.prdProps?.[k]), after: show(props[k]) });
+    }
+    return { ...p, prdProps: props, stale };
+  });
+}
+
+// --- Spec schemas ------------------------------------------------------------------------
+
+// Kept small on purpose: the API compiles the schema into a grammar and rejects big ones
+// ("compiled grammar is too large"), so slots are slot/text lines and the tree comes back flat.
+export const SlotsSchema = z.array(z.object({ slot: z.string(), text: z.string() }));
+const QSchema = z.object({ slot: z.string(), text: z.string(), options: z.array(z.string()), recommended: z.number() });
+const DetailSchema = z.object({ title: z.string(), summary: z.string(), slots: SlotsSchema, questions: z.array(QSchema) });
+const FeatureSchema = z.object({
+  title: z.string(), summary: z.string(), roles: z.array(z.string()), priority: z.number(),
+  rationale: z.string(), success: z.string(), slots: SlotsSchema, questions: z.array(QSchema),
+});
+const EditSchema = z.object({
+  code: z.string(), reason: z.string(), summary: z.string(), rationale: z.string(), success: z.string(),
+  criteria: z.array(z.string()), slots: SlotsSchema, questions: z.array(QSchema),
+});
+export const SpecSchema = z.object({
+  requirements: z.array(z.object({ ref: z.string(), title: z.string(), summary: z.string(), criteria: z.array(z.string()), priority: z.number(), src: z.string() })),
+  features: z.array(FeatureSchema.extend({ ref: z.string(), parent: z.string(), src: z.string() })),
+  details: z.array(DetailSchema.extend({ parent: z.string() })),
+  edits: z.array(EditSchema),
+});
+
+// AI text mentions slots by key ("exception"); readers see the Korean label ("예외").
+export const slotWords = (t: string) => t.replace(/\b(pre|trigger|action|result|exception|display|access|rule|data)\b/g, (k) => SLOTS.find(([x]) => x === k)?.[1] ?? k);
+
+// Accepts a slot's key ("trigger") or label ("트리거").
+const slotKey = (s: string): SlotKey | undefined => {
+  const t = s.trim();
+  return SLOTS.find(([k, l]) => k === t || l === t || l.replace(/\s/g, "") === t.replace(/\s/g, ""))?.[0];
+};
+export const cleanSlots = (lines: z.infer<typeof SlotsSchema>) => {
+  const out: Partial<Record<SlotKey, string[]>> = {};
+  for (const l of lines) {
+    const k = slotKey(l.slot);
+    const v = l.text.split("\n").map((x) => x.trim()).filter(Boolean);
+    if (k && v.length) (out[k] ??= []).push(...v);
+  }
+  return out;
+};
+const toQs = (qs: z.infer<typeof QSchema>[]): SlotQuestion[] | undefined => {
+  const out = qs.flatMap((q) => {
+    const slot = slotKey(q.slot);
+    return slot && q.text.trim() && q.options.length ? [{
+      id: qid(), slot, text: q.text, options: q.options.slice(0, 4),
+      recommended: q.recommended >= 0 && q.recommended < q.options.length ? Math.round(q.recommended) : undefined,
+    }] : [];
+  });
+  return out.length ? out : undefined;
+};
+// Maps the AI's role names onto the PRD roles; "모임장" matches "모임장(구독 결제자)".
+const fixRoles = (rs: string[], allowed: string[]) => {
+  if (!allowed.length) return rs;
+  const base = (x: string) => x.replace(/\(.*\)/, "").trim();
+  const ok = [...new Set(rs.flatMap((r) => allowed.filter((a) => a === r || base(a) === base(r) || a.includes(base(r)) || r.includes(base(a)))))];
+  return ok.length ? ok : allowed.slice(0, 1);
+};
+
+function detailItem(d: z.infer<typeof DetailSchema>, roles: string[]): SpecItem {
+  return { ...blankItem(3, d.title, { kind: "new" }), summary: d.summary, roles, slots: cleanSlots(d.slots), questions: toQs(d.questions) };
+}
+function featureItem(f: z.infer<typeof FeatureSchema>, allowed: string[]): SpecItem {
+  const roles = fixRoles(f.roles, allowed);
+  return {
+    ...blankItem(2, f.title, { kind: "new" }), summary: f.summary, roles, priority: clampP(f.priority),
+    rationale: f.rationale, success: f.success, slots: cleanSlots(f.slots), questions: toQs(f.questions),
+  };
+}
+
+// --- Applying a plan ---------------------------------------------------------------------------
+
+function applyPlan(id: string, plan: SpecPlan, step?: (s: string) => void) {
+  updateProject(id, (p) => {
+    let spec = p.spec ?? [];
+    for (const e of plan.edits) if (findItem(spec, e.id)) spec = proposeEdit(spec, e.id, e.patch, e.reason);
+    spec = [...spec, ...plan.roots];
+    for (const u of plan.under) spec = insertItem(spec, u.parentId, u.item);
+    return { ...p, spec };
+  }, "기능명세서 제안을 추가했어요");
+  const added = flatten([...plan.roots, ...plan.under.map((u) => u.item)]);
+  if (step) {
+    step("요구사항 작성 완료");
+    step("기능 작성 완료");
+    step("상세 기능 작성 완료");
+  }
+  const c = { req: added.filter((x) => x.level === 1).length, feat: added.filter((x) => x.level === 2).length, detail: added.filter((x) => x.level === 3).length };
+  const qs = added.reduce((n, x) => n + (x.questions?.length ?? 0), 0);
+  const examples = added.filter((x) => x.level === 2).slice(0, 3).map((x) => `'${x.title}'`).join(", ");
+  const parts = [c.req && `요구사항 ${c.req}개`, c.feat && `기능 ${c.feat}개`, c.detail && `상세 기능 ${c.detail}개`].filter(Boolean).join(" · ");
+  const text = !added.length && !plan.edits.length
+    ? "지금 기능명세서에서 더 보탤 부분을 찾지 못했어요. 특정 항목을 고치고 싶다면 그 항목의 [보강]을 눌러 주세요."
+    : [
+      parts ? `기능명세서에 ${parts}${josa(parts, "을/를")} 새로 제안했어요.` : "",
+      plan.edits.length ? `기존 항목 ${plan.edits.length}개도 보완하는 수정안을 만들었어요.` : "",
+      examples ? `예: ${examples}` : "",
+      qs ? `정하지 못한 부분은 질문 카드 ${qs}개로 슬롯 안에 남겨 두었어요.` : "",
+      "모든 변경은 승인 대기 중이에요. 기능명세서 아래 검토 바에서 하나씩 또는 한꺼번에 승인·거절해 주세요.",
+      "승인을 마치면 다음 단계인 유저플로우를 안내해 드릴게요.",
+    ].filter(Boolean).join("\n");
+  updateProject(id, (p) => ({ ...p, chat: [...p.chat, ai(text, { actions: ["goto-features"], steps: added.length ? ["문서 읽음", "요구사항 작성 완료", "기능 작성 완료", "상세 기능 작성 완료"] : undefined })] }));
+  saveToDrive();
+}
+
+const coreBrief = (x: SpecItem) => JSON.stringify({ code: x.code, level: x.level, title: x.title, summary: x.summary, rationale: x.rationale, success: x.success, criteria: x.criteria, roles: x.roles, slots: x.slots, offSlots: x.offSlots });
+
+// Resolves once the spec proposals are written (AI or local).
+export async function completeSpec(id: string): Promise<void> {
+  const p0 = getProject(id);
+  if (!p0 || isBusy(p0)) return;
+  if (!p0.prd) {
+    updateProject(id, (p) => ({ ...p, chat: [...p.chat, ai("기능명세서는 PRD를 바탕으로 만들어요. 먼저 질문에 답하고 PRD를 만들어 주세요.")] }));
+    return;
+  }
+  const local = () => applyPlan(id, localSpec(getProject(id)!));
+  if (!aiEnabled()) return local();
+  const has = !!p0.spec?.length;
+  await withAi(id, has ? "기능명세서를 보완하고 있어요" : "기능명세서를 작성하고 있어요", async (p, step) => {
+    step("문서 읽음");
+    const roles = p.prdProps?.roles ?? [];
+    const existing = has ? `\n지금 기능명세서(코드 포함, 슬롯 포함):\n${specText(p.spec, true)}\n
+이미 있는 내용은 다시 만들지 말고 빠진 것만 더합니다. 기존 항목 아래에 넣을 때는 parent에 그 코드(R-…, F-…)를 씁니다.
+기존 항목을 고쳐야 하면 edits에 그 code와 고친 내용(바꾸지 않는 칸은 빈 문자열/빈 배열)과 reason을 넣습니다.` : "\n아직 기능명세서가 없어요. 전체를 새로 쓰고 edits는 빈 배열로 둡니다.";
+    const out = await ask(SpecSchema, `아이디어: ${p.idea}${materialText(p)}
+질문 답변:
+${answersText(p)}
+PRD:
+${prdText(p)}
+사용자 역할: ${roles.join(", ") || "일반 사용자, 관리자"}
+${existing}
+${materialNote(p)}
+요구사항 → 기능 → 상세 기능 3단계 기능명세서를 써 주세요. 세 단계를 각각 평평한 목록으로 쓰고 parent로 잇습니다.
+- requirements(${has ? "빠진 것만" : "5~8개"}): ref는 R1, R2…처럼 이 답 안에서 쓰는 이름. summary는 사용자가 이뤄야 할 것, criteria는 검증 가능한 수용 기준 3~5개, priority 1~3(3이 가장 중요).
+- features(요구사항마다 2~3개): ref는 F1, F2…, parent는 속한 요구사항의 ref(또는 기존 R-코드). roles는 위 사용자 역할 중에서만 고릅니다. summary, rationale(이 기능이 필요한 근거), success(측정 가능한 성공 기준), priority.
+- details: 따로 검증할 수 있는 동작만 기능 아래에 0~3개 둡니다. parent는 기능의 ref(또는 기존 F-코드).
+- slots는 개발 준비 슬롯입니다. 한 줄에 {slot, text} 하나씩, slot은 ${slotGuide} 중 영문 키를 씁니다. 기능과 상세 기능마다 9칸을 모두 쓰고 칸마다 1~3줄, 개발자가 바로 구현할 수 있는 구체적인 문장(숫자·조건 포함)으로 씁니다.
+- 문장 안에서 다른 항목을 가리킬 때는 ref(R1, F2)나 영문 키가 아니라 항목 이름과 한국어 칸 이름을 씁니다.
+- 요구사항과 기능의 src: ${SOURCE_RULE}
+- 아직 정해지지 않아 사람이 골라야 하는 점은 questions로 남깁니다: slot은 위 영문 키, text는 "~할까요?" 질문, options 3~4개, recommended는 추천 보기의 0부터 시작하는 번호. 전체에서 4~8개 정도.
+${styleOf(p)}`, await materialBlocks(p));
+    const cur = getProject(id)!;
+    const byCode = (code: string) => flatten(cur.spec).find((x) => x.code === code.trim());
+    const plan: SpecPlan = { roots: [], under: [], edits: [] };
+    // New requirements and features by ref; parents may also be existing codes.
+    const reqs = new Map<string, SpecItem>();
+    for (const r of out.requirements) {
+      const item: SpecItem = { ...blankItem(1, r.title, { kind: "new" }), summary: r.summary, criteria: r.criteria, priority: clampP(r.priority), ...(r.src.trim() ? { src: r.src.trim() } : {}) };
+      reqs.set(r.ref.trim(), item);
+      plan.roots.push(item);
+    }
+    const feats = new Map<string, SpecItem>();
+    for (const f of out.features) {
+      const item = featureItem(f, roles);
+      if (f.src.trim()) item.src = f.src.trim();
+      const parent = reqs.get(f.parent.trim());
+      const existing = !parent && byCode(f.parent);
+      if (parent) parent.children.push(item);
+      else if (existing && existing.level === 1) plan.under.push({ parentId: existing.id, item });
+      else continue;
+      feats.set(f.ref.trim(), item);
+    }
+    for (const d of out.details) {
+      const parent = feats.get(d.parent.trim());
+      const existing = !parent && byCode(d.parent);
+      if (parent) parent.children.push(detailItem(d, parent.roles));
+      else if (existing && existing.level === 2) plan.under.push({ parentId: existing.id, item: detailItem(d, existing.roles) });
+    }
+    for (const r of plan.roots) r.roles = [...new Set(r.children.flatMap((c) => c.roles))];
+    for (const e of out.edits) {
+      const t = byCode(e.code);
+      if (!t) continue;
+      const patch: Partial<SpecCore> = {};
+      if (e.summary.trim()) patch.summary = e.summary;
+      if (e.rationale.trim()) patch.rationale = e.rationale;
+      if (e.success.trim()) patch.success = e.success;
+      if (e.criteria.length) patch.criteria = e.criteria;
+      const s = cleanSlots(e.slots);
+      if (Object.keys(s).length) patch.slots = { ...t.slots, ...s };
+      const q = toQs(e.questions);
+      if (q) patch.questions = [...(t.questions ?? []), ...q];
+      if (Object.keys(patch).length) plan.edits.push({ id: t.id, patch, reason: slotWords(e.reason) });
+    }
+    applyPlan(id, plan, step);
+  }, local);
+}
+
+// --- One item ------------------------------------------------------------------------------
+
+export const ItemSchema = z.object({
+  reason: z.string(), title: z.string(), summary: z.string(), rationale: z.string(), success: z.string(),
+  criteria: z.array(z.string()), slots: SlotsSchema, questions: z.array(QSchema), newChildren: z.array(DetailSchema),
+});
+
+function itemContext(p: Project, x: SpecItem) {
+  const path = pathTo(p.spec ?? [], x.id).map((y) => `${y.code} ${y.title}`).join(" > ");
+  return `아이디어: ${p.idea}\nPRD:\n${prdText(p)}\n사용자 역할: ${(p.prdProps?.roles ?? []).join(", ")}\n기능명세서 개요:\n${specText(p.spec)}\n\n대상 항목(${path}):\n${coreBrief(x)}`;
+}
+
+function proposeItem(id: string, itemId: string, patch: Partial<SpecCore>, children: SpecItem[], reason: string) {
+  updateProject(id, (p) => {
+    if (!p.spec || !findItem(p.spec, itemId)) return p;
+    let spec = proposeEdit(p.spec, itemId, patch, reason);
+    for (const c of children) spec = insertItem(spec, itemId, c);
+    return { ...p, spec };
+  }, "항목 수정안을 만들었어요");
+  saveToDrive();
+}
+
+// Rewrites one item per a one-line request → pending edit (+ pending new children).
+export async function enhanceItem(id: string, itemId: string, request: string): Promise<void> {
+  const p0 = getProject(id);
+  const x0 = p0 && findItem(p0.spec, itemId);
+  if (!p0 || !x0 || isBusy(p0)) return;
+  const local = () => {
+    const p = getProject(id)!;
+    const x = findItem(p.spec, itemId);
+    if (!x) return;
+    const r = localEnhance(p, x, request);
+    proposeItem(id, itemId, r.patch, r.children, r.reason);
+    updateProject(id, (q) => ({ ...q, chat: [...q.chat, ai(`'${x.title}' 수정안을 만들었어요. 바뀐 부분을 확인하고 승인해 주세요.`)] }));
+  };
+  if (!aiEnabled()) return local();
+  await withAi(id, `'${x0.title}'${josa(x0.title, "을/를")} 보강하고 있어요`, async (p, step) => {
+    const x = findItem(p.spec, itemId)!;
+    step("항목 읽음");
+    const o = await ask(ItemSchema, `${itemContext(p, x)}
+
+요청: ${request}
+이 항목만 요청에 맞게 고쳐 전체 내용을 다시 써 주세요. 바꿀 필요 없는 칸은 원래 내용을 그대로 씁니다.
+- slots는 한 줄에 {slot: 영문 키(${slotGuide}), text: 문장} 하나씩입니다. ${x.level === 1 ? "요구사항이라 빈 배열로 둡니다" : "켜진 칸마다 1~3줄, 구체적인 문장으로 씁니다"}. criteria는 ${x.level === 1 ? "수용 기준" : "빈 배열"}.
+- 새로 정해야 할 점이 생기면 questions에 넣습니다(slot은 영문 키, 보기 3~4개, recommended 번호). 기존 질문은 다시 넣지 않습니다.
+- 따로 검증할 동작이 새로 생기면 newChildren에 ${x.level === 1 ? "기능" : "상세 기능"}으로 넣습니다(${x.level === 3 ? "상세 기능은 자식을 둘 수 없으니 빈 배열" : "없으면 빈 배열"}).
+- reason: 무엇을 왜 바꿨는지 한 문장.
+${styleOf(p)}`);
+    const patch: Partial<SpecCore> = { title: o.title || x.title, summary: o.summary };
+    if (x.level === 1) patch.criteria = o.criteria;
+    else {
+      patch.slots = cleanSlots(o.slots);
+      if (x.level === 2) { patch.rationale = o.rationale; patch.success = o.success; }
+    }
+    const q = toQs(o.questions);
+    if (q) patch.questions = [...(x.questions ?? []), ...q];
+    const kids = x.level === 3 ? [] : o.newChildren.map((d) => {
+      const c = detailItem(d, x.roles);
+      return x.level === 1 ? { ...c, level: 2 as const, code: blankItem(2).code } : c;
+    });
+    step("수정안 작성 완료");
+    const reason = slotWords(o.reason);
+    proposeItem(id, itemId, patch, kids, reason || `요청: ${request}`);
+    updateProject(id, (q2) => ({ ...q2, chat: [...q2.chat, ai(`'${x.title}' 수정안을 만들었어요. ${reason}\n바뀐 부분을 확인하고 승인해 주세요.`)] }));
+  }, local);
+}
+
+// Fills the enabled, empty slots of one item → pending edit.
+export async function fillSlots(id: string, itemId: string): Promise<void> {
+  const p0 = getProject(id);
+  const x0 = p0 && findItem(p0.spec, itemId);
+  if (!p0 || !x0 || isBusy(p0)) return;
+  const local = () => {
+    const p = getProject(id)!;
+    const x = findItem(p.spec, itemId);
+    if (x) proposeItem(id, itemId, { slots: localFill(p, x) }, [], "빈 슬롯 채우기");
+  };
+  if (!aiEnabled()) return local();
+  await withAi(id, `'${x0.title}'의 개발 준비 슬롯을 채우고 있어요`, async (p, step) => {
+    const x = findItem(p.spec, itemId)!;
+    const empty = SLOT_KEYS.filter((k) => !x.offSlots?.includes(k) && !x.slots?.[k]?.some((s) => s.trim()));
+    if (!empty.length) return;
+    const o = await ask(z.object({ slots: SlotsSchema }), `${itemContext(p, x)}
+
+이 항목의 개발 준비 슬롯 중 비어 있는 칸(${empty.join(", ")})만 채워 주세요. (${slotGuide})
+slots에는 한 줄에 {slot: 영문 키, text: 문장} 하나씩 씁니다. 칸마다 1~3줄, 숫자와 조건이 들어간 구체적인 문장으로 씁니다.
+${styleOf(p)}`);
+    const add = cleanSlots(o.slots);
+    const slots = { ...x.slots };
+    for (const k of empty) if (add[k]) slots[k] = add[k];
+    step("슬롯 채움");
+    proposeItem(id, itemId, { slots }, [], "빈 슬롯 채우기");
+  }, local);
+}
+
+// Picking an answer on a slot question rewrites that slot directly (no approval).
+export async function answerSlotQuestion(id: string, itemId: string, questionId: string, answer: string): Promise<void> {
+  const p0 = getProject(id);
+  const x0 = p0 && findItem(p0.spec, itemId);
+  const q = x0?.questions?.find((y) => y.id === questionId);
+  if (!p0 || !x0 || !q || !answer.trim()) return;
+  const apply = (sentences: string[]) => {
+    updateProject(id, (p) => ({
+      ...p, spec: p.spec && updateItem(p.spec, itemId, (x) => ({
+        ...x, slots: { ...x.slots, [q.slot]: sentences }, questions: x.questions?.filter((y) => y.id !== questionId),
+        // Keep a pending edit's "before" in sync so a reject doesn't bring the question back.
+        pending: x.pending?.kind === "edit" && x.pending.prev ? { ...x.pending, prev: { ...x.pending.prev, questions: x.pending.prev.questions?.filter((y) => y.id !== questionId) } } : x.pending,
+      })),
+    }), `'${x0.title}'의 미결정 사항을 정했어요`);
+    saveToDrive();
+  };
+  const local = () => { const x = findItem(getProject(id)!.spec, itemId); if (x) apply(localAnswer(x, q, answer)); };
+  if (!aiEnabled() || isBusy(p0)) return local();
+  await withAi(id, "결정한 내용을 반영하고 있어요", async (p) => {
+    const x = findItem(p.spec, itemId)!;
+    const label = SLOTS.find(([k]) => k === q.slot)?.[1];
+    const o = await ask(z.object({ sentences: z.array(z.string()) }), `${itemContext(p, x)}
+
+이 항목의 '${label}' 슬롯에 미결정 질문이 있었어요.
+질문: ${q.text}
+결정: ${answer}
+지금 '${label}' 문장: ${(x.slots?.[q.slot] ?? []).join(" / ") || "(없음)"}
+결정을 반영해 '${label}' 슬롯 문장 전체를 1~4문장으로 다시 써 주세요. 구체적인 숫자와 조건을 씁니다.
+${styleOf(p)}`);
+    apply(o.sentences.map((s) => s.trim()).filter(Boolean));
+  }, local);
+}
+
+export function dismissSlotQuestion(id: string, itemId: string, questionId: string) {
+  updateProject(id, (p) => ({ ...p, spec: p.spec && updateItem(p.spec, itemId, (x) => ({ ...x, questions: x.questions?.filter((y) => y.id !== questionId) })) }));
+}
+
+// --- Review: approve / reject ------------------------------------------------------------------
+
+function summarize(items: SpecItem[]) {
+  const n = (lv: number, k: string) => items.filter((x) => x.level === lv && x.pending?.kind === k).length;
+  const parts: string[] = [];
+  for (const [lv, name] of [[1, "요구사항"], [2, "기능"], [3, "상세 기능"]] as const) {
+    if (n(lv, "new")) parts.push(`${name} ${n(lv, "new")}개 추가`);
+    if (n(lv, "edit")) parts.push(`${name} ${n(lv, "edit")}개 수정`);
+    if (n(lv, "delete")) parts.push(`${name} ${n(lv, "delete")}개 삭제`);
+  }
+  return parts.join(" · ");
+}
+
+function afterReview(id: string, approved: SpecItem[], summary: string) {
+  if (approved.length) {
+    updateProject(id, (p) => (p.flows.length ? { ...p, stale: { ...p.stale, flow: true, wire: p.wires.length > 0 } } : p));
+  }
+  if (summary) autoVersion(id, summary);
+  nextAfterSpec(id);
+  saveToDrive();
+}
+
+// Once the spec has no pending suggestions and there is no flow yet, the chat points at the next step, once.
+function nextAfterSpec(id: string) {
+  updateProject(id, (p) => {
+    if (!p.spec?.length || pendingItems(p.spec).length || p.flows.length || p.chat.some((m) => m.actions?.includes("make-flow"))) return p;
+    return { ...p, chat: [...p.chat, ai("기능명세서가 정리됐어요. 다음은 유저플로우예요. 기능명세서를 바탕으로 사용자가 어떤 화면을 거쳐 움직이는지 그려 드릴게요.", { actions: ["make-flow"] })] };
+  });
+}
+
+// Items whose pending state changes when id is decided (a new parent takes its new children along).
+const affected = (p: Project, id: string) => {
+  const x = findItem(p.spec, id);
+  return x ? flatten([x]).filter((y) => y.id === id || (x.pending?.kind === "new" && y.pending?.kind === "new")) : [];
+};
+
+export function approve(id: string, itemId: string) {
+  const p = getProject(id);
+  if (!p?.spec) return;
+  const items = affected(p, itemId);
+  updateProject(id, (x) => {
+    let spec = x.spec!;
+    for (const y of items) spec = approveItem(spec, y.id);
+    return { ...x, spec };
+  }, "AI 제안을 승인했어요");
+  afterReview(id, items, summarize(items));
+}
+export function reject(id: string, itemId: string) {
+  updateProject(id, (x) => (x.spec ? { ...x, spec: rejectItem(x.spec, itemId) } : x), "AI 제안을 거절했어요");
+  nextAfterSpec(id);
+  saveToDrive();
+}
+export function approveAllPending(id: string) {
+  const p = getProject(id);
+  if (!p?.spec) return;
+  const items = pendingItems(p.spec);
+  updateProject(id, (x) => ({ ...x, spec: approveAll(x.spec!) }), `AI 제안 ${items.length}개를 모두 승인했어요`);
+  afterReview(id, items, summarize(items));
+}
+export function rejectAllPending(id: string) {
+  updateProject(id, (x) => (x.spec ? { ...x, spec: rejectAll(x.spec) } : x), "AI 제안을 모두 거절했어요");
+  nextAfterSpec(id);
+  saveToDrive();
+}
+
+// --- Direct editing ------------------------------------------------------------------------------
+
+// Hand edits are undoable (⌘Z) from the 기능명세서 tab.
+const specKey = (id: string) => `spec:${id}`;
+const editSpec = (id: string, fn: (s: SpecItem[]) => SpecItem[], log?: string, undoable = true) =>
+  updateProject(id, (p) => {
+    const before = p.spec ?? [];
+    const spec = fn(before);
+    if (undoable && spec !== before) rememberUndo(specKey(id), before);
+    return { ...p, spec };
+  }, log);
+
+export const specUndoKey = specKey;
+export function undoSpec(id: string, redo = false) {
+  const cur = getProject(id)?.spec ?? [];
+  const v = redo ? takeRedo(specKey(id), cur) : takeUndo(specKey(id), cur);
+  if (!v) return false;
+  editSpec(id, () => v, redo ? "다시 실행했어요" : "실행 취소했어요", false);
+  saveToDrive();
+  return true;
+}
+
+// 여러 항목 한번에: status/priority for every picked item.
+export function bulkUpdateSpec(id: string, ids: string[], patch: Partial<Pick<SpecItem, "status" | "priority" | "starred">>) {
+  const set = new Set(ids);
+  editSpec(id, (s) => mapItems(s, (x) => (set.has(x.id) ? { ...x, ...patch } : x)), `항목 ${ids.length}개를 한번에 바꿨어요`);
+  saveToDrive();
+}
+export function bulkDeleteSpec(id: string, ids: string[]) {
+  const set = new Set(ids);
+  editSpec(id, (s) => mapItems(s, (x) => (set.has(x.id) ? null : x)), `항목 ${ids.length}개를 삭제했어요`);
+  saveToDrive();
+}
+
+// Drag in the 디렉토리: drop before/after a sibling, or inside a parent one level up.
+// Levels are fixed (요구사항 1 → 기능 2 → 상세 기능 3), so an item only moves where its level fits.
+export function canMoveSpec(spec: SpecItem[], itemId: string, targetId: string, where: "before" | "after" | "inside") {
+  if (itemId === targetId) return false;
+  const x = findItem(spec, itemId), t = findItem(spec, targetId);
+  if (!x || !t || findItem(x.children, targetId)) return false;
+  return where === "inside" ? t.level === x.level - 1 : t.level === x.level;
+}
+export function moveSpecItem(id: string, itemId: string, targetId: string, where: "before" | "after" | "inside") {
+  const p = getProject(id);
+  if (!p?.spec || !canMoveSpec(p.spec, itemId, targetId, where)) return false;
+  const x = findItem(p.spec, itemId)!;
+  editSpec(id, (s) => {
+    const rest = removeItem(s, itemId);
+    if (where === "inside") return insertItem(rest, targetId, x);
+    const parent = pathTo(rest, targetId).slice(-2, -1)[0]?.id ?? null;
+    const sibs = parent ? findItem(rest, parent)!.children : rest;
+    const i = sibs.findIndex((y) => y.id === targetId);
+    const after = where === "after" ? targetId : sibs[i - 1]?.id;
+    if (after) return insertItem(rest, parent, x, after);
+    // First place among the siblings.
+    return parent ? updateItem(rest, parent, (y) => ({ ...y, children: [x, ...y.children] })) : [x, ...rest];
+  }, "항목을 옮겼어요");
+  saveToDrive();
+  return true;
+}
+
+export function updateSpecItem(id: string, itemId: string, patch: Partial<SpecItem>) {
+  editSpec(id, (s) => updateItem(s, itemId, (x) => ({ ...x, ...patch })));
+}
+// Adds a blank child (or a requirement when parentId is null). Returns the new item's id.
+export function addSpecItem(id: string, parentId: string | null, level: 1 | 2 | 3): string {
+  const x = blankItem(level, `새 ${level === 1 ? "요구사항" : level === 2 ? "기능" : "상세 기능"}`);
+  editSpec(id, (s) => insertItem(s, parentId, x), "항목을 추가했어요");
+  return x.id;
+}
+export function duplicateSpecItem(id: string, itemId: string): string | undefined {
+  const p = getProject(id);
+  const x = findItem(p?.spec, itemId);
+  if (!p?.spec || !x) return;
+  const copy = { ...cloneItem(x), title: `${x.title} (복사본)` };
+  const parent = pathTo(p.spec, itemId).slice(-2, -1)[0];
+  editSpec(id, (s) => insertItem(s, parent?.id ?? null, copy, itemId), "항목을 복제했어요");
+  return copy.id;
+}
+export function deleteSpecItem(id: string, itemId: string) {
+  editSpec(id, (s) => removeItem(s, itemId), "항목을 삭제했어요");
+}
+export function toggleSlot(id: string, itemId: string, slot: SlotKey) {
+  editSpec(id, (s) => updateItem(s, itemId, (x) => {
+    const off = x.offSlots ?? [];
+    return { ...x, offSlots: off.includes(slot) ? off.filter((k) => k !== slot) : [...off, slot] };
+  }));
+}
+export function setStar(id: string, itemId: string, starred: boolean) {
+  editSpec(id, (s) => updateItem(s, itemId, (x) => ({ ...x, starred })));
+}
+export function setSlotSentences(id: string, itemId: string, slot: SlotKey, sentences: string[]) {
+  editSpec(id, (s) => updateItem(s, itemId, (x) => ({ ...x, slots: { ...x.slots, [slot]: sentences } })));
+}
+
+export { coreOf, counts };
