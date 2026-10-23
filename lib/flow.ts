@@ -10,6 +10,7 @@ import { specText } from "./spec-model";
 import { getProject, updateProject } from "./store";
 import { saveToDrive } from "./sync";
 import type { Flow, FlowEdge, FlowKind, Project } from "./types";
+import { remember, takeRedo, takeUndo } from "./undo";
 import { autoVersion } from "./versions";
 
 export type { FlowOp, FlowPlan, FlowPlanOp } from "./flow-local";
@@ -54,13 +55,26 @@ export const FlowSchema = z.object({
   edges: z.array(z.object({ from: z.string(), to: z.string(), label: z.string() })),
 });
 
-async function aiFlow(p: Project, step: (s: string) => void): Promise<FlowBody> {
+// Choices on the 새 유저플로우 dialog.
+export type FlowOptions = { scope: "all" | "core" | "role"; role?: string; detail: "simple" | "normal" | "detailed"; extra?: string };
+export const DEFAULT_FLOW: FlowOptions = { scope: "all", detail: "normal" };
+
+const SIZE = { simple: ["3~5", "12~25"], normal: ["4~8", "30~60"], detailed: ["6~10", "60~90"] } as const;
+function scopeLine(o: FlowOptions) {
+  if (o.scope === "core") return "범위: 서비스의 핵심 여정 하나만 그립니다(진입 → 핵심 기능 사용 → 목적 달성). 설정·마이페이지 같은 곁가지는 뺍니다.";
+  if (o.scope === "role" && o.role) return `범위: '${o.role}' 역할의 사용자가 보고 지나가는 화면과 판단만 그립니다. 다른 역할만 쓰는 화면은 뺍니다.`;
+  return "범위: 서비스 전체 흐름을 그립니다.";
+}
+
+async function aiFlow(p: Project, o: FlowOptions, step: (s: string) => void): Promise<FlowBody> {
   step("화면 찾는 중");
+  const [secs, count] = SIZE[o.detail];
   const out = await ask(FlowSchema, `${context(p)}
 
 위 서비스의 유저플로우를 하나 그립니다. 사용자가 앱을 열고 목적을 이룰 때까지 지나가는 화면과 판단을 빠짐없이 담습니다.
-- 구역(sections) 4~8개: 서비스의 큰 흐름 단위입니다(예: 인증 및 온보딩, 탐색, 참여, 마이페이지). 이 서비스에 맞는 이름을 씁니다.
-- 노드 30~60개. 각 노드는 구역 하나에 속합니다. kind:
+${scopeLine(o)}${o.extra?.trim() ? `\n사용자의 추가 요청(꼭 따릅니다): ${o.extra.trim()}` : ""}
+- 구역(sections) ${secs}개: 서비스의 큰 흐름 단위입니다(예: 인증 및 온보딩, 탐색, 참여, 마이페이지). 이 서비스에 맞는 이름을 씁니다.
+- 노드 ${count}개. 각 노드는 구역 하나에 속합니다. kind:
   - start: 진입점. "앱 실행"과 "알림 진입"은 꼭 넣습니다.
   - page: 화면. 기능명세서가 암시하는 화면을 모두 page로 만듭니다(목록·상세·작성·완료·빈 화면 등).
   - data: 화면이 보여주거나 저장하는 데이터(예: 모임 일정 목록). page에서 data로 연결합니다.
@@ -84,10 +98,11 @@ ${styleOf(p)}`);
   return { sections, nodes, edges };
 }
 
-function addFlow(id: string, body: FlowBody, how: string) {
+function addFlow(id: string, body: FlowBody, how: string, o: FlowOptions) {
   let summary = "";
   updateProject(id, (p) => {
-    const flow: Flow = { id: uid("f_"), name: nextName(p), at: Date.now(), ...body };
+    const tag = o.scope === "role" && o.role ? ` · ${o.role}` : o.scope === "core" ? " · 핵심 여정" : "";
+    const flow: Flow = { id: uid("f_"), name: nextName(p) + tag, at: Date.now(), ...body };
     summary = `${flow.name} 생성 · 노드 ${flow.nodes.length}개 · 연결 ${flow.edges.length}개`;
     return {
       ...p, flows: [...p.flows, flow], flowId: flow.id, stale: { ...p.stale, flow: false },
@@ -98,16 +113,35 @@ function addFlow(id: string, body: FlowBody, how: string) {
   saveToDrive();
 }
 
-export function generateFlow(id: string) {
+// The local generator has no notion of roles; 간단히 drops the data nodes.
+function trimLocal(body: FlowBody, o: FlowOptions): FlowBody {
+  if (o.detail !== "simple") return body;
+  const keep = new Set(body.nodes.filter((n) => n.kind !== "data").map((n) => n.id));
+  return { ...body, nodes: body.nodes.filter((n) => keep.has(n.id)), edges: body.edges.filter((e) => keep.has(e.from) && keep.has(e.to)) };
+}
+
+export function generateFlow(id: string, o: FlowOptions = DEFAULT_FLOW) {
   const local = () => {
     const p = getProject(id);
-    if (p) addFlow(id, localFlow(p), "만들었어요");
+    if (p) addFlow(id, trimLocal(localFlow(p), o), "만들었어요", o);
   };
   if (!aiEnabled()) return local();
   return withAi(id, FLOW_BUSY.generate, async (p, step) => {
-    const body = await aiFlow(p, step);
-    addFlow(id, body, "AI가 그렸어요");
+    const body = await aiFlow(p, o, step);
+    addFlow(id, body, "AI가 그렸어요", o);
   }, local);
+}
+
+// Opens the 새 유저플로우 dialog on the flow tab (FlowView listens; the flag covers a tab that is not mounted yet).
+let wantDialog = false;
+export function requestFlowDialog() {
+  wantDialog = true;
+  window.dispatchEvent(new CustomEvent("planspace:flow-new"));
+}
+export function takeFlowDialog() {
+  const w = wantDialog;
+  wantDialog = false;
+  return w;
 }
 
 // --- Revision plans --------------------------------------------------------------------
@@ -243,13 +277,40 @@ export async function syncFlow(id: string): Promise<void> {
 
 // --- Direct edits --------------------------------------------------------------------------
 
-function editFlow(id: string, flowId: string, fn: (f: Flow) => Flow, log?: string) {
-  updateProject(id, (p) => ({
-    ...p,
-    flows: p.flows.map((f) => (f.id === flowId ? fn(f) : f)),
-    stale: p.wires.some((w) => w.flowId === flowId) ? { ...p.stale, wire: true } : p.stale,
-  }), log);
+export const flowUndoKey = (id: string, flowId: string) => `flow:${id}:${flowId}`;
+
+function editFlow(id: string, flowId: string, fn: (f: Flow) => Flow, log?: string, undoable = true) {
+  updateProject(id, (p) => {
+    const old = p.flows.find((f) => f.id === flowId);
+    if (!old) return p;
+    const next = fn(old);
+    if (next === old) return p;
+    if (undoable) remember(flowUndoKey(id, flowId), old);
+    return {
+      ...p,
+      flows: p.flows.map((f) => (f.id === flowId ? next : f)),
+      stale: p.wires.some((w) => w.flowId === flowId) ? { ...p.stale, wire: true } : p.stale,
+    };
+  }, log);
   saveToDrive();
+}
+
+// 실행 취소 / 다시 실행 of hand edits on one flow (AI plans are versioned instead).
+export function undoFlow(id: string, flowId: string, redo = false) {
+  const cur = getProject(id)?.flows.find((f) => f.id === flowId);
+  if (!cur) return false;
+  const v = redo ? takeRedo(flowUndoKey(id, flowId), cur) : takeUndo(flowUndoKey(id, flowId), cur);
+  if (!v) return false;
+  editFlow(id, flowId, () => v, undefined, false);
+  return true;
+}
+
+// Connects two nodes (drag from a node's connection point). Returns false for a duplicate or a loop.
+export function addEdge(id: string, flowId: string, from: string, to: string) {
+  const f = getProject(id)?.flows.find((x) => x.id === flowId);
+  if (!f || from === to || f.edges.some((e) => e.from === from && e.to === to)) return false;
+  editFlow(id, flowId, (x) => ({ ...x, edges: [...x.edges, { id: edgeId(), from, to }] }));
+  return true;
 }
 
 export const selectFlow = (id: string, flowId: string) => updateProject(id, (p) => ({ ...p, flowId }));

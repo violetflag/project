@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { currentChatTitle, deleteChat, newChat, openChat } from "@/lib/chats";
+import { useDismiss } from "../Popover";
 import { addMoreQuestions, checkPrdChanges, createPrd, dismissPrdChanges, editAnswer, isBusy, review } from "@/lib/actions";
 import { approveAllPending, completeSpec, rejectAllPending } from "@/lib/spec";
 import { pendingItems } from "@/lib/spec-model";
-import { generateFlow, setChatFlowPlan } from "@/lib/flow";
+import { requestFlowDialog, setChatFlowPlan } from "@/lib/flow";
 import { generateAllWires } from "@/lib/wire";
 import type { ChatMessage, Project } from "@/lib/types";
 import { Sparkle } from "../icons";
@@ -39,7 +41,7 @@ function Actions({ p, m, onGoto }: { p: Project; m: ChatMessage; onGoto: (tab: s
         <button onClick={() => onGoto("features")} className={btn}>→ 기능명세서에서 확인하기</button>
       )}
       {a.includes("make-flow") && (
-        <button disabled={busy || !p.spec?.length} onClick={() => { generateFlow(p.id); onGoto("flow"); }} aria-label="다음 단계: 유저플로우 만들기"
+        <button disabled={busy || !p.spec?.length} onClick={() => { onGoto("flow"); requestFlowDialog(); }} aria-label="다음 단계: 유저플로우 만들기"
           className="flex items-center justify-center gap-1.5 rounded-md bg-primary py-2 text-sm font-medium text-white disabled:opacity-50">
           <Sparkle className="h-3.5 w-3.5" /> 유저플로우 만들기
         </button>
@@ -139,8 +141,46 @@ export function PrdChangeBar({ p }: { p: Project }) {
   return (
     <div className="mx-3 mb-1.5 flex flex-wrap items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
       <span className="mr-auto">PRD를 {n}곳 고쳤어요. 기능명세서·유저플로우·와이어프레임에도 반영할 게 있는지 AI가 확인할까요?</span>
-      <button onClick={() => dismissPrdChanges(p.id)} aria-label="PRD 변경 확인 안 함" className="rounded border border-amber-300 bg-white px-2 py-1">괜찮아요</button>
+      <button onClick={() => dismissPrdChanges(p.id)} aria-label="PRD 변경 확인 안 함" className="rounded border border-amber-300 bg-background px-2 py-1">괜찮아요</button>
       <button disabled={busy} onClick={() => checkPrdChanges(p.id)} aria-label="PRD 변경 반영 확인" className="rounded bg-primary px-2 py-1 text-white disabled:opacity-50">확인하기</button>
+    </div>
+  );
+}
+
+const when = (t: number) => new Date(t).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+// 새 채팅 and the list of earlier conversations.
+function ChatBar({ p }: { p: Project }) {
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  const ref = useDismiss(open, close);
+  const busy = isBusy(p);
+  const list = p.chatArchive ?? [];
+  return (
+    <div ref={ref} className="relative flex items-center gap-1 border-b border-border px-3 py-1.5">
+      <button onClick={() => setOpen((o) => !o)} aria-label="채팅 목록" aria-expanded={open}
+        className="flex min-w-0 flex-1 items-center gap-1 rounded px-1.5 py-1 text-left text-xs text-foreground-support hover:bg-surface">
+        <span className="truncate">{currentChatTitle(p)}</span>
+        <span className="shrink-0 text-foreground-muted">▾{list.length ? ` ${list.length}` : ""}</span>
+      </button>
+      <button disabled={busy} onClick={() => { newChat(p.id); setOpen(false); }} aria-label="새 채팅" title="새 채팅 (지금 대화는 목록에 남아요)"
+        className="shrink-0 rounded border border-border px-2 py-1 text-xs hover:border-border-strong disabled:opacity-50">+ 새 채팅</button>
+      {open && (
+        <div role="menu" aria-label="이전 대화" className="animate-fade-up absolute inset-x-3 top-full z-30 mt-1 max-h-80 overflow-y-auto rounded-lg border border-border bg-background p-1 shadow-lg">
+          {!list.length && <p className="px-3 py-3 text-xs text-foreground-muted">이전 대화가 없어요. [새 채팅]을 누르면 지금 대화가 여기에 남아요.</p>}
+          {list.map((c) => (
+            <div key={c.id} className="group flex items-center gap-1 rounded-md hover:bg-surface">
+              <button role="menuitem" disabled={busy} onClick={() => { openChat(p.id, c.id); setOpen(false); }}
+                className="min-w-0 flex-1 px-2.5 py-1.5 text-left disabled:opacity-50">
+                <span className="block truncate text-sm">{c.title}</span>
+                <span className="text-[10px] text-foreground-muted">{when(c.at)} · 메시지 {c.chat.length}개</span>
+              </button>
+              <button onClick={() => { if (confirm(`'${c.title}' 대화를 지울까요?`)) deleteChat(p.id, c.id); }} aria-label={`${c.title} 대화 지우기`}
+                className="shrink-0 px-2 text-xs text-foreground-muted hover:text-red-500 md:opacity-0 md:group-hover:opacity-100">지우기</button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -154,6 +194,7 @@ export function ChatPanel({ p, onGoto }: { p: Project; onGoto: (tab: string) => 
   }, [p.chat.length, steps]);
   return (
     <div className="flex h-full flex-col">
+      <ChatBar p={p} />
       <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
         {p.chat.map((m) => <Message key={m.id} p={p} m={m} onGoto={onGoto} />)}
         <div ref={end} />

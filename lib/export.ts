@@ -1,6 +1,8 @@
 import { flatten, LEVEL_LABEL, numbering } from "./spec-model";
 import { SLOTS, STATUS_LABEL } from "./types";
 import type { Flow, Project, SpecItem, WireEl, WireSet } from "./types";
+import { saveBlob } from "./diagram-png";
+import { xlsxBytes, type Sheet } from "./xlsx";
 
 export function download(name: string, text: string, type: string) {
   const blob = new Blob([text], { type });
@@ -163,15 +165,47 @@ export function exportMarkdown(p: Project, opts: ExportOptions = {}) {
   download(`${p.name}.md`, toMarkdown(p, opts), "text/markdown");
 }
 
-export function exportCsv(p: Project) {
+function specRows(p: Project) {
   const num = numbering(p.spec ?? []);
   const rows = [["번호", "코드", "단계", "이름", "설명", "역할", "중요도", "상태", "수용 기준", ...SLOTS.map(([, l]) => l)]];
   flatten(p.spec).filter((x) => x.pending?.kind !== "new").forEach((x) => rows.push([
     num[x.id], x.code, LEVEL_LABEL[x.level], x.title, x.summary, x.roles.join(", "), PRIORITY[x.priority], STATUS_LABEL[x.status],
     (x.criteria ?? []).join(" / "), ...SLOTS.map(([k]) => (x.slots?.[k] ?? []).join(" / ")),
   ]));
+  return rows;
+}
+
+export function exportCsv(p: Project) {
   // BOM so Excel opens Korean text correctly.
-  download(`${p.name}-기능명세서.csv`, "﻿" + rows.map((r) => r.map(csvCell).join(",")).join("\n"), "text/csv");
+  download(`${p.name}-기능명세서.csv`, "\ufeff" + specRows(p).map((r) => r.map(csvCell).join(",")).join("\n"), "text/csv");
+}
+
+// The sheets of the .xlsx export: the spec, then the open user flow and wireframe screens if any.
+export function workbook(p: Project): Sheet[] {
+  const sheets: Sheet[] = [{ name: "기능명세서", rows: specRows(p), widths: [8, 10, 8, 24, 40, 14, 8, 12, 40, ...SLOTS.map(() => 30)] }];
+  const f = currentFlow(p);
+  if (f) {
+    const name = (id: string) => f.nodes.find((n) => n.id === id)?.label ?? "?";
+    sheets.push({
+      name: "유저플로우", widths: [18, 8, 28, 50],
+      rows: [["구역", "종류", "이름", "다음 (연결 라벨)"], ...f.nodes.map((n) => [n.section, KIND_LABEL[n.kind], n.label,
+        f.edges.filter((e) => e.from === n.id).map((e) => `${name(e.to)}${e.label ? ` (${e.label})` : ""}`).join("\n")])],
+    });
+  }
+  const w = currentWires(p);
+  if (w?.pages.length) {
+    const link = wireLinker(w);
+    sheets.push({
+      name: "와이어프레임", widths: [22, 18, 70],
+      rows: [["화면", "구역", "구성 요소"], ...w.pages.map((pg) => [pg.name, pg.section ?? "", pg.els.map((e) => wireLine(e, link)).join("\n")])],
+    });
+  }
+  return sheets;
+}
+
+export function exportXlsx(p: Project) {
+  const bytes = xlsxBytes(workbook(p));
+  saveBlob(`${p.name}-기획서.xlsx`, new Blob([bytes as BlobPart], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
 }
 
 export function exportDeliverables(p: Project) {

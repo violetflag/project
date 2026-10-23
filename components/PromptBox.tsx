@@ -4,7 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createProject } from "@/lib/store";
 import { aiEnabled, initQuestions } from "@/lib/actions";
-import { classify, readMaterials, saveBinary } from "@/lib/files";
+import { ACCEPT, classify, readMaterials, saveBinary, toProjectMaterial } from "@/lib/files";
 import { topicSuggestions } from "@/lib/mock";
 import { AiPicker } from "./AiKeyForm";
 import { useDismiss } from "./Popover";
@@ -22,7 +22,7 @@ const hints: Record<Mode, { placeholder: string; tip: string; caption: string }>
   files: {
     placeholder: "올린 자료에 대한 설명이나 원하는 결과를 적어주세요.",
     tip: "자료가 있을 때",
-    caption: "txt·md·csv는 바로 읽고, PDF와 이미지는 AI를 연결하면 읽어요. 최대 8MB.",
+    caption: "Word·엑셀·파워포인트·한글·txt는 바로 읽고, PDF와 이미지는 AI를 연결하면 읽어요. 파일당 10MB.",
   },
 };
 
@@ -69,12 +69,12 @@ export function PromptBox() {
     if (!canSend) return;
     setBusy(true);
     const withAi = aiEnabled();
-    const { items, skipped } = mode === "files" ? await readMaterials(files) : { items: [], skipped: [] };
+    const { items, skipped, failed } = mode === "files" ? await readMaterials(files) : { items: [], skipped: [], failed: [] };
     const idea = text.trim() || `첨부한 자료(${items.map((m) => m.name).join(", ")})를 바탕으로 한 기획`;
-    const materials = items.map((m) => ({ name: m.name, kind: m.kind, ...(m.kind === "text" ? { text: m.data } : {}) }));
+    const materials = items.map(toProjectMaterial);
     const p = createProject(idea, mode, withAi, materials);
     await saveBinary(p.id, items);
-    if (skipped.length) setNote(`용량이 커서 뺀 파일: ${skipped.join(", ")}`);
+    if (skipped.length || failed.length) setNote([skipped.length && `용량이 커서 뺀 파일: ${skipped.join(", ")}`, failed.length && `읽지 못한 파일: ${failed.join(", ")}`].filter(Boolean).join(" · "));
     if (withAi) initQuestions(p.id);
     router.push(`/editor?id=${p.id}`);
   };
@@ -93,8 +93,8 @@ export function PromptBox() {
             <p className="mt-2 text-xs text-foreground-support">
               {files.length ? "파일을 더 올리려면 누르세요" : "파일을 끌어다 놓거나 눌러서 고르세요"}
             </p>
-            <p className="mt-1 text-[11px] text-foreground-assistive">TXT · MD · CSV · JSON · PDF · 이미지, 최대 10개</p>
-            <input ref={fileInput} type="file" multiple hidden accept=".txt,.md,.markdown,.csv,.tsv,.json,.html,.xml,.yaml,.yml,.pdf,image/png,image/jpeg,image/gif,image/webp"
+            <p className="mt-1 text-[11px] text-foreground-assistive">PDF · Word · 엑셀 · 파워포인트 · 한글(HWP) · TXT · 이미지, 최대 10개</p>
+            <input ref={fileInput} type="file" multiple hidden accept={ACCEPT}
               onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = ""; }} />
           </div>
         )}

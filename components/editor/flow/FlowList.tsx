@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { deleteFlow, generateFlow, renameFlow, selectFlow } from "@/lib/flow";
+import { deleteFlow, renameFlow, requestFlowDialog, selectFlow } from "@/lib/flow";
 import type { Project } from "@/lib/types";
 import { useDismiss } from "@/components/Popover";
 import { Plus } from "@/components/icons";
@@ -53,7 +53,7 @@ export function FlowList({ p, busy }: { p: Project; busy: boolean }) {
           </select>
         )}
         {cur && <FlowMenu pid={p.id} flowId={cur.id} onRename={() => setEditing(cur.id)} />}
-        <button onClick={() => generateFlow(p.id)} disabled={busy} aria-label="새 유저플로우 생성"
+        <button onClick={requestFlowDialog} disabled={busy} aria-label="새 유저플로우 생성"
           className="flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1.5 text-xs text-primary disabled:opacity-40"><Plus className="h-3.5 w-3.5" />새로 만들기</button>
       </div>
       {/* Desktop: list on the left */}
@@ -73,7 +73,7 @@ export function FlowList({ p, busy }: { p: Project; busy: boolean }) {
           ))}
         </div>
         <div className="border-t border-border p-2">
-          <button onClick={() => generateFlow(p.id)} disabled={busy} aria-label="새 유저플로우 생성"
+          <button onClick={requestFlowDialog} disabled={busy} aria-label="새 유저플로우 생성"
             className="flex w-full items-center justify-center gap-1 rounded-md border border-border py-2 text-xs text-primary hover:bg-surface disabled:opacity-40">
             <Plus className="h-3.5 w-3.5" />새 유저플로우 생성
           </button>

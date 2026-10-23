@@ -23,6 +23,16 @@ function logAiError(label: string, e: unknown) {
 
 export const isBusy = (p: Project) => p.chat.some((m) => m.thinking);
 
+// One abort switch per project with AI work running; the composer's stop button pulls it.
+const running = new Map<string, AbortController>();
+export const aiSignal = () => (running.size ? AbortSignal.any([...running.values()].map((c) => c.signal)) : undefined);
+// With nothing running here (say the page was reloaded mid-task), it clears the stuck bubble.
+export function stopAi(id: string) {
+  const c = running.get(id);
+  if (c) return c.abort();
+  updateProject(id, (x) => ({ ...x, chat: x.chat.filter((m) => !m.thinking) }));
+}
+
 // Runs a Claude call behind a "thinking" chat bubble whose steps the caller can advance
 // (step("기능 작성 완료")). On failure the bubble turns into an error note and the local
 // generator does the job instead.
@@ -39,13 +49,21 @@ export async function withAi(
     ...x, chat: x.chat.map((m) => (m.id === bubble.id ? { ...m, steps: [...(m.steps ?? []), s] } : m)),
   }));
   const drop = () => updateProject(id, (x) => ({ ...x, chat: x.chat.filter((m) => m.id !== bubble.id) }));
+  const ctl = new AbortController();
+  running.set(id, ctl);
   try {
     await run(getProject(id)!, step);
     drop();
   } catch (e) {
     drop();
+    if (ctl.signal.aborted) {
+      updateProject(id, (x) => ({ ...x, chat: [...x.chat, ai("작업을 멈췄어요. 멈추기 전에 끝난 부분만 남아 있어요.")] }), "AI 작업을 멈췄어요");
+      return;
+    }
     logAiError(label, e);
     updateProject(id, (x) => ({ ...x, chat: [...x.chat, ai(`${describeError(e)} 이번에는 로컬 생성기로 대신 만들었어요.`, { error: true })] }));
     fallback();
+  } finally {
+    if (running.get(id) === ctl) running.delete(id);
   }
 }

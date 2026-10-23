@@ -5,10 +5,10 @@ import type { FlowKind } from "@/lib/types";
 
 export const KIND_STYLE: Record<FlowKind, { fill: string; stroke: string; text: string }> = {
   start: { fill: "var(--color-primary)", stroke: "var(--color-primary)", text: "#fff" },
-  page: { fill: "#ffffff", stroke: "#bdb9b9", text: "var(--color-foreground)" },
-  data: { fill: "#e8f1fa", stroke: "#8fb2d4", text: "#2f4a63" },
-  branch: { fill: "#fdf3df", stroke: "#dcae55", text: "#6b4a10" },
-  action: { fill: "#e7f6ee", stroke: "#78bf97", text: "#245a3b" },
+  page: { fill: "var(--flow-page-fill)", stroke: "var(--flow-page-stroke)", text: "var(--color-foreground)" },
+  data: { fill: "var(--flow-data-fill)", stroke: "var(--flow-data-stroke)", text: "var(--flow-data-text)" },
+  branch: { fill: "var(--flow-branch-fill)", stroke: "var(--flow-branch-stroke)", text: "var(--flow-branch-text)" },
+  action: { fill: "var(--flow-action-fill)", stroke: "var(--flow-action-stroke)", text: "var(--flow-action-text)" },
 };
 
 // The outline of a node; used for the canvas and the legend.

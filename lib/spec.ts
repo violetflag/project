@@ -4,18 +4,20 @@
 // approve/reject review of AI proposals, and direct item editing.
 import { josa } from "./josa";
 import { z } from "zod";
-import { answersText, ask, materialBlocks, materialNote, materialText, prdText, styleOf } from "./ai";
+import { answersText, ask, materialBlocks, materialNote, materialText, prdText, SOURCE_RULE, styleOf } from "./ai";
 import { ai, aiEnabled, isBusy, withAi } from "./run";
 import {
-  approveAll, approveItem, blankItem, coreOf, counts, findItem, flatten, insertItem, pathTo, pendingItems,
+  approveAll, approveItem, blankItem, coreOf, counts, findItem, flatten, insertItem, mapItems, pathTo, pendingItems,
   proposeEdit, rejectAll, rejectItem, removeItem, specText, updateItem,
 } from "./spec-model";
 import { cloneItem, localAnswer, localEnhance, localFill, localPrd, localSpec, type SpecPlan } from "./spec-local";
 import { getProject, updateProject } from "./store";
 import { saveToDrive } from "./sync";
 import { SLOTS } from "./types";
-import type { PrdChange, PrdProps, PrdSection, Project, SlotKey, SlotQuestion, SpecCore, SpecItem } from "./types";
+import type { PrdChange, PrdProps, PrdSection, PrdTemplate, Project, SlotKey, SlotQuestion, SpecCore, SpecItem } from "./types";
+import { remember as rememberUndo, takeRedo, takeUndo } from "./undo";
 import { autoVersion } from "./versions";
+import { localTemplatePrd, prdFromTemplate, templateLines, TemplatePrdSchema } from "./prd-template";
 
 const SLOT_KEYS = SLOTS.map(([k]) => k) as [SlotKey, ...SlotKey[]];
 export const slotGuide = SLOTS.map(([k, l]) => `${k}=${l}`).join(", ");
@@ -30,15 +32,21 @@ export const PrdSchema = z.object({
   target: z.string(), scenario: z.string(),
   metrics: z.string(), risks: z.string(),
   category: z.string(), roles: z.array(z.string()), devices: z.array(z.string()),
+  // Where a field's content came from in the attached material (field = one of the keys above).
+  sources: z.array(z.object({ field: z.string(), src: z.string() })),
 });
 
 function prdFrom(o: z.infer<typeof PrdSchema>): { prd: PrdSection[]; props: PrdProps } {
+  const b = (field: keyof typeof o, label: string) => {
+    const src = o.sources.filter((s) => s.field.trim() === field && s.src.trim()).map((s) => s.src.trim()).join(", ");
+    return { label, body: String(o[field]), ...(src ? { src } : {}) };
+  };
   return {
     prd: [
-      { id: "overview", title: "개요", blocks: [{ label: "한 줄 정의", body: o.oneLiner }, { label: "제품 목표", body: o.goal }, { label: "배경", body: o.background }] },
-      { id: "problem", title: "문제 및 해결 방안", blocks: [{ label: "사용자 문제", body: o.problem }, { label: "해결 방안", body: o.solution }, { label: "차별점", body: o.differentiation }] },
-      { id: "target", title: "타겟 및 시나리오", blocks: [{ label: "타겟 사용자", body: o.target }, { label: "사용자 시나리오", body: o.scenario }] },
-      { id: "metrics", title: "성공·위험 요소", blocks: [{ label: "핵심 지표", body: o.metrics }, { label: "리스크", body: o.risks }] },
+      { id: "overview", title: "개요", blocks: [b("oneLiner", "한 줄 정의"), b("goal", "제품 목표"), b("background", "배경")] },
+      { id: "problem", title: "문제 및 해결 방안", blocks: [b("problem", "사용자 문제"), b("solution", "해결 방안"), b("differentiation", "차별점")] },
+      { id: "target", title: "타겟 및 시나리오", blocks: [b("target", "타겟 사용자"), b("scenario", "사용자 시나리오")] },
+      { id: "metrics", title: "성공·위험 요소", blocks: [b("metrics", "핵심 지표"), b("risks", "리스크")] },
     ],
     props: { category: o.category, roles: o.roles.length ? o.roles : ["일반 사용자", "관리자"], devices: o.devices },
   };
@@ -48,22 +56,57 @@ function applyPrd(id: string, out: { prd: PrdSection[]; props: PrdProps }) {
   updateProject(id, (p) => ({
     ...p, prd: out.prd, prdProps: out.props,
     stale: p.spec ? { ...p.stale, flow: p.flows.length > 0, wire: p.wires.length > 0 } : p.stale,
-    chat: [...p.chat, ai(`PRD 초안을 정리했어요. 오른쪽 문서에서 내용과 속성(카테고리·사용자 역할·기기)을 확인하고 고쳐 주세요.\n이 PRD와 역할(${out.props.roles.join(", ")})을 바탕으로 요구사항 → 기능 → 상세 기능까지 기능명세서를 이어서 만들 수 있어요.`, { actions: ["complete-spec"] })],
+    chat: [...p.chat, p.prd && p.spec?.length
+      ? ai("PRD를 새 양식으로 다시 썼어요. 바뀌기 전 PRD는 [버전]에 남아 있어요. 기능명세서와 어긋난 곳은 위쪽 [동기화]로 맞출 수 있어요.")
+      : ai(`PRD 초안을 정리했어요. 오른쪽 문서에서 내용과 속성(카테고리·사용자 역할·기기)을 확인하고 고쳐 주세요.\n이 PRD와 역할(${out.props.roles.join(", ")})을 바탕으로 요구사항 → 기능 → 상세 기능까지 기능명세서를 이어서 만들 수 있어요.`, { actions: ["complete-spec"] })],
   }), "PRD를 만들었어요");
   autoVersion(id, "PRD 작성");
   saveToDrive();
 }
 
-// Resolves once p.prd is written (AI or local).
+const localPrdFor = (p: Project) => {
+  const base = localPrd(p);
+  return p.prdTemplate ? { prd: localTemplatePrd(p.prdTemplate, base.prd), props: p.prdProps ?? base.props } : base;
+};
+
+// A PRD in the project's own 양식 (PRD 양식 편집). An existing PRD's content is carried over.
+async function templatePrd(x: Project, t: PrdTemplate, step: (s: string) => void) {
+  const old = x.prd ? `\n기존 PRD (이 내용을 새 양식에 옮겨 담고, 맞는 곳이 없는 내용은 가장 가까운 항목에 넣습니다):\n${prdText(x)}` : "";
+  step("양식 확인");
+  const o = await ask(TemplatePrdSchema, `아이디어: ${x.idea}${materialText(x)}
+질문 답변:
+${answersText(x)}${old}
+${materialNote(x)}
+이 서비스의 PRD를 아래 양식대로 씁니다. 항목마다 2~4문장, 이 서비스에만 해당하는 구체적인 내용으로 씁니다. 괄호 안은 그 항목에 쓸 내용 안내입니다.
+[양식] (key | 섹션 · 항목)
+${templateLines(t)}
+- blocks: 양식의 모든 key마다 하나씩 {key, body, src}. key는 위 key 그대로. src: ${SOURCE_RULE} 자료에서 가져오지 않았으면 빈 문자열.
+- category: 서비스 카테고리 한 단어 / roles: 사용자 역할 2~4개 / devices: 지원 기기
+${styleOf(x)}`, await materialBlocks(x));
+  const bodies = new Map(o.blocks.map((b) => [b.key.trim(), { body: b.body, src: b.src }]));
+  return {
+    prd: prdFromTemplate(t, bodies),
+    props: x.prdProps ?? { category: o.category, roles: o.roles.length ? o.roles : ["일반 사용자", "관리자"], devices: o.devices },
+  };
+}
+
+// Resolves once p.prd is written (AI or local). With a PRD already there (a new 양식), the old
+// one is kept as a version first.
 export async function generatePrd(id: string): Promise<void> {
   const p = getProject(id);
   if (!p || isBusy(p)) return;
-  if (!aiEnabled()) return applyPrd(id, localPrd(p));
+  if (p.prd) autoVersion(id, "PRD 양식 바꾸기 전");
+  if (!aiEnabled()) return applyPrd(id, localPrdFor(p));
   await withAi(id, "PRD를 작성하고 있어요", async (x, step) => {
     step("아이디어와 답변 읽음");
+    if (x.prdTemplate) {
+      const out = await templatePrd(x, x.prdTemplate, step);
+      step("PRD 작성 완료");
+      return applyPrd(id, out);
+    }
     const o = await ask(PrdSchema, `아이디어: ${x.idea}${materialText(x)}
 질문 답변:
-${answersText(x)}
+${answersText(x)}${x.prd ? `\n기존 PRD (이 내용을 아래 필드에 옮겨 담습니다):\n${prdText(x)}` : ""}
 ${materialNote(x)}
 이 서비스의 PRD를 써 주세요. 각 필드는 2~4문장, 이 서비스에만 해당하는 구체적인 내용으로 씁니다.
 - oneLiner: 한 줄 정의 / goal: 제품 목표(측정 가능한 목표 포함) / background: 배경
@@ -71,10 +114,11 @@ ${materialNote(x)}
 - target: 타겟 사용자(주·보조) / scenario: 대표 사용자 시나리오를 "1. … 2. …" 줄바꿈 목록으로
 - metrics: 핵심 지표(숫자 목표) / risks: 리스크와 대응
 - category: 서비스 카테고리 한 단어 / roles: 사용자 역할 2~4개(예: 일반 사용자, 운영자, 관리자) / devices: 지원 기기
+- sources: 첨부 자료에서 가져온 필드마다 {field: 위 필드 이름(예: problem), src}. ${SOURCE_RULE} 첨부 자료가 없으면 빈 배열입니다.
 ${styleOf(x)}`, await materialBlocks(x));
     step("PRD 작성 완료");
     applyPrd(id, prdFrom(o));
-  }, () => applyPrd(id, localPrd(getProject(id)!)));
+  }, () => applyPrd(id, localPrdFor(getProject(id)!)));
 }
 
 // Direct PRD edits from the PRD tab.
@@ -139,8 +183,8 @@ const EditSchema = z.object({
   criteria: z.array(z.string()), slots: SlotsSchema, questions: z.array(QSchema),
 });
 export const SpecSchema = z.object({
-  requirements: z.array(z.object({ ref: z.string(), title: z.string(), summary: z.string(), criteria: z.array(z.string()), priority: z.number() })),
-  features: z.array(FeatureSchema.extend({ ref: z.string(), parent: z.string() })),
+  requirements: z.array(z.object({ ref: z.string(), title: z.string(), summary: z.string(), criteria: z.array(z.string()), priority: z.number(), src: z.string() })),
+  features: z.array(FeatureSchema.extend({ ref: z.string(), parent: z.string(), src: z.string() })),
   details: z.array(DetailSchema.extend({ parent: z.string() })),
   edits: z.array(EditSchema),
 });
@@ -258,6 +302,7 @@ ${materialNote(p)}
 - details: 따로 검증할 수 있는 동작만 기능 아래에 0~3개 둡니다. parent는 기능의 ref(또는 기존 F-코드).
 - slots는 개발 준비 슬롯입니다. 한 줄에 {slot, text} 하나씩, slot은 ${slotGuide} 중 영문 키를 씁니다. 기능과 상세 기능마다 9칸을 모두 쓰고 칸마다 1~3줄, 개발자가 바로 구현할 수 있는 구체적인 문장(숫자·조건 포함)으로 씁니다.
 - 문장 안에서 다른 항목을 가리킬 때는 ref(R1, F2)나 영문 키가 아니라 항목 이름과 한국어 칸 이름을 씁니다.
+- 요구사항과 기능의 src: ${SOURCE_RULE}
 - 아직 정해지지 않아 사람이 골라야 하는 점은 questions로 남깁니다: slot은 위 영문 키, text는 "~할까요?" 질문, options 3~4개, recommended는 추천 보기의 0부터 시작하는 번호. 전체에서 4~8개 정도.
 ${styleOf(p)}`, await materialBlocks(p));
     const cur = getProject(id)!;
@@ -266,13 +311,14 @@ ${styleOf(p)}`, await materialBlocks(p));
     // New requirements and features by ref; parents may also be existing codes.
     const reqs = new Map<string, SpecItem>();
     for (const r of out.requirements) {
-      const item: SpecItem = { ...blankItem(1, r.title, { kind: "new" }), summary: r.summary, criteria: r.criteria, priority: clampP(r.priority) };
+      const item: SpecItem = { ...blankItem(1, r.title, { kind: "new" }), summary: r.summary, criteria: r.criteria, priority: clampP(r.priority), ...(r.src.trim() ? { src: r.src.trim() } : {}) };
       reqs.set(r.ref.trim(), item);
       plan.roots.push(item);
     }
     const feats = new Map<string, SpecItem>();
     for (const f of out.features) {
       const item = featureItem(f, roles);
+      if (f.src.trim()) item.src = f.src.trim();
       const parent = reqs.get(f.parent.trim());
       const existing = !parent && byCode(f.parent);
       if (parent) parent.children.push(item);
@@ -504,8 +550,64 @@ export function rejectAllPending(id: string) {
 
 // --- Direct editing ------------------------------------------------------------------------------
 
-const editSpec = (id: string, fn: (s: SpecItem[]) => SpecItem[], log?: string) =>
-  updateProject(id, (p) => ({ ...p, spec: fn(p.spec ?? []) }), log);
+// Hand edits are undoable (⌘Z) from the 기능명세서 tab.
+const specKey = (id: string) => `spec:${id}`;
+const editSpec = (id: string, fn: (s: SpecItem[]) => SpecItem[], log?: string, undoable = true) =>
+  updateProject(id, (p) => {
+    const before = p.spec ?? [];
+    const spec = fn(before);
+    if (undoable && spec !== before) rememberUndo(specKey(id), before);
+    return { ...p, spec };
+  }, log);
+
+export const specUndoKey = specKey;
+export function undoSpec(id: string, redo = false) {
+  const cur = getProject(id)?.spec ?? [];
+  const v = redo ? takeRedo(specKey(id), cur) : takeUndo(specKey(id), cur);
+  if (!v) return false;
+  editSpec(id, () => v, redo ? "다시 실행했어요" : "실행 취소했어요", false);
+  saveToDrive();
+  return true;
+}
+
+// 여러 항목 한번에: status/priority for every picked item.
+export function bulkUpdateSpec(id: string, ids: string[], patch: Partial<Pick<SpecItem, "status" | "priority" | "starred">>) {
+  const set = new Set(ids);
+  editSpec(id, (s) => mapItems(s, (x) => (set.has(x.id) ? { ...x, ...patch } : x)), `항목 ${ids.length}개를 한번에 바꿨어요`);
+  saveToDrive();
+}
+export function bulkDeleteSpec(id: string, ids: string[]) {
+  const set = new Set(ids);
+  editSpec(id, (s) => mapItems(s, (x) => (set.has(x.id) ? null : x)), `항목 ${ids.length}개를 삭제했어요`);
+  saveToDrive();
+}
+
+// Drag in the 디렉토리: drop before/after a sibling, or inside a parent one level up.
+// Levels are fixed (요구사항 1 → 기능 2 → 상세 기능 3), so an item only moves where its level fits.
+export function canMoveSpec(spec: SpecItem[], itemId: string, targetId: string, where: "before" | "after" | "inside") {
+  if (itemId === targetId) return false;
+  const x = findItem(spec, itemId), t = findItem(spec, targetId);
+  if (!x || !t || findItem(x.children, targetId)) return false;
+  return where === "inside" ? t.level === x.level - 1 : t.level === x.level;
+}
+export function moveSpecItem(id: string, itemId: string, targetId: string, where: "before" | "after" | "inside") {
+  const p = getProject(id);
+  if (!p?.spec || !canMoveSpec(p.spec, itemId, targetId, where)) return false;
+  const x = findItem(p.spec, itemId)!;
+  editSpec(id, (s) => {
+    const rest = removeItem(s, itemId);
+    if (where === "inside") return insertItem(rest, targetId, x);
+    const parent = pathTo(rest, targetId).slice(-2, -1)[0]?.id ?? null;
+    const sibs = parent ? findItem(rest, parent)!.children : rest;
+    const i = sibs.findIndex((y) => y.id === targetId);
+    const after = where === "after" ? targetId : sibs[i - 1]?.id;
+    if (after) return insertItem(rest, parent, x, after);
+    // First place among the siblings.
+    return parent ? updateItem(rest, parent, (y) => ({ ...y, children: [x, ...y.children] })) : [x, ...rest];
+  }, "항목을 옮겼어요");
+  saveToDrive();
+  return true;
+}
 
 export function updateSpecItem(id: string, itemId: string, patch: Partial<SpecItem>) {
   editSpec(id, (s) => updateItem(s, itemId, (x) => ({ ...x, ...patch })));

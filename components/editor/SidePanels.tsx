@@ -2,12 +2,13 @@
 
 import { useCallback, useState } from "react";
 import {
-  deleteVersion, fixFinding, isBusy, resolveFindingInChat, review,
+  deleteVersion, fixFinding, isBusy, resolveFindingInChat, review, reviewSig,
   setFinding, setSettings,
 } from "@/lib/actions";
+import { applyCustomToProject, previewCustom } from "@/lib/custom";
 import { findItem } from "@/lib/spec-model";
 import { PERSPECTIVES } from "@/lib/types";
-import type { Perspective, Project, ProjectSettings } from "@/lib/types";
+import type { Finding, Perspective, Project, ProjectSettings } from "@/lib/types";
 import { josa } from "@/lib/josa";
 import { restoreVersion, saveVersion } from "@/lib/versions";
 import { saveToDrive } from "@/lib/sync";
@@ -50,16 +51,25 @@ export function ReviewPanel({ p, onChat, usable, onGotoSpec }: { p: Project; onC
   }
   const fs = p.findings;
   const open = fs.filter((f) => f.state === "open");
-  const warn = open.filter((f) => f.level === "주의").length;
+  const n = (l: Finding["level"]) => open.filter((f) => f.level === l).length;
+  const rank = { 심각: 0, 주의: 1, 제안: 2 };
   const shown = fs.filter((f) => filter === "전체" || f.perspective === filter)
-    .sort((a, b) => Number(a.state !== "open") - Number(b.state !== "open"));
+    .sort((a, b) => Number(a.state !== "open") - Number(b.state !== "open") || rank[a.level] - rank[b.level]);
+  const changed = !!p.reviewedSig && p.reviewedSig !== reviewSig(p);
   const count = (k: Perspective) => fs.filter((f) => f.perspective === k && f.state === "open").length;
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-2 text-xs text-foreground-support">
-        <span>남은 의견 {open.length}개 · 주의 {warn} · 제안 {open.length - warn} <span className="text-foreground-muted">/ 전체 {fs.length}</span></span>
-        <button disabled={busy} onClick={() => review(p.id)} aria-label="다시 검토" className="shrink-0 rounded border border-border px-2 py-0.5 hover:border-border-strong disabled:opacity-50">다시 검토</button>
+        <span>남은 의견 {open.length}개 · <span className="text-red-600">심각 {n("심각")}</span> · 주의 {n("주의")} · 제안 {n("제안")} <span className="text-foreground-muted">/ 전체 {fs.length}</span></span>
+        <button disabled={busy} onClick={() => { if (confirm("다시 검토하면 지금 의견과 보류·해결 표시가 새 결과로 바뀌어요. 다시 검토할까요?")) review(p.id); }} aria-label="다시 검토"
+          className="shrink-0 rounded border border-border px-2 py-0.5 hover:border-border-strong disabled:opacity-50">다시 검토</button>
       </div>
+      {changed && (
+        <div role="status" className="mx-4 mt-2 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <span className="flex-1">검토 이후 기획서가 바뀌었어요. 지금 의견은 바뀌기 전 내용을 기준으로 해요.</span>
+          <button disabled={busy} onClick={() => review(p.id)} aria-label="바뀐 기획서로 다시 검토" className="shrink-0 rounded bg-primary px-2 py-1 text-white disabled:opacity-50">다시 검토</button>
+        </div>
+      )}
       <div className="flex flex-wrap gap-1 px-4 py-2">
         {(["전체", ...PERSPECTIVES] as const).map((k) => (
           <button key={k} onClick={() => setFilter(k)} aria-pressed={filter === k}
@@ -75,7 +85,7 @@ export function ReviewPanel({ p, onChat, usable, onGotoSpec }: { p: Project; onC
           return (
             <div key={f.id} className={`rounded-lg border border-border bg-background p-3 ${f.state !== "open" ? "opacity-60" : ""}`}>
               <div className="flex items-center gap-1.5">
-                <span className={`rounded px-1.5 py-0.5 text-[10px] ${f.level === "주의" ? "bg-amber-100 text-amber-700" : "bg-sky-100 text-sky-700"}`}>{f.level}</span>
+                <span className={`rounded px-1.5 py-0.5 text-[10px] ${f.level === "심각" ? "bg-red-100 text-red-700" : f.level === "주의" ? "bg-amber-100 text-amber-700" : "bg-sky-100 text-sky-700"}`}>{f.level}</span>
                 <span className="text-[11px] text-foreground-muted">{f.perspective}</span>
                 {item && <span className="ml-auto truncate font-mono text-[10px] text-foreground-muted" title={item.title}>{item.code}</span>}
               </div>
@@ -211,6 +221,33 @@ export function VersionsPanel({ p }: { p: Project }) {
 
 const TONES = ["간결하게", "친절하게", "자세하게", "보고서체"];
 
+function CustomPreview({ p, s }: { p: Project; s: ProjectSettings }) {
+  const [state, setState] = useState<{ busy?: boolean; err?: string; r?: Awaited<ReturnType<typeof previewCustom>> }>({});
+  const run = async () => {
+    setState({ busy: true });
+    try { setState({ r: await previewCustom(p, s) }); } catch (e) { setState({ err: e instanceof Error ? e.message : String(e) }); }
+  };
+  return (
+    <div className="rounded-lg bg-surface p-3">
+      <div className="flex items-center gap-2">
+        <p className="flex-1 text-xs font-medium">미리보기</p>
+        <button onClick={run} disabled={state.busy} aria-label="커스텀 미리보기" className="rounded border border-border bg-background px-2 py-1 text-xs hover:border-primary disabled:opacity-50">
+          {state.busy ? "쓰는 중…" : state.r ? "다시 보기" : "적용 결과 보기"}
+        </button>
+      </div>
+      {!state.r && !state.err && <p className="mt-1 text-[11px] text-foreground-muted">저장하기 전에, 이 프로젝트의 글 한 토막이 어떻게 바뀌는지 먼저 봐요.</p>}
+      {state.err && <p className="mt-1 text-[11px] text-red-600">미리보기를 만들지 못했어요: {state.err}</p>}
+      {state.r && (
+        <div className="mt-2 space-y-2 text-xs" aria-label="미리보기 결과">
+          <p className="text-[11px] text-foreground-muted">{state.r.where}{state.r.local ? " · AI 없이 팀 용어만 바꿔 봤어요" : ""}</p>
+          <div><p className="mb-0.5 text-[11px] text-foreground-muted">전</p><p className="rounded bg-background p-2 leading-relaxed whitespace-pre-wrap text-foreground-support">{state.r.before}</p></div>
+          <div><p className="mb-0.5 text-[11px] text-primary">후</p><p className="rounded border border-primary/30 bg-background p-2 leading-relaxed whitespace-pre-wrap">{state.r.after}</p></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function CustomizePanel({ p }: { p: Project }) {
   const [s, setS] = useState<ProjectSettings>(p.settings);
   const [saved, setSaved] = useState(false);
@@ -247,8 +284,17 @@ export function CustomizePanel({ p }: { p: Project }) {
       {area("terms", "팀 용어", "예: 회원 → 멤버, 모임 → 클럽")}
       {area("avoid", "하지 말아야 할 것", "예: 결제 기능은 넣지 않기, 영어 약어 쓰지 않기")}
       {area("extra", "그 밖에 알아둘 것", "예: 첫 출시는 3개월 안, 개발자 2명", 3)}
+      <CustomPreview p={p} s={s} />
       <button onClick={() => { setSettings(p.id, s); setSaved(true); }} aria-label="커스터마이징 저장" className="w-full rounded-md bg-primary py-2 text-white">{saved ? "저장했어요" : "저장"}</button>
-      <p className="text-xs text-foreground-muted">AI가 다음에 쓰는 글부터 적용돼요. AI를 연결하지 않은 기본 생성기는 한국어 템플릿으로만 써요.</p>
+      <p className="text-xs text-foreground-muted">AI가 다음에 쓰는 글부터 적용돼요. AI를 연결하지 않은 기본 생성기는 한국어 템플릿으로만 써요(팀 용어 바꾸기는 돼요).</p>
+      {(!!p.prd || !!p.spec?.length) && (
+        <div className="rounded-lg border border-border p-3">
+          <p className="text-xs font-medium">이미 쓴 기획서에도 적용</p>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-foreground-muted">저장한 규칙으로 PRD와 기능명세서를 다시 써요. PRD는 바로 바뀌고 기능명세서는 승인 대기로 올라와요. 바뀌기 전 상태는 버전에 남아요.</p>
+          <button onClick={() => { setSettings(p.id, s); setSaved(true); void applyCustomToProject(p.id); }} disabled={isBusy(p)} aria-label="이 프로젝트에 적용"
+            className="mt-2 w-full rounded-md border border-primary py-1.5 text-xs font-medium text-primary hover:bg-primary-soft disabled:opacity-40">저장하고 이 프로젝트에 적용</button>
+        </div>
+      )}
       <div className="border-t border-border pt-4">
         <p className="mb-2 font-medium">AI 연결 (모든 프로젝트 공통)</p>
         <AiKeyForm />

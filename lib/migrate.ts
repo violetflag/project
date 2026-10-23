@@ -12,8 +12,16 @@ type Old = Project & {
 const KIND: Record<string, FlowKind> = { start: "start", page: "page", layer: "data", branch: "branch", end: "action" };
 const PERSP: Record<string, Perspective> = { "UX·디자인": "UX", 운영: "사업" };
 
+// The three early statuses map onto the six current ones (검토중 → 기획 제안, 확정 → 기획 확정).
+const OLD_STATUS: Record<string, SpecItem["status"]> = { review: "proposed", done: "confirmed" };
+const fixStatus = (xs: SpecItem[]): SpecItem[] => xs.map((x) => ({
+  ...x, status: OLD_STATUS[x.status] ?? x.status, children: fixStatus(x.children),
+  ...(x.pending?.prev ? { pending: { ...x.pending, prev: { ...x.pending.prev, status: OLD_STATUS[x.pending.prev.status] ?? x.pending.prev.status } } } : {}),
+}));
+const needsFix = (xs: SpecItem[] | null): boolean => !!xs?.some((x) => x.status in OLD_STATUS || needsFix(x.children));
+
 export function migrate(p: Project): Project {
-  if (p.schema === 2) return p;
+  if (p.schema === 2) return needsFix(p.spec) ? { ...p, spec: fixStatus(p.spec!) } : p;
   const o = p as Old;
   const spec: SpecItem[] | null = o.groups
     ? o.groups.map((g) => ({
@@ -32,7 +40,7 @@ export function migrate(p: Project): Project {
   const { groups: _g, flow: _f, screens: _s, pending: _p, ...rest } = o;
   return {
     ...rest,
-    spec,
+    spec: spec && fixStatus(spec),
     flows,
     flowId: flows[0]?.id,
     wires: p.wires ?? [],

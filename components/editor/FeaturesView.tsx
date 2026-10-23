@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { completeSpec } from "@/lib/spec";
+import { useEffect, useMemo, useState } from "react";
+import { completeSpec, specUndoKey, undoSpec } from "@/lib/spec";
+import { undoKey, useUndo } from "@/lib/undo";
 import { isBusy } from "@/lib/run";
 import { findItem, flatten, numbering, pendingItems } from "@/lib/spec-model";
 import { STATUS_LABEL } from "@/lib/types";
@@ -9,6 +10,7 @@ import type { Project, Status } from "@/lib/types";
 import { useIsMobile } from "@/lib/useMedia";
 import { Sparkle } from "../icons";
 import { EmptyDoc } from "./PrdView";
+import { BulkBar } from "./spec/BulkBar";
 import { DocumentView } from "./spec/DocumentView";
 import { Graph } from "./spec/Graph";
 import { ItemDetail } from "./spec/ItemDetail";
@@ -52,6 +54,23 @@ export function FeaturesView({ p }: { p: Project }) {
   const [docAt, setDocAt] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>(NO_FILTER);
   const [hide, setHide] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const undo = useUndo(specUndoKey(p.id));
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => {
+      const k = undoKey(e);
+      if (k && undoSpec(p.id, k === "redo")) e.preventDefault();
+      if (e.key === "Escape") setPicked(new Set());
+    };
+    window.addEventListener("keydown", on);
+    return () => window.removeEventListener("keydown", on);
+  }, [p.id]);
+  const pick = (ids: string[], mode: "toggle" | "add" | "set") => setPicked((cur) => {
+    if (mode === "set") return new Set(ids);
+    const n = new Set(cur);
+    ids.forEach((id) => (mode === "toggle" && n.has(id) ? n.delete(id) : n.add(id)));
+    return n;
+  });
 
   const spec = p.spec;
   const num = useMemo(() => numbering(spec ?? []), [spec]);
@@ -104,6 +123,17 @@ export function FeaturesView({ p }: { p: Project }) {
       ))}
     </div>
   );
+  const all_ids = new Set(all.map((x) => x.id));
+  const pickedIds = [...picked].filter((id) => all_ids.has(id));
+  const undoBtns = (
+    <span className="flex items-center gap-0.5">
+      <button onClick={() => undoSpec(p.id)} disabled={!undo.canUndo} aria-label="실행 취소" title="실행 취소 (⌘Z)"
+        className="rounded px-1.5 py-0.5 text-sm text-foreground-support hover:bg-surface disabled:opacity-30">↶</button>
+      <button onClick={() => undoSpec(p.id, true)} disabled={!undo.canRedo} aria-label="다시 실행" title="다시 실행 (⌘⇧Z)"
+        className="rounded px-1.5 py-0.5 text-sm text-foreground-support hover:bg-surface disabled:opacity-30">↷</button>
+    </span>
+  );
+  const bulk = <BulkBar pid={p.id} ids={pickedIds} onClear={() => setPicked(new Set())} />;
   const canvas = "bg-[radial-gradient(var(--color-border)_1px,transparent_1px)] [background-size:16px_16px]";
 
   if (mobile) {
@@ -112,13 +142,14 @@ export function FeaturesView({ p }: { p: Project }) {
     return (
       <div className="relative flex h-full flex-col">
         <div className="flex shrink-0 flex-col gap-1.5 border-b border-border bg-background px-3 py-1.5">
-          {switcher}
+          <div className="flex items-center justify-between">{switcher}{undoBtns}</div>
           <Filters f={filter} setF={setFilter} roles={roles} hide={hide} setHide={setHide} />
         </div>
-        <div className={`min-h-0 flex-1 ${view === "graph" ? canvas : "bg-background"}`}>
+        <div className={`relative min-h-0 flex-1 ${view === "graph" ? canvas : "bg-background"}`}>
           {view === "dir" && <div className="h-full pb-16">{tree}</div>}
-          {view === "graph" && <Graph p={p} num={num} shown={shown} dim={dim} selected={open} onOpen={setOpen} focus={focus} />}
+          {view === "graph" && <Graph p={p} num={num} shown={shown} dim={dim} selected={open} onOpen={setOpen} focus={focus} picked={picked} onPick={pick} />}
           {view === "doc" && <DocumentView p={p} num={num} shown={shown} dim={dim} onOpen={setOpen} scrollTo={docAt} />}
+          {view === "graph" && bulk}
         </div>
         <ReviewBar pid={p.id} pending={pending} current={open} onGo={openItem} />
         {current && (
@@ -142,10 +173,12 @@ export function FeaturesView({ p }: { p: Project }) {
       <div className="relative flex min-w-0 flex-1 flex-col">
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-background px-3 py-1.5">
           {switcher}
+          {undoBtns}
           <div className="ml-auto"><Filters f={filter} setF={setFilter} roles={roles} hide={hide} setHide={setHide} /></div>
         </div>
         <div className={`relative min-h-0 flex-1 ${view === "graph" ? canvas : ""}`}>
-          {view === "graph" && <Graph p={p} num={num} shown={shown} dim={dim} selected={open} onOpen={setOpen} focus={focus} />}
+          {view === "graph" && <Graph p={p} num={num} shown={shown} dim={dim} selected={open} onOpen={setOpen} focus={focus} picked={picked} onPick={pick} />}
+          {view === "graph" && bulk}
           {view === "doc" && <DocumentView p={p} num={num} shown={shown} dim={dim} onOpen={setOpen} scrollTo={docAt} />}
           {view === "dir" && dirItem && (
             <div className="h-full bg-background pb-16">

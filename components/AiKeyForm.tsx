@@ -5,6 +5,7 @@ import {
   CONTEXTS, EFFORTS, MODELS, modelLabel, setAiSettings, setApiKey, useAiSettings, useApiKey,
 } from "@/lib/ai";
 import { setAutoSave, useAutoSave, useSync } from "@/lib/sync";
+import { setTheme, useTheme, type Theme } from "@/lib/theme";
 import { useIsMobile } from "@/lib/useMedia";
 import { useDismiss } from "./Popover";
 import { ChevronDown, Close } from "./icons";
@@ -72,6 +73,24 @@ export function AiKeyForm() {
       <Select label="노력 (생각하는 깊이)" value={s.effort} options={EFFORTS} onChange={(effort) => setAiSettings({ effort })} />
       <Select label="컨텍스트 크기" value={s.context} options={CONTEXTS} onChange={(context) => setAiSettings({ context })} />
       <AutoSaveToggle />
+      <ThemePicker />
+    </div>
+  );
+}
+
+const THEMES: [Theme, string][] = [["system", "시스템"], ["light", "밝게"], ["dark", "어둡게"]];
+function ThemePicker() {
+  const t = useTheme();
+  return (
+    <div className="border-t border-border pt-3">
+      <p className="text-xs text-foreground-support">화면 테마</p>
+      <div role="radiogroup" aria-label="화면 테마" className="mt-1 grid grid-cols-3 gap-1 rounded-md bg-surface p-1">
+        {THEMES.map(([k, label]) => (
+          <button key={k} type="button" role="radio" aria-checked={t === k} onClick={() => setTheme(k)}
+            className={`rounded px-2 py-1.5 text-xs ${t === k ? "bg-background font-medium shadow-sm" : "text-foreground-muted hover:text-foreground"}`}>{label}</button>
+        ))}
+      </div>
+      <p className="mt-1 text-[11px] text-foreground-muted">시스템은 기기 설정(다크 모드)을 따라가요. 이 기기에만 적용돼요.</p>
     </div>
   );
 }

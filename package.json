@@ -9,6 +9,8 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.135.0",
+    "cfb": "^1.2.2",
+    "fflate": "^0.8.2",
     "next": "15.5.4",
     "react": "19.1.1",
     "react-dom": "19.1.1",

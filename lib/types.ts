@@ -1,7 +1,9 @@
 import type { FlowPlanOp } from "./flow-local";
 export type Role = string;
-export type Status = "draft" | "review" | "done";
-export const STATUS_LABEL: Record<Status, string> = { draft: "기획 작성중", review: "검토중", done: "확정" };
+export type Status = "draft" | "proposed" | "confirmed" | "dev" | "shipped" | "hold";
+export const STATUS_LABEL: Record<Status, string> = {
+  draft: "기획 작성중", proposed: "기획 제안", confirmed: "기획 확정", dev: "개발 중", shipped: "개발 완료", hold: "보류",
+};
 
 // --- Feature spec: requirement (1) → feature (2) → detail (3) --------------
 
@@ -39,6 +41,8 @@ export interface SpecCore {
   slots?: Partial<Record<SlotKey, string[]>>;
   offSlots?: SlotKey[];
   questions?: SlotQuestion[];
+  // Where it came from in the attached material, e.g. "기획안.pdf p.3".
+  src?: string;
 }
 
 export interface SpecItem extends SpecCore {
@@ -58,8 +62,11 @@ export interface PrdChange { what: string; before: string; after: string }
 export interface PrdSection {
   id: string;
   title: string;
-  blocks: { label: string; body: string }[];
+  // src: where the AI took it from in the attached material, e.g. "기획안.pdf p.3".
+  blocks: { label: string; body: string; src?: string }[];
 }
+// PRD 양식: sections and their items (hint = what to write there).
+export interface PrdTemplate { sections: { title: string; items: { label: string; hint?: string }[] }[] }
 export interface PrdProps {
   category: string;
   roles: Role[];
@@ -156,12 +163,19 @@ export interface ChatMessage {
   flowPlan?: { summary: string; ops: FlowPlanOp[]; flowId: string; done?: "applied" | "copied" | "dismissed" };
 }
 
+export interface ChatThread {
+  id: string;
+  title: string;
+  at: number;
+  chat: ChatMessage[];
+}
+
 export type Perspective = "개발" | "사업" | "UX" | "디자인" | "QA" | "보안";
 export const PERSPECTIVES: Perspective[] = ["개발", "사업", "UX", "디자인", "QA", "보안"];
 export interface Finding {
   id: string;
   perspective: Perspective;
-  level: "주의" | "제안";
+  level: "심각" | "주의" | "제안";
   title: string;
   body: string;
   scenario?: string;
@@ -223,12 +237,22 @@ export interface ProjectSettings {
   extra?: string; // 그 밖에 알아둘 것
 }
 
+export interface ProjectMaterial {
+  id?: string;
+  name: string;
+  kind: "text" | "pdf" | "image";
+  text?: string;
+  at?: number;
+  off?: boolean;
+}
+
 export interface Project {
   id: string;
   name: string;
   idea: string;
-  // Files attached on the home screen. Text is kept here; PDFs and images live in IndexedDB.
-  materials?: { name: string; kind: "text" | "pdf" | "image"; text?: string }[];
+  // Files attached on the home screen, in the chat or in the 자료 panel. Text is kept here;
+  // PDFs and images live in IndexedDB. off: left out of what the AI reads.
+  materials?: ProjectMaterial[];
   createdAt: number;
   updatedAt: number;
   starred?: boolean;
@@ -236,8 +260,11 @@ export interface Project {
   questions: Question[];
   answers: Record<string, string[]>;
   chat: ChatMessage[];
+  // Earlier conversations put aside with 새 채팅; any of them can be reopened.
+  chatArchive?: ChatThread[];
   prd: PrdSection[] | null;
   prdProps?: PrdProps;
+  prdTemplate?: PrdTemplate; // unset = the built-in PRD layout
   spec: SpecItem[] | null;
   flows: Flow[];
   flowId?: string;
@@ -247,6 +274,8 @@ export interface Project {
   // prd: PRD edits made in the PRD tab that the chat has not yet checked against the other documents.
   stale?: { flow?: boolean; wire?: boolean; prd?: PrdChange[] };
   findings: Finding[] | null;
+  // Fingerprint of the PRD and spec the last review read; a mismatch shows "검토 이후 기획서가 바뀌었어요".
+  reviewedSig?: string;
   comments: Comment[];
   decisions: Decision[];
   notes: Note[];

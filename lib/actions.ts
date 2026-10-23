@@ -7,7 +7,7 @@ import { getProject, updateProject } from "./store";
 import { saveToDrive } from "./sync";
 import { makeQuestions, shortName, summarizeAnswers } from "./generator";
 import {
-  aiQuestions, aiSummary, ask, contextLimit, describeError, estTokens, fitHistory, materialText, prdText, styleOf,
+  aiQuestions, aiSummary, ask, contextLimit, describeError, estTokens, fitHistory, materialBlocks, materialNote, materialText, prdText, styleOf,
 } from "./ai";
 import { ai, aiEnabled, isBusy, me, withAi } from "./run";
 import { autoVersion } from "./versions";
@@ -126,7 +126,7 @@ export function updatePrdBlock(id: string, sid: string, idx: number, body: strin
 export const ReviewSchema = z.object({
   findings: z.array(z.object({
     perspective: z.enum(["개발", "사업", "UX", "디자인", "QA", "보안"]),
-    level: z.enum(["주의", "제안"]),
+    level: z.enum(["심각", "주의", "제안"]),
     title: z.string(),
     body: z.string(),
     scenario: z.string(),
@@ -142,7 +142,7 @@ export function review(id: string) {
   const local = () => {
     const findings = reviewLocal(getProject(id)!);
     updateProject(id, (x) => ({
-      ...x, findings,
+      ...x, findings, reviewedSig: reviewSig(x),
       chat: [...x.chat, ai(`검토를 마쳤어요. ${reviewSummary(findings)} [검토] 패널에서 하나씩 확인해 주세요.`)],
     }), "기획 검토를 실행했어요");
     saveToDrive();
@@ -161,7 +161,7 @@ ${specText(x.spec, true)}
 
 규칙:
 - 관점마다 1~3개, 전체 8~14개. 실제로 빠졌거나 모순되거나 위험한 것만 씁니다.
-- level은 꼭 고쳐야 하면 "주의", 더 좋게 만들 아이디어면 "제안"입니다.
+- level은 출시를 막거나 사용자·돈·개인정보에 실제 피해를 줄 문제면 "심각"(전체에서 0~3개), 꼭 고쳐야 하면 "주의", 더 좋게 만들 아이디어면 "제안"입니다.
 - title은 한 줄, body는 무엇이 문제이고 무엇을 정해야 하는지 2~3문장.
 - scenario는 이 서비스에서 실제로 벌어질 수 있는 구체적 상황 하나를 사람과 행동으로 씁니다.
 - evidence는 위 문서에서 근거가 되는 문장을 그대로 짧게 인용합니다. 빠진 것이 문제라면 가장 가까운 문장을 인용합니다.
@@ -176,7 +176,7 @@ ${styleOf(x)}`);
       featureId: items.find((i) => i.code === f.code.trim())?.id, state: "open",
     }));
     updateProject(id, (y) => ({
-      ...y, findings,
+      ...y, findings, reviewedSig: reviewSig(x),
       chat: [...y.chat, ai(`검토를 마쳤어요. ${reviewSummary(findings)} [검토] 패널에서 하나씩 확인해 주세요.`)],
     }), "AI가 기획 검토를 실행했어요");
     saveToDrive();
@@ -184,8 +184,17 @@ ${styleOf(x)}`);
 }
 
 export function reviewSummary(fs: Finding[]) {
-  const warn = fs.filter((f) => f.level === "주의").length;
-  return `의견 ${fs.length}개(주의 ${warn} · 제안 ${fs.length - warn})를 찾았어요.`;
+  const n = (l: Finding["level"]) => fs.filter((f) => f.level === l).length;
+  return `의견 ${fs.length}개(${n("심각") ? `심각 ${n("심각")} · ` : ""}주의 ${n("주의")} · 제안 ${n("제안")})를 찾았어요.`;
+}
+
+// What the review reads: the PRD and the spec's content (not stars or pending marks), hashed.
+export function reviewSig(p: Pick<Project, "prd" | "spec">) {
+  const strip = (xs: SpecItem[]): unknown => xs.map((x) => [x.code, x.title, x.summary, x.rationale, x.success, x.criteria, x.roles, x.slots, strip(x.children)]);
+  const s = JSON.stringify([p.prd, strip(p.spec ?? [])]);
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return (h >>> 0).toString(36);
 }
 
 // Rule-based review: looks at the actual items and words of this spec.
@@ -244,7 +253,7 @@ function reviewLocal(p: Project): Finding[] {
       : `두 사용자가 같은 내용을 동시에 저장했더니 한 사람의 수정이 말없이 사라져요.`);
   // 보안
   const auth = find(/가입|로그인|계정|인증|개인/);
-  add("보안", "주의", auth ?? pool[0], auth ? `'${auth.title}'의 개인정보 보관 기간이 없어요` : "개인정보를 어디까지 모으는지 정해지지 않았어요",
+  add("보안", auth ? "심각" : "주의", auth ?? pool[0], auth ? `'${auth.title}'의 개인정보 보관 기간이 없어요` : "개인정보를 어디까지 모으는지 정해지지 않았어요",
     "어떤 개인정보를 모으고, 탈퇴하면 언제 지우며, 누가 열람할 수 있는지 정의해야 해요.",
     `탈퇴한 사용자가 자기 정보가 아직 남아 있는지 문의했는데, 지우는 기준이 없어 답하지 못해요.`);
   const admin = pool.find((x) => x.roles.some((r) => /관리|운영|호스트|모임장/.test(r)));
@@ -618,7 +627,7 @@ const flowPlanMsg = (p: Project, plan: { summary: string; ops: FlowPlan["ops"] }
 // What the next chat request would send, in tokens, against the context size picked in AI settings.
 const CHAT_RULES_TOKENS = 2500;
 export function chatTokenEstimate(p: Project) {
-  const docs = `${chatContext(p, "")}\n\n${designContext(p)}`;
+  const docs = `${chatContext(p, "")}\n\n${designContext(p)}${materialText(p)}`;
   const lines = p.chat.filter((m) => m.text && !m.thinking && !m.error).map((m) => `${m.from === "user" ? "사용자" : "AI"}: ${plainText(m.text)}`);
   const history = fitHistory(lines, docs).join("\n");
   return { used: estTokens(docs) + estTokens(history) + CHAT_RULES_TOKENS, limit: contextLimit() };
@@ -631,7 +640,7 @@ export async function sendChat(id: string, text: string) {
   let wantsReview = false;
   let pageAsks: { page: string; request: string }[] = [];
   await withAi(id, "생각하고 있어요…", async (x, step) => {
-    const docs = `${chatContext(x, text)}\n\n${designContext(x)}`;
+    const docs = `${chatContext(x, text)}\n\n${designContext(x)}${materialText(x)}`;
     const history = fitHistory(x.chat.filter((m) => m.text && !m.thinking && !m.error).slice(0, -1)
       .map((m) => `${m.from === "user" ? "사용자" : "AI"}: ${plainText(m.text)}`), docs + text).join("\n");
     step("문서 읽음");
@@ -655,9 +664,9 @@ ${plainText(text)}
 - PRD를 고쳐야 하면 prd에 {section: 위 PRD의 ## 제목 그대로, label: 항목 이름 그대로(새 항목이면 새 이름), body: 고친 뒤 전체 내용}을 담습니다. 아니면 빈 배열입니다.
 - 유저플로우(화면 흐름, 노드, 연결, 분기)를 바꿔 달라는 요청이면 flow에 무엇을 어떻게 바꿀지 한두 문장으로 씁니다. 아니면 빈 문자열입니다. 유저플로우가 아직 없으면 빈 문자열로 두고 reply에서 먼저 만들자고 안내합니다.
 - 와이어프레임 화면을 바꿔 달라는 요청이면 pages에 {page: 위 [와이어프레임 페이지]에 있는 이름 그대로, request: 그 화면에서 바꿀 내용}을 담습니다. 아니면 빈 배열입니다.
-- 한 요청이 기능명세서, 유저플로우, 와이어프레임을 함께 바꿀 수도 있습니다. 그때는 해당하는 칸을 모두 채우고, reply에는 어디를 바꾸는지 짧게 씁니다.
+- 한 요청이 기능명세서, 유저플로우, 와이어프레임을 함께 바꿀 수도 있습니다. 그때는 해당하는 칸을 모두 채우고, reply에는 어디를 바꾸는지 짧게 씁니다.${materialNote(x)}
 ${editRules}
-${styleOf(x)}`);
+${styleOf(x)}`, await materialBlocks(x));
     let lines: string[] = [];
     let prdLines: string[] = [];
     if (out.prd.length) {

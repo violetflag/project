@@ -10,7 +10,7 @@ import { useDismiss } from "../../Popover";
 import { ArrowLeft, Close, Sparkle } from "../../icons";
 import { DiffList, DiffText } from "./diff";
 import { SlotsSection } from "./Slots";
-import { InlineText, PendingBadge, PriorityBars, Star } from "./ui";
+import { InlineText, PendingBadge, PriorityBars, SourceBadge, Star } from "./ui";
 
 type Mode = "panel" | "page" | "sheet";
 
@@ -162,6 +162,7 @@ export function ItemDetail({ p, x, mode, onClose, onOpen, onDoc, nav }: {
           <p className="mb-1 flex items-center gap-2 text-xs text-foreground-muted">
             <span className="rounded bg-surface px-1.5 py-0.5 text-foreground-support">{LEVEL_LABEL[x.level]}</span>
             <span aria-label="ID 코드">{x.code}</span>
+            <SourceBadge list={p.materials} src={x.src} />
           </p>
           {prev && prev.title !== x.title
             ? <DiffText before={prev.title} after={x.title} className="text-xl font-semibold" />

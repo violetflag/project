@@ -73,8 +73,8 @@ export function insertItem(items: SpecItem[], parentId: string | null, item: Spe
 }
 
 export function coreOf(x: SpecItem): SpecCore {
-  const { title, summary, rationale, success, criteria, roles, status, priority, slots, offSlots, questions } = x;
-  return { title, summary, rationale, success, criteria, roles, status, priority, slots, offSlots, questions };
+  const { title, summary, rationale, success, criteria, roles, status, priority, slots, offSlots, questions, src } = x;
+  return { title, summary, rationale, success, criteria, roles, status, priority, slots, offSlots, questions, src };
 }
 
 export function blankItem(level: 1 | 2 | 3, title = "새 항목", pending?: ItemPending): SpecItem {

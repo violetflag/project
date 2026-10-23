@@ -2,42 +2,26 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { slotFill } from "@/lib/spec-model";
-import type { Project, SpecItem } from "@/lib/types";
+import { COL, W, graphLayout as layout } from "@/lib/spec-graph";
+import type { Project } from "@/lib/types";
 import { PendingBadge, Star } from "./ui";
 
-const COL = { 0: 0, 1: 270, 2: 560, 3: 880 } as const;
-const W = { 0: 210, 1: 230, 2: 250, 3: 230 } as const;
-const ROW = 62;
-const COLORS = ["#78b08a", "#7ab7b9", "#83a3c4", "#9989b5", "#adbf6e", "#c7ab65", "#d18578"];
-
-interface N { x: SpecItem; cx: number; cy: number; w: number; color: string; parent?: N }
-
-function layout(items: SpecItem[], shown: Set<string> | null) {
-  const nodes: N[] = [];
-  let top = 20;
-  const place = (x: SpecItem, color: string, parent?: N): N => {
-    const kids = x.children.filter((c) => !shown || shown.has(c.id));
-    const n: N = { x, cx: COL[x.level], cy: 0, w: W[x.level], color, parent };
-    nodes.push(n);
-    if (!kids.length) { n.cy = top + ROW / 2; top += ROW; return n; }
-    const placed = kids.map((c) => place(c, color, n));
-    n.cy = (placed[0].cy + placed[placed.length - 1].cy) / 2;
-    return n;
-  };
-  const roots = items.filter((x) => !shown || shown.has(x.id)).map((x, i) => place(x, COLORS[i % COLORS.length]));
-  const height = Math.max(top + 20, 200);
-  const rootY = roots.length ? (roots[0].cy + roots[roots.length - 1].cy) / 2 : height / 2;
-  return { nodes, roots, height, rootY };
-}
-
-export function Graph({ p, num, shown, dim, selected, onOpen, focus }: {
+export function Graph({ p, num, shown, dim, selected, onOpen, focus, picked, onPick }: {
   p: Project; num: Record<string, string>; shown: Set<string> | null; dim: Set<string> | null;
   selected: string | null; onOpen: (id: string) => void; focus: string | null;
+  picked: Set<string>; onPick: (ids: string[], mode: "toggle" | "add" | "set") => void;
 }) {
   const { nodes, height, rootY } = useMemo(() => layout(p.spec ?? [], shown), [p.spec, shown]);
   const [view, setView] = useState({ x: 24, y: 24, s: 0.9 });
   const box = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
+  // Picking: Shift/⌘-click toggles an item; Shift+drag (or any drag in 선택 모드) draws a box.
+  const [picking, setPicking] = useState(false);
+  const [band, setBand] = useState<{ x0: number; y0: number; x1: number; y1: number; add: boolean } | null>(null);
+  const toLocal = (cx: number, cy: number) => {
+    const el = box.current!, r = el.getBoundingClientRect();
+    return { x: (cx - r.left + el.scrollLeft - view.x) / view.s, y: (cy - r.top + el.scrollTop - view.y) / view.s };
+  };
 
   // Narrow screens start zoomed out so the root and requirements fit across.
   useEffect(() => {
@@ -71,19 +55,33 @@ export function Graph({ p, num, shown, dim, selected, onOpen, focus }: {
     <div ref={box} className="relative h-full w-full touch-none overflow-hidden select-none"
       onPointerDown={(e) => {
         if ((e.target as HTMLElement).closest("[data-node],[data-ctl]")) return;
-        drag.current = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
         (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+        if (e.shiftKey || picking) {
+          const a = toLocal(e.clientX, e.clientY);
+          setBand({ x0: a.x, y0: a.y, x1: a.x, y1: a.y, add: e.shiftKey || e.metaKey });
+          return;
+        }
+        drag.current = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
       }}
       onPointerMove={(e) => {
+        if (band) { const a = toLocal(e.clientX, e.clientY); setBand({ ...band, x1: a.x, y1: a.y }); return; }
         const d = drag.current;
         if (d) setView((v) => ({ ...v, x: d.vx + e.clientX - d.x, y: d.vy + e.clientY - d.y }));
       }}
-      onPointerUp={() => { drag.current = null; }}
+      onPointerUp={() => {
+        drag.current = null;
+        if (!band) return;
+        const [l, r, t, b] = [Math.min(band.x0, band.x1), Math.max(band.x0, band.x1), Math.min(band.y0, band.y1), Math.max(band.y0, band.y1)];
+        setBand(null);
+        if (r - l < 4 && b - t < 4) { if (!band.add) onPick([], "set"); return; }
+        const hit = nodes.filter((n) => n.cx < r && n.cx + n.w > l && n.cy > t && n.cy < b).map((n) => n.x.id);
+        onPick(hit, band.add ? "add" : "set");
+      }}
       onWheel={(e) => {
         if (e.ctrlKey || e.metaKey) zoom(e.deltaY < 0 ? 1.1 : 0.9);
         else setView((v) => ({ ...v, x: v.x - e.deltaX, y: v.y - e.deltaY }));
       }}
-      style={{ cursor: drag.current ? "grabbing" : "grab" }} aria-label="기능 그래프">
+      style={{ cursor: picking ? "crosshair" : drag.current ? "grabbing" : "grab" }} aria-label="기능 그래프">
       <div className="absolute top-0 left-0 origin-top-left" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})`, width: 1140, height }}>
         <svg className="pointer-events-none absolute inset-0 overflow-visible" width={1140} height={height}>
           {nodes.map((n) => {
@@ -105,8 +103,9 @@ export function Graph({ p, num, shown, dim, selected, onOpen, focus }: {
         {nodes.map((n) => {
           const f = n.x.level > 1 ? slotFill(n.x) : null;
           return (
-            <button key={n.x.id} data-node onClick={() => onOpen(n.x.id)} aria-label={`노드 ${n.x.title}`}
-              className={`absolute flex flex-col justify-center rounded-lg border bg-background px-2.5 text-left shadow-sm transition-shadow hover:shadow-md ${selected === n.x.id ? "ring-2 ring-primary" : ""} ${n.x.pending ? "border-primary border-dashed" : n.x.level === 1 ? "border-2" : "border-border"} ${dim?.has(n.x.id) ? "opacity-30" : ""}`}
+            <button key={n.x.id} data-node aria-label={`노드 ${n.x.title}`} aria-pressed={picked.has(n.x.id) || undefined}
+              onClick={(e) => { if (e.shiftKey || e.metaKey || e.ctrlKey || picking) onPick([n.x.id], "toggle"); else { if (picked.size) onPick([], "set"); onOpen(n.x.id); } }}
+              className={`absolute flex flex-col justify-center rounded-lg border bg-background px-2.5 text-left shadow-sm transition-shadow hover:shadow-md ${picked.has(n.x.id) ? "ring-2 ring-primary ring-offset-1 bg-primary-soft" : selected === n.x.id ? "ring-2 ring-primary" : ""} ${n.x.pending ? "border-primary border-dashed" : n.x.level === 1 ? "border-2" : "border-border"} ${dim?.has(n.x.id) ? "opacity-30" : ""}`}
               style={{ left: n.cx, top: n.cy - (n.x.level === 3 ? 21 : 24), width: n.w, height: n.x.level === 3 ? 42 : 48, borderColor: n.x.level === 1 && !n.x.pending ? n.color : undefined }}>
               <span className="flex w-full items-center gap-1.5">
                 <span className="shrink-0 text-[10px] text-foreground-muted">{num[n.x.id]}</span>
@@ -121,6 +120,17 @@ export function Graph({ p, num, shown, dim, selected, onOpen, focus }: {
             </button>
           );
         })}
+        {band && (
+          <div aria-hidden className="pointer-events-none absolute border border-primary bg-primary/10"
+            style={{ left: Math.min(band.x0, band.x1), top: Math.min(band.y0, band.y1), width: Math.abs(band.x1 - band.x0), height: Math.abs(band.y1 - band.y0) }} />
+        )}
+      </div>
+      <div data-ctl className="absolute top-3 right-3 z-20 flex">
+        <button onClick={() => setPicking(!picking)} aria-pressed={picking} aria-label="여러 개 선택"
+          title="켜면 누르거나 끌어서 여러 항목을 골라요 (Shift+클릭, Shift+드래그도 돼요)"
+          className={`rounded-lg border px-2.5 py-1.5 text-xs shadow-sm ${picking ? "border-primary bg-primary text-white" : "border-border bg-background hover:bg-surface"}`}>
+          {picking ? "선택 모드 끄기" : "여러 개 선택"}
+        </button>
       </div>
       <div data-ctl className="absolute right-3 bottom-3 flex flex-col overflow-hidden rounded-lg border border-border bg-background text-sm shadow-sm">
         <button onClick={() => zoom(1.2)} aria-label="확대" className="h-8 w-8 hover:bg-surface">+</button>
