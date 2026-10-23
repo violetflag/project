@@ -257,6 +257,8 @@ export interface Project {
   updatedAt: number;
   starred?: boolean;
   deletedAt?: number;
+  // Folder on the 전체 프로젝트 page; folders exist only while a project is in them.
+  folder?: string;
   questions: Question[];
   answers: Record<string, string[]>;
   chat: ChatMessage[];

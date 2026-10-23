@@ -134,6 +134,17 @@ export function updateProject(id: string, fn: (p: Project) => Project, logText?:
 export function trashProject(id: string) {
   updateProject(id, (p) => ({ ...p, deletedAt: Date.now() }));
 }
+// Bulk actions from the 편집 mode of 전체 프로젝트.
+export function trashProjects(ids: string[]) {
+  ids.forEach(trashProject);
+}
+export function moveProjects(ids: string[], folder: string | undefined) {
+  const f = folder?.trim() || undefined;
+  ids.forEach((id) => updateProject(id, (p) => ({ ...p, folder: f })));
+}
+export function folderNames(projects: Project[]) {
+  return [...new Set(projects.map((p) => p.folder).filter((f): f is string => !!f))].sort((a, b) => a.localeCompare(b, "ko"));
+}
 export function restoreProject(id: string) {
   updateProject(id, (p) => ({ ...p, deletedAt: undefined }));
 }
