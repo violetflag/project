@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { exportFlowPng, exportSpecPng } from "@/lib/diagram-png";
 import { download, exportCsv, exportDeliverables, exportJson, exportMarkdown, exportXlsx, toMarkdown } from "@/lib/export";
 import type { Project } from "@/lib/types";
@@ -42,6 +42,11 @@ export function ShareDialog({ p, onClose }: { p: Project; onClose: () => void })
     ["backup", "JSON 백업", "프로젝트 전체를 보관해요. [전체 프로젝트]에서 다시 불러올 수 있어요", () => exportJson(p)],
   ];
   const open = items.find((x) => x[0] === preview);
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => { if (e.key === "Escape") { if (preview) setPreview(null); else onClose(); } };
+    window.addEventListener("keydown", on);
+    return () => window.removeEventListener("keydown", on);
+  }, [preview, onClose]);
   return (
     <>
       <div className="fixed inset-0 z-30 bg-black/20 md:bg-transparent" onClick={onClose} />

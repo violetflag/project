@@ -19,8 +19,8 @@ export function Graph({ p, num, shown, dim, selected, onOpen, focus, picked, onP
   const [picking, setPicking] = useState(false);
   const [band, setBand] = useState<{ x0: number; y0: number; x1: number; y1: number; add: boolean } | null>(null);
   const toLocal = (cx: number, cy: number) => {
-    const r = box.current!.getBoundingClientRect();
-    return { x: (cx - r.left - view.x) / view.s, y: (cy - r.top - view.y) / view.s };
+    const el = box.current!, r = el.getBoundingClientRect();
+    return { x: (cx - r.left + el.scrollLeft - view.x) / view.s, y: (cy - r.top + el.scrollTop - view.y) / view.s };
   };
 
   // Narrow screens start zoomed out so the root and requirements fit across.
@@ -125,7 +125,7 @@ export function Graph({ p, num, shown, dim, selected, onOpen, focus, picked, onP
             style={{ left: Math.min(band.x0, band.x1), top: Math.min(band.y0, band.y1), width: Math.abs(band.x1 - band.x0), height: Math.abs(band.y1 - band.y0) }} />
         )}
       </div>
-      <div data-ctl className="absolute right-14 bottom-3 flex">
+      <div data-ctl className="absolute top-3 right-3 z-20 flex">
         <button onClick={() => setPicking(!picking)} aria-pressed={picking} aria-label="여러 개 선택"
           title="켜면 누르거나 끌어서 여러 항목을 골라요 (Shift+클릭, Shift+드래그도 돼요)"
           className={`rounded-lg border px-2.5 py-1.5 text-xs shadow-sm ${picking ? "border-primary bg-primary text-white" : "border-border bg-background hover:bg-surface"}`}>

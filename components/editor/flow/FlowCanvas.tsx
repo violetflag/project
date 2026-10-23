@@ -102,9 +102,10 @@ export function FlowCanvas({ pid, flow, picking, picked, onPick, children }: {
 
   // Connecting: drag from a node's connection point onto another node.
   const [link, setLink] = useState<{ from: string; x: number; y: number } | null>(null);
+  // The wrapper can end up scrolled (a focused control scrolled into view), so count its scroll too.
   const toCanvas = (cx: number, cy: number) => {
-    const r = wrap.current!.getBoundingClientRect();
-    return { x: (cx - r.left - view.x) / view.z, y: (cy - r.top - view.y) / view.z };
+    const el = wrap.current!, r = el.getBoundingClientRect();
+    return { x: (cx - r.left + el.scrollLeft - view.x) / view.z, y: (cy - r.top + el.scrollTop - view.y) / view.z };
   };
   const nodeAt = (x: number, y: number) => flow.nodes.find((n) => {
     const b = L.boxes[n.id];
@@ -300,7 +301,7 @@ export function FlowCanvas({ pid, flow, picking, picked, onPick, children }: {
           <>
             <button data-ui aria-label="끌어서 다른 노드와 연결" title="끌어서 다른 노드에 놓으면 연결돼요"
               onPointerDown={(e) => startLink(e, selNode.id)} onPointerMove={moveLink} onPointerUp={endLink} onPointerCancel={() => setLink(null)}
-              style={{ ...screen(box.x + box.w, box.y), transform: "translate(4px, -60%)" }}
+              style={{ ...screen(box.x + box.w, box.y + box.h), transform: "translate(4px, 4px)" }}
               className="absolute grid h-5 w-5 cursor-crosshair touch-none place-items-center rounded-full border-2 border-primary bg-background shadow-sm hover:bg-primary-soft">
               <span className="h-1.5 w-1.5 rounded-full bg-primary" />
             </button>

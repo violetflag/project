@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { currentFlow, currentWires, toDeliverablesJson, toMarkdown, workbook } from "@/lib/export";
 import { flowSvg, specSvg } from "@/lib/diagram-png";
+import { flatten } from "@/lib/spec-model";
 import { pdfHtmlFile } from "@/lib/pdf";
 import { prototypeHtml } from "@/lib/prototype";
 import { wireSvg } from "@/lib/wire-png";
@@ -17,7 +18,7 @@ export function previewOf(p: Project, k: ExportKind):
   switch (k) {
     case "md": return { t: "text", text: toMarkdown(p) };
     case "pdf": return { t: "html", html: pdfHtmlFile(p).text };
-    case "xlsx": case "csv": return p.spec?.length ? { t: "sheets", sheets: k === "csv" ? workbook(p).slice(0, 1) : workbook(p) } : null;
+    case "xlsx": case "csv": return hasExport(p, k) ? { t: "sheets", sheets: k === "csv" ? workbook(p).slice(0, 1) : workbook(p) } : null;
     case "proto": { const w = currentWires(p); return w?.pages.length ? { t: "html", html: prototypeHtml(p, w) } : null; }
     case "wire-png": { const s = wireSvg(p); return s ? { t: "svg", svg: s } : null; }
     case "flow-png": { const f = currentFlow(p); return f ? { t: "svg", svg: flowSvg(f) } : null; }
@@ -28,15 +29,17 @@ export function previewOf(p: Project, k: ExportKind):
 }
 
 // Cheap check used by the list (previewOf builds the whole file).
+const approvedSpec = (p: Project) => flatten(p.spec).some((x) => x.pending?.kind !== "new");
 export function hasExport(p: Project, k: ExportKind) {
-  if (k === "xlsx" || k === "csv" || k === "spec-png") return !!p.spec?.length;
+  if (k === "csv" || k === "spec-png") return approvedSpec(p);
+  if (k === "xlsx") return approvedSpec(p) || !!currentFlow(p) || !!currentWires(p)?.pages.length;
   if (k === "proto" || k === "wire-png") return !!currentWires(p)?.pages.length;
   if (k === "flow-png") return !!currentFlow(p);
   return true;
 }
 
 export const EMPTY: Partial<Record<ExportKind, string>> = {
-  xlsx: "기능명세서가 아직 없어요.", csv: "기능명세서가 아직 없어요.", "spec-png": "기능명세서가 아직 없어요.",
+  xlsx: "아직 내보낼 문서가 없어요.", csv: "승인된 기능명세서 항목이 아직 없어요.", "spec-png": "승인된 기능명세서 항목이 아직 없어요.",
   proto: "와이어프레임이 아직 없어요.", "wire-png": "와이어프레임이 아직 없어요.", "flow-png": "유저플로우가 아직 없어요.",
 };
 

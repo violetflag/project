@@ -73,9 +73,12 @@ function paraText(u16: Uint16Array) {
   }
   return s;
 }
+// cfb hands back stream contents as a plain number array in some builds.
+const bytesOf = (c: unknown) => (c == null ? undefined : c instanceof Uint8Array ? c : new Uint8Array(c as ArrayLike<number>));
+
 export function hwp(bytes: Uint8Array) {
   const cfb = CFB.read(bytes, { type: "buffer" });
-  const header = CFB.find(cfb, "/FileHeader")?.content as Uint8Array | undefined;
+  const header = bytesOf(CFB.find(cfb, "/FileHeader")?.content);
   if (!header || strFromU8(header.slice(0, 17)) !== "HWP Document File") throw new Error("한글(HWP) 파일이 아니에요.");
   const flags = new DataView(header.buffer, header.byteOffset).getUint32(36, true);
   if (flags & 2) throw new Error("암호가 걸린 한글 파일은 읽을 수 없어요.");
@@ -83,9 +86,9 @@ export function hwp(bytes: Uint8Array) {
   const compressed = (flags & 1) === 1;
   const out: string[] = [];
   for (let n = 0; ; n++) {
-    const raw = CFB.find(cfb, `/BodyText/Section${n}`)?.content as Uint8Array | undefined;
+    const raw = bytesOf(CFB.find(cfb, `/BodyText/Section${n}`)?.content);
     if (!raw) break;
-    const data = compressed ? inflateSync(new Uint8Array(raw)) : new Uint8Array(raw);
+    const data = compressed ? inflateSync(raw) : raw;
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     let o = 0;
     while (o + 4 <= data.length) {

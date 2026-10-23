@@ -9,7 +9,7 @@ export function BulkBar({ pid, ids, onClear }: { pid: string; ids: string[]; onC
   const sel = "rounded border border-border bg-background px-1.5 py-1 text-xs";
   return (
     <div role="toolbar" aria-label="선택한 항목 한번에 바꾸기"
-      className="animate-fade-up absolute top-3 left-1/2 z-30 flex max-w-[calc(100%-24px)] -translate-x-1/2 flex-wrap items-center gap-1.5 rounded-xl border border-border bg-background px-3 py-2 text-xs shadow-lg">
+      className="animate-fade-up absolute top-14 left-1/2 z-40 flex max-w-[calc(100%-24px)] md:top-3 md:max-w-[calc(100%-140px)] -translate-x-1/2 flex-wrap items-center gap-1.5 rounded-xl border border-border bg-background px-3 py-2 text-xs shadow-lg">
       <span className="font-medium">{ids.length}개 선택</span>
       <select value="" onChange={(e) => e.target.value && bulkUpdateSpec(pid, ids, { status: e.target.value as Status })} aria-label="선택 항목 상태 바꾸기" className={sel}>
         <option value="">상태 바꾸기</option>
