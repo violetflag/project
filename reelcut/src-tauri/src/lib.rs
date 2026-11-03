@@ -7,6 +7,8 @@ mod probe;
 mod qwen;
 mod render;
 mod stitch;
+mod pano;
+mod motion;
 mod transcribe;
 #[cfg(test)]
 mod itest;
@@ -206,11 +208,23 @@ async fn calibrate_360(app: St<'_>, info: MediaInfo, lens: Lens) -> Result<stitc
     blocking(move || stitch::calibrate(&app.bins.ffmpeg, &app.bins.ffprobe, &info, &lens)).await
 }
 
+/// What the stabilisation found for a recording (gyro or picture), once analysed.
+#[tauri::command]
+fn motion_info(app: St<'_>, path: String) -> Option<Value> {
+    let t = std::fs::read_to_string(app.dir("motion").join(format!("{}-m1.json", file_key(&path)))).ok()?;
+    let m: motion::Motion = serde_json::from_str(&t).ok()?;
+    Some(json!({ "source": m.source, "note": m.note, "readout": m.readout, "product": m.product }))
+}
+
 /// Starts making the proxy in the background; progress and the result path come as "job" events.
 #[tauri::command]
 fn make_proxy(handle: tauri::AppHandle, app: St<'_>, id: String, info: MediaInfo, lens: Lens) -> Result<Option<String>, String> {
     let app = app.inner().clone();
-    let key = if stitch::active(&lens) {
+    let engine = motion::engine_lens(&info, &lens);
+    let key = if engine {
+        // Reelcut's 360 engine: seam lined up per frame and the shake taken out.
+        format!("{}-{:x}", file_key(&info.path), hash(&(&lens.layout, lens.swap, (lens.fov * 10.0) as i64, serde_json::to_string(&lens.stitch).unwrap_or_default(), serde_json::to_string(&motion::stab_of(&lens)).unwrap_or_default(), 5u8)))
+    } else if stitch::active(&lens) {
         // Seam-blended proxies (and every new calibration) get their own file.
         format!("{}-{:x}", file_key(&info.path), hash(&(&lens.layout, lens.swap, (lens.fov * 10.0) as i64, serde_json::to_string(&lens.stitch).unwrap_or_default(), 4u8)))
     } else {
@@ -229,6 +243,38 @@ fn make_proxy(handle: tauri::AppHandle, app: St<'_>, id: String, info: MediaInfo
         let mut args = plan.args.clone();
         *args.last_mut().unwrap() = part.to_string_lossy().into_owned();
         let dur = info.duration.max(0.1);
+        if engine {
+            let mkey = file_key(&info.path);
+            let has_stab = motion::stab_of(&lens).mode != "off";
+            let split = if has_stab { 35.0 } else { 0.0 };
+            let r = motion::motion_for(&app.dir("motion"), &app.bins.ffmpeg, &app.bins.ffprobe, &app.jobs, &tag, gen, &info, &lens, &mkey, |f| {
+                emit(&handle, &id, "proxy", f * split, "running", "흔들림 분석", Value::Null);
+            })
+            .and_then(|m| {
+                motion::render_proxy(&app.bins.ffmpeg, &app.jobs, &tag, gen, &info, &lens, m.as_ref(), &h264, &part, |f| {
+                    emit(&handle, &id, "proxy", (split + f * (99.0 - split)).min(99.0), "running", "", Value::Null);
+                })
+            });
+            match r {
+                Ok(()) => {
+                    match std::fs::rename(&part, &plan.out) {
+                        Ok(_) => emit(&handle, &id, "proxy", 100.0, "done", "", json!(plan.out.to_string_lossy())),
+                        Err(e) => emit(&handle, &id, "proxy", 0.0, "error", &e.to_string(), Value::Null),
+                    }
+                    return;
+                }
+                Err(e) if e == CANCELLED => {
+                    let _ = std::fs::remove_file(&part);
+                    emit(&handle, &id, "proxy", 0.0, "cancelled", &e, Value::Null);
+                    return;
+                }
+                // Anything else: the ffmpeg-only stitch below.
+                Err(e) => {
+                    let _ = std::fs::remove_file(&part);
+                    eprintln!("360 engine failed, using the ffmpeg stitch: {e}");
+                }
+            }
+        }
         let mut res = ff::run_ffmpeg(&app.jobs, &tag, gen, &app.bins.ffmpeg, &args, |p| {
             emit(&handle, &id, "proxy", (p.out_time / dur * 100.0).min(99.0), "running", "", Value::Null);
         });
@@ -421,11 +467,31 @@ fn export(handle: tauri::AppHandle, app: St<'_>, id: String, plan: render::Plan)
     let built = render::build(&plan, &hw, &graph_file.to_string_lossy(), app.ffmpeg_major() >= 7, has_ass, &part)?;
     std::fs::write(&graph_file, &built.graph).map_err(|e| e.to_string())?;
     let out2 = out.clone();
+    let n360 = plan.segs.iter().map(|s| (&s.kind, &s.lens)).chain(plan.overlays.iter().map(|o| (&o.kind, &o.lens))).filter(|(k, l)| k.as_str() == "video" && l.as_ref().map(|l| matches!(l.layout.as_str(), "dual" | "dfisheye") && stitch::active(l)).unwrap_or(false)).count();
     std::thread::spawn(move || {
-        let dur = built.duration.max(0.1);
+        let mut built = built;
         let t0 = std::time::Instant::now();
+        // 360 clips first go through Reelcut's 360 engine (seam per frame, stabilisation) into
+        // flat pictures; the main render then treats them as ordinary clips.
+        let (pre_w, pre_end) = if n360 > 0 { (60.0, 60.0) } else { (0.0, 0.0) };
+        if n360 > 0 {
+            match engine_prepass(&app, &tag, gen, &plan, &work, |f| emit(&handle, &id, "export", f * pre_w, "running", "-1", json!({ "stage": "360" }))) {
+                Ok(Some(p2)) => match render::build(&p2, &hw, &graph_file.to_string_lossy(), app.ffmpeg_major() >= 7, has_ass, &part).and_then(|b| std::fs::write(&graph_file, &b.graph).map(|_| b).map_err(|e| e.to_string())) {
+                    Ok(b) => built = b,
+                    Err(e) => eprintln!("360 engine render plan failed, using the ffmpeg stitch: {e}"),
+                },
+                Ok(None) => {}
+                Err(e) if e == CANCELLED => {
+                    let _ = std::fs::remove_dir_all(&work);
+                    emit(&handle, &id, "export", 0.0, "cancelled", &e, Value::Null);
+                    return;
+                }
+                Err(e) => eprintln!("360 engine failed, using the ffmpeg stitch: {e}"),
+            }
+        }
+        let dur = built.duration.max(0.1);
         let res = ff::run_ffmpeg_in(&app.jobs, &tag, gen, &app.bins.ffmpeg, &built.args, Some(&work), |p| {
-            let pct = (p.out_time / dur * 100.0).min(99.5);
+            let pct = pre_end + ((p.out_time / dur * 100.0).min(99.5)) * (100.0 - pre_end) / 100.0;
             let left = if pct > 1.0 { t0.elapsed().as_secs_f64() * (100.0 - pct) / pct } else { -1.0 };
             emit(&handle, &id, "export", pct, "running", &format!("{left:.0}"), json!({ "size": p.total_size, "speed": p.speed }));
         });
@@ -449,6 +515,80 @@ fn export(handle: tauri::AppHandle, app: St<'_>, id: String, plan: render::Plan)
         let _ = std::fs::remove_dir_all(&work);
     });
     Ok(out)
+}
+
+/// Renders every 360 clip of the plan (main track and overlays) flat through the engine and
+/// returns the plan with those clips pointing at the results; None when nothing needed it.
+fn engine_prepass(app: &App, tag: &str, gen: u64, plan: &render::Plan, work: &Path, on: impl Fn(f64)) -> Result<Option<render::Plan>, String> {
+    use media::View;
+    struct Job {
+        main: bool,
+        i: usize,
+        path: String,
+        start: f64,
+        dur: f64,
+        speed: f64,
+        lens: Lens,
+        view: Option<View>,
+        keys: Vec<render::ViewKey>,
+    }
+    let mut jobs: Vec<Job> = Vec::new();
+    for (i, s) in plan.segs.iter().enumerate() {
+        if let Some(l) = s.lens.clone().filter(|l| s.kind == "video" && matches!(l.layout.as_str(), "dual" | "dfisheye") && stitch::active(l)) {
+            jobs.push(Job { main: true, i, path: s.path.clone(), start: s.start, dur: s.dur, speed: s.speed, lens: l, view: s.view.clone(), keys: s.view_keys.clone() });
+        }
+    }
+    for (i, o) in plan.overlays.iter().enumerate() {
+        if let Some(l) = o.lens.clone().filter(|l| o.kind == "video" && matches!(l.layout.as_str(), "dual" | "dfisheye") && stitch::active(l)) {
+            jobs.push(Job { main: false, i, path: o.path.clone(), start: o.start, dur: o.dur, speed: o.speed, lens: l, view: o.view.clone(), keys: o.view_keys.clone() });
+        }
+    }
+    if jobs.is_empty() {
+        return Ok(None);
+    }
+    let total: f64 = jobs.iter().map(|j| j.dur.max(0.1)).sum();
+    let mut done = 0.0;
+    let mut p2 = plan.clone();
+    let (w, h) = (plan.width.max(16) & !1, plan.height.max(16) & !1);
+    for (n, j) in jobs.iter().enumerate() {
+        let info = media::inspect(&app.bins.ffprobe, &j.path)?;
+        if !motion::engine_lens(&info, &j.lens) {
+            continue;
+        }
+        let share = j.dur.max(0.1) / total;
+        // Analysis (only the first time for a recording) counts as a fifth of the clip's share.
+        let m = motion::motion_for(&app.dir("motion"), &app.bins.ffmpeg, &app.bins.ffprobe, &app.jobs, tag, gen, &info, &j.lens, &file_key(&j.path), |f| on((done + f * share * 0.2) / 1.0))?;
+        let mut keys = j.keys.clone();
+        keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+        let still = j.view.clone().unwrap_or(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0 });
+        let view_at = move |t: f64| if keys.len() >= 2 { render::view_at(&keys, t) } else if keys.len() == 1 { keys[0].view.clone() } else { still.clone() };
+        let out = work.join(format!("360-{n}.mkv"));
+        let base = done + share * 0.2;
+        motion::render_flat(&app.bins.ffmpeg, &app.jobs, tag, gen, &info, &j.lens, m.as_ref(), j.start, j.dur, j.speed, w, h, &view_at, &out, |f| on(base + f * share * 0.8))?;
+        done += share;
+        let path = out.to_string_lossy().into_owned();
+        let flat_tf = |t: &Option<render::Transform>| t.clone().map(|t| render::Transform { rotation: 0.0, crop_l: 0.0, crop_r: 0.0, crop_t: 0.0, crop_b: 0.0, ..t });
+        if j.main {
+            let s = &mut p2.segs[j.i];
+            s.path = path;
+            s.start = 0.0;
+            s.lens = None;
+            s.view = None;
+            s.view_keys.clear();
+            s.fit = "fill".into();
+            s.transform = flat_tf(&s.transform);
+        } else {
+            let o = &mut p2.overlays[j.i];
+            o.path = path;
+            o.start = 0.0;
+            o.lens = None;
+            o.view = None;
+            o.view_keys.clear();
+            o.fit = "fill".into();
+            o.transform = flat_tf(&o.transform);
+        }
+    }
+    Ok(Some(p2))
 }
 
 #[tauri::command]
@@ -618,6 +758,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            motion_info,
             app_info,
             qwen_status,
             set_data_dir,

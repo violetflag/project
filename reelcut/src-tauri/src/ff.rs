@@ -79,11 +79,11 @@ impl Jobs {
         e.0
     }
 
-    fn add(&self, tag: &str, c: Arc<Mutex<Child>>) {
+    pub(crate) fn add(&self, tag: &str, c: Arc<Mutex<Child>>) {
         self.inner.lock().entry(tag.to_string()).or_default().1.push(c);
     }
 
-    fn remove(&self, tag: &str, c: &Arc<Mutex<Child>>) {
+    pub(crate) fn remove(&self, tag: &str, c: &Arc<Mutex<Child>>) {
         if let Some(e) = self.inner.lock().get_mut(tag) {
             e.1.retain(|x| !Arc::ptr_eq(x, c));
         }

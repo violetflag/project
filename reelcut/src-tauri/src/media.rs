@@ -240,6 +240,9 @@ pub struct Lens {
     /// Seam stitching of the two lenses (on by default; see `stitch`).
     #[serde(default)]
     pub stitch: Option<crate::stitch::Stitch>,
+    /// Stabilisation (horizon lock by default; see `motion`).
+    #[serde(default)]
+    pub stab: Option<crate::motion::Stab>,
 }
 fn lens_fov() -> f64 {
     190.0
@@ -296,6 +299,22 @@ pub struct ProxyPlan {
 /// The proxy: a small H.264 file with a key frame every half second so scrubbing is instant.
 /// 360 recordings become an equirectangular 2048×1024 picture (the player turns it into a flat
 /// view); an .osv with its .lrf companion is made from the .lrf, which is already small.
+/// The proxy's video encoder options (light, a keyframe every half second for scrubbing).
+pub fn proxy_venc(h264: &str, fps: f64) -> Vec<String> {
+    let mut a = if h264 == "libx264" {
+        s(&["-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p"])
+    } else if h264.ends_with("_nvenc") {
+        s(&["-c:v", h264, "-preset", "p2", "-rc", "vbr", "-cq", "28", "-b:v", "0", "-pix_fmt", "yuv420p"])
+    } else if h264.ends_with("_qsv") {
+        s(&["-c:v", h264, "-preset", "veryfast", "-global_quality", "30", "-pix_fmt", "nv12"])
+    } else {
+        s(&["-c:v", h264, "-rc", "cqp", "-qp_i", "28", "-qp_p", "28", "-qp_b", "28", "-pix_fmt", "nv12"])
+    };
+    let g = (fps.max(1.0) / 2.0).round().max(1.0) as u32;
+    a.extend(s(&["-g", &g.to_string(), "-keyint_min", &g.to_string(), "-sc_threshold", "0", "-bf", "0"]));
+    a
+}
+
 pub fn proxy_plan(info: &MediaInfo, lens: &Lens, h264: &str, out_dir: &Path, key: &str) -> Option<ProxyPlan> {
     match info.kind.as_str() {
         "image" => None,
@@ -307,19 +326,7 @@ pub fn proxy_plan(info: &MediaInfo, lens: &Lens, h264: &str, out_dir: &Path, key
         }
         _ => {
             let out = out_dir.join(format!("{key}.mp4"));
-            let enc = |a: &mut Vec<String>| {
-                if h264 == "libx264" {
-                    a.extend(s(&["-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p"]));
-                } else if h264.ends_with("_nvenc") {
-                    a.extend(s(&["-c:v", h264, "-preset", "p2", "-rc", "vbr", "-cq", "28", "-b:v", "0", "-pix_fmt", "yuv420p"]));
-                } else if h264.ends_with("_qsv") {
-                    a.extend(s(&["-c:v", h264, "-preset", "veryfast", "-global_quality", "30", "-pix_fmt", "nv12"]));
-                } else {
-                    a.extend(s(&["-c:v", h264, "-rc", "cqp", "-qp_i", "28", "-qp_p", "28", "-qp_b", "28", "-pix_fmt", "nv12"]));
-                }
-                let g = ((info.fps.max(1.0)) / 2.0).round().max(1.0) as u32;
-                a.extend(s(&["-g", &g.to_string(), "-keyint_min", &g.to_string(), "-sc_threshold", "0", "-bf", "0"]));
-            };
+            let enc = |a: &mut Vec<String>| a.extend(proxy_venc(h264, info.fps));
             let audio = |a: &mut Vec<String>, has: bool| {
                 if has {
                     a.extend(s(&["-map", "0:a:0", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"]));
@@ -420,7 +427,7 @@ pub fn frames(ffmpeg: &Path, req: &FrameReq) -> Result<Vec<String>, String> {
         let vf = match &req.view {
             Some(v) => {
                 let h = (w as f64 * 9.0 / 16.0).round() as u32 / 2 * 2;
-                v360_flat(&Lens { layout: "equirect".into(), swap: false, fov: 360.0, stitch: None }, v, w, h)
+                v360_flat(&Lens { layout: "equirect".into(), swap: false, fov: 360.0, stitch: None, stab: None }, v, w, h)
             }
             None => format!("scale={w}:-2"),
         };
@@ -463,14 +470,14 @@ mod tests {
 
     #[test]
     fn flat_view_args() {
-        let f = v360_flat(&Lens { layout: "dfisheye".into(), swap: false, fov: 190.0, stitch: None }, &View { yaw: 30.0, pitch: -10.0, roll: 0.0, hfov: 90.0 }, 1920, 1080);
+        let f = v360_flat(&Lens { layout: "dfisheye".into(), swap: false, fov: 190.0, stitch: None, stab: None }, &View { yaw: 30.0, pitch: -10.0, roll: 0.0, hfov: 90.0 }, 1920, 1080);
         assert!(f.starts_with("v360=input=dfisheye:ih_fov=190:iv_fov=190:output=flat:h_fov=90.000:v_fov=58.716"), "{f}");
         assert!(f.contains("yaw=30.000:pitch=-10.000"));
     }
 
     #[test]
     fn dual_source_swaps() {
-        let l = Lens { layout: "dual".into(), swap: true, fov: 190.0, stitch: None };
+        let l = Lens { layout: "dual".into(), swap: true, fov: 190.0, stitch: None, stab: None };
         assert_eq!(lens_source(2, &l, None, "x"), "[2:v:1][2:v:0]hstack[x]");
     }
 }

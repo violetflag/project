@@ -16,8 +16,14 @@ export type MediaInfo = {
 export type Stitch = {
   on: boolean; fov: number; yaw: number; pitch: number; roll: number;
   gain_a: number[]; gain_b: number[]; calibrated: boolean; before: number; after: number;
+  /** Line the lenses up again on every frame (DJI's AI seam, Reelcut's own matching). */
+  flow?: boolean;
 };
-export type Lens = { layout: string; swap: boolean; fov: number; stitch?: Stitch | null };
+/** 360 stabilisation (see src-tauri/src/motion.rs). */
+export type Stab = { mode: "horizon" | "lock" | "smooth" | "off"; strength: number; rs: boolean };
+/** What the stabilisation analysis found (gyro in the file, or the picture). */
+export type MotionInfo = { source: string; note: string; readout: number; product: string };
+export type Lens = { layout: string; swap: boolean; fov: number; stitch?: Stitch | null; stab?: Stab | null };
 export type View = { yaw: number; pitch: number; roll: number; hfov: number };
 export type Word = { s: number; e: number; t: string };
 export type Hw = {
@@ -36,6 +42,8 @@ export type Asset = {
   proxyState?: JobState;
   proxyPct?: number;
   proxyError?: string;
+  /** What the proxy job is doing now ("흔들림 분석" while the motion is worked out). */
+  proxyStage?: string;
   lens?: Lens;
   /** Seam calibration of a two-lens 360 file is running. */
   stitching?: boolean;

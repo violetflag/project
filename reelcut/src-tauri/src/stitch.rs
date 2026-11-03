@@ -49,6 +49,10 @@ pub struct Stitch {
     pub before: f64,
     #[serde(default)]
     pub after: f64,
+    /// Line the two lenses up again on every frame where they overlap (DJI's AI seam, done
+    /// here with Reelcut's own motion matching; on by default).
+    #[serde(default = "yes")]
+    pub flow: bool,
 }
 
 fn yes() -> bool {
@@ -60,7 +64,7 @@ fn neutral() -> [f64; 3] {
 
 impl Default for Stitch {
     fn default() -> Self {
-        Stitch { on: true, fov: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, gain_a: neutral(), gain_b: neutral(), calibrated: false, before: 0.0, after: 0.0 }
+        Stitch { on: true, fov: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, gain_a: neutral(), gain_b: neutral(), calibrated: false, before: 0.0, after: 0.0, flow: true }
     }
 }
 
@@ -85,9 +89,9 @@ pub fn blend_width(fov: f64) -> f64 {
 
 // ------------------------------------------------------------------ rotations (v360's own)
 
-type Q = [f64; 4];
+pub(crate) type Q = [f64; 4];
 
-fn qmul(a: Q, b: Q) -> Q {
+pub(crate) fn qmul(a: Q, b: Q) -> Q {
     [
         a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
         a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
@@ -97,7 +101,7 @@ fn qmul(a: Q, b: Q) -> Q {
 }
 
 /// v360's rotation for yaw/pitch/roll in "ypr" order (degrees).
-fn ypr(y: f64, p: f64, r: f64) -> Q {
+pub(crate) fn ypr(y: f64, p: f64, r: f64) -> Q {
     let h = |d: f64| d.to_radians() / 2.0;
     let qy = [h(y).cos(), 0.0, h(y).sin(), 0.0];
     let qp = [h(p).cos(), h(p).sin(), 0.0, 0.0];
@@ -105,11 +109,11 @@ fn ypr(y: f64, p: f64, r: f64) -> Q {
     qmul(qmul(qy, qp), qr)
 }
 
-fn conj(q: Q) -> Q {
+pub(crate) fn conj(q: Q) -> Q {
     [q[0], -q[1], -q[2], -q[3]]
 }
 
-fn matrix(q: Q) -> [[f64; 3]; 3] {
+pub(crate) fn matrix(q: Q) -> [[f64; 3]; 3] {
     let [w, x, y, z] = q;
     [
         [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
@@ -119,7 +123,7 @@ fn matrix(q: Q) -> [[f64; 3]; 3] {
 }
 
 /// The yaw/pitch/roll (ypr order) of a rotation.
-fn euler(q: Q) -> (f64, f64, f64) {
+pub(crate) fn euler(q: Q) -> (f64, f64, f64) {
     let m = matrix(q);
     let p = (-m[1][2]).clamp(-1.0, 1.0).asin().to_degrees();
     let r = m[1][0].atan2(m[1][1]).to_degrees();
@@ -598,7 +602,7 @@ mod tests {
     use super::*;
 
     fn lens(layout: &str) -> Lens {
-        Lens { layout: layout.into(), swap: false, fov: 190.0, stitch: None }
+        Lens { layout: layout.into(), swap: false, fov: 190.0, stitch: None, stab: None }
     }
 
     #[test]
@@ -743,7 +747,7 @@ mod itest {
         let work = fx.join("work-stitch");
         let _ = std::fs::create_dir_all(&work);
         let info = crate::media::inspect(&bin("ffprobe"), &fx.join("CAM_0001.OSV").to_string_lossy()).unwrap();
-        let mut lens = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: None };
+        let mut lens = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: None, stab: None };
         let t = std::time::Instant::now();
         let cal = calibrate(&bin("ffmpeg"), &bin("ffprobe"), &info, &lens).unwrap();
         println!("calibration {:.1}s: {cal:?}", t.elapsed().as_secs_f64());
@@ -753,7 +757,7 @@ mod itest {
         let osv = fx.join("CAM_0001.OSV").to_string_lossy().into_owned();
         let out = |n: &str| work.join(n);
         // the truth
-        run(&["-y", "-loglevel", "error", "-i", &fx.join("ref_equirect.png").to_string_lossy(), "-vf", &crate::media::v360_flat(&Lens { layout: "equirect".into(), swap: false, fov: 360.0, stitch: None }, &view, w, h), "-frames:v", "1", &out("ref.png").to_string_lossy()]);
+        run(&["-y", "-loglevel", "error", "-i", &fx.join("ref_equirect.png").to_string_lossy(), "-vf", &crate::media::v360_flat(&Lens { layout: "equirect".into(), swap: false, fov: 360.0, stitch: None, stab: None }, &view, w, h), "-frames:v", "1", &out("ref.png").to_string_lossy()]);
         // 2.1: one lens up to 90°, then the other
         let old = format!("{};[ls]{}[o]", crate::media::lens_source(0, &lens, None, "ls"), crate::media::v360_flat(&Lens { stitch: Some(Stitch { on: false, ..Default::default() }), ..lens.clone() }, &view, w, h));
         run(&["-y", "-loglevel", "error", "-ss", "1", "-i", &osv, "-filter_complex", &old, "-map", "[o]", "-frames:v", "1", &out("old.png").to_string_lossy()]);
