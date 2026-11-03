@@ -6,6 +6,7 @@
 use crate::args::{self, Settings};
 use crate::hw::Hw;
 use crate::media::{self, Lens, View};
+use crate::stitch;
 use crate::probe::{Audio, Source};
 use serde::{Deserialize, Serialize};
 
@@ -387,17 +388,11 @@ fn view_anim(lens: &Lens, keys: &[ViewKey], name: &str, w: u32, h: u32, len: f64
     keys.sort_by(|a, b| a.t.total_cmp(&b.t));
     let dfov = |hf: f64| 2.0 * ((hf.clamp(20.0, 160.0).to_radians() / 2.0).tan() * (w as f64).hypot(h as f64) / w as f64).atan().to_degrees();
     let vals = |vw: &View| [wrap180(vw.yaw), vw.pitch.clamp(-180.0, 180.0), vw.roll.clamp(-180.0, 180.0), dfov(vw.hfov)].map(|x| format!("{x:.3}"));
-    let mut v0 = view_at(&keys, 0.0);
-    v0.yaw = wrap180(v0.yaw);
-    let end = keys[keys.len() - 1].t.min(len);
-    let mut times: Vec<f64> = (1..).map(|k| k as f64 * KEY_STEP).take_while(|t| *t < end - 1e-6).collect();
-    if end > 0.0 {
-        times.push(end);
-    }
+    let (v0, steps) = view_steps(&keys, len);
     let mut prev = vals(&v0);
     let mut cmds = Vec::new();
-    for t in times {
-        let cur = vals(&view_at(&keys, t));
+    for (t, vw) in steps {
+        let cur = vals(&vw);
         let set: Vec<String> = ["yaw", "pitch", "roll", "d_fov"].iter().zip(cur.iter().zip(&prev)).filter(|(_, (c, p))| c != p).map(|(o, (c, _))| format!("v360@{name} {o} {c}")).collect();
         if !set.is_empty() {
             cmds.push(format!("{t:.3} {}", set.join(", ")));
@@ -409,6 +404,35 @@ fn view_anim(lens: &Lens, keys: &[ViewKey], name: &str, w: u32, h: u32, len: f64
     }
     let v360 = media::v360_flat(lens, &v0, w, h).replacen("v360=", &format!("v360@{name}="), 1) + ":reset_rot=1";
     Some((format!("sendcmd=c='{}'", cmds.join(";")), v360))
+}
+
+/// The start view and the view every 1/15 s (output seconds) up to the last key or `len`.
+/// `keys` sorted by time.
+fn view_steps(keys: &[ViewKey], len: f64) -> (View, Vec<(f64, View)>) {
+    let mut v0 = view_at(keys, 0.0);
+    v0.yaw = wrap180(v0.yaw);
+    let end = keys[keys.len() - 1].t.min(len);
+    let mut times: Vec<f64> = (1..).map(|k| k as f64 * KEY_STEP).take_while(|t| *t < end - 1e-6).collect();
+    if end > 0.0 {
+        times.push(end);
+    }
+    let steps = times.into_iter().map(|t| (t, view_at(keys, t))).collect();
+    (v0, steps)
+}
+
+/// The 360 picture stitched from both lenses (`stitch`): the graph text up to `[ls]` and whether
+/// the speed's setpts is already in.
+fn stitched(p: &Pic, l: &Lens, ls: &str, w: u32, h: u32) -> (String, bool) {
+    let moving = p.keys.len() >= 2 && view_anim(l, p.keys, &p.vname, w, h, p.len).is_some();
+    let mut keys = p.keys.to_vec();
+    keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+    let still = if p.keys.len() >= 2 { view_at(&keys, 0.0) } else { p.view.clone().unwrap_or(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0 }) };
+    let moves = moving.then(|| {
+        let (v0, steps) = view_steps(&keys, p.len);
+        stitch::Moves { v0, steps }
+    });
+    let pre = if moving { speed_pts(p.speed) } else { String::new() };
+    (stitch::graph(p.vi, l, None, &pre, &stitch::Out::Flat { view: &still, w, h }, moves.as_ref(), ls) + ";", moving)
 }
 
 fn even(x: f64) -> u32 {
@@ -444,6 +468,14 @@ fn shape(p: &Pic, w: u32, h: u32, pad: bool) -> (String, String, Vec<String>, bo
     let (bw, bh) = (even(w as f64 * s), even(h as f64 * s));
     if let Some(l) = &p.lens {
         let ls = format!("ls{}", p.tag);
+        if stitch::active(l) {
+            let (pre, timed) = stitched(p, l, &ls, w, h);
+            chain.extend(p.color.iter().cloned());
+            if (s - 1.0).abs() > 1e-4 {
+                chain.push(format!("scale={bw}:{bh}:flags=bicubic"));
+            }
+            return (pre, ls, chain, timed);
+        }
         let pre = media::lens_source(p.vi, l, None, &ls) + ";";
         let moving = if p.keys.len() >= 2 { view_anim(l, p.keys, &p.vname, w, h, p.len) } else { None };
         let timed = moving.is_some();
@@ -936,6 +968,28 @@ pub fn build(p: &Plan, hw: &Hw, graph_file: &str, new_syntax: bool, has_ass: boo
 mod tests {
     use super::*;
 
+    /// The hard-seam lens of 2.1 and before (stitching turned off).
+    fn off() -> Option<stitch::Stitch> {
+        Some(stitch::Stitch { on: false, ..Default::default() })
+    }
+
+    #[test]
+    fn osv_is_stitched_by_default() {
+        let lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: None });
+        let mut s = Seg { lens: lens.clone(), view: Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0 }), ..seg("c.osv", 0.0, 4.0) };
+        s.speed = 2.0;
+        let g = graph(&Plan { segs: vec![s], width: 1280, height: 720, ..plan(vec![]) }).graph;
+        assert!(g.starts_with("[0:v:0]null[ls0_fa];[0:v:1]split=2[ls0_fb][ls0_ft];"), "{g}");
+        assert!(g.contains("[ls0_A][ls0_B][ls0_M]maskedmerge[ls0];[ls0]setsar=1,setpts=(PTS-STARTPTS)/2.00000"), "{g}");
+        assert!(!g.contains("dfisheye"), "{g}");
+        // a moving view: the speed goes first on each lens, and the commands turn all three v360s
+        let o = Overlay { path: "c.osv".into(), dur: 4.0, at: 0.0, lens, view_keys: vec![key(0.0, 0.0, 90.0), key(1.0, 30.0, 90.0)], ..Default::default() };
+        let g = graph(&Plan { overlays: vec![o], ..plan(vec![seg("a.mp4", 0.0, 6.0)]) }).graph;
+        assert!(g.contains("[1:v:0]setpts=(PTS-STARTPTS)/1.00000,sendcmd=c='0.067 v360@lso0a yaw -178.000;"), "{g}");
+        assert!(g.contains("sendcmd=c='0.067 v360@lso0b yaw 2.000, v360@lso0m yaw 2.000;"), "{g}");
+        assert!(g.contains("maskedmerge[lso0];[lso0]setsar=1,format=yuva420p,fps="), "{g}");
+    }
+
     fn seg(path: &str, start: f64, dur: f64) -> Seg {
         Seg { path: path.into(), kind: "video".into(), start, dur, has_audio: true, ..Default::default() }
     }
@@ -949,7 +1003,7 @@ mod tests {
     }
 
     fn osv(start: f64, dur: f64) -> Seg {
-        Seg { lens: Some(Lens { layout: "dual".into(), swap: false, fov: 190.0 }), view: Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0 }), ..seg("c.osv", start, dur) }
+        Seg { lens: Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off() }), view: Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0 }), ..seg("c.osv", start, dur) }
     }
 
     fn key(t: f64, yaw: f64, hfov: f64) -> ViewKey {
@@ -971,7 +1025,7 @@ mod tests {
     fn speed_and_360() {
         let mut s = seg("c.osv", 0.0, 4.0);
         s.speed = 2.0;
-        s.lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0 });
+        s.lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off() });
         s.view = Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0 });
         let p = Plan { segs: vec![s], width: 1280, height: 720, ..plan(vec![]) };
         let b = build(&p, &Hw::default(), "g.txt", true, false, "o.part.mp4").unwrap();
@@ -1164,7 +1218,7 @@ mod tests {
 
     #[test]
     fn overlay_360_gets_its_own_view() {
-        let o = Overlay { path: "c.osv".into(), dur: 4.0, at: 0.0, lens: Some(Lens { layout: "dual".into(), swap: false, fov: 190.0 }), view_keys: vec![key(0.0, 0.0, 90.0), key(1.0, 30.0, 90.0)], ..Default::default() };
+        let o = Overlay { path: "c.osv".into(), dur: 4.0, at: 0.0, lens: Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off() }), view_keys: vec![key(0.0, 0.0, 90.0), key(1.0, 30.0, 90.0)], ..Default::default() };
         let g = graph(&Plan { overlays: vec![o], ..plan(vec![seg("a.mp4", 0.0, 6.0)]) }).graph;
         assert!(g.contains(";[1:v:0][1:v:1]hstack[lso0];[lso0]setpts=(PTS-STARTPTS)/1.00000,sendcmd=c='0.067 v360@o0 yaw 2.000;"), "{g}");
         assert!(g.contains("reset_rot=1,setsar=1,format=yuva420p,fps="), "{g}");
@@ -1221,7 +1275,7 @@ mod tests {
         let (ok, _, err) = ff::output(&ffmpeg, &v(&["-y", "-v", "error", "-ss", "2", "-i", &walk, "-frames:v", "1", "-vf", "drawbox=c=red:t=24", &still.to_string_lossy()])).unwrap();
         assert!(ok, "{err}");
 
-        let lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0 });
+        let lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off() });
         let clip = |s: f64, d: f64| Seg { path: walk.clone(), kind: "video".into(), start: s, dur: d, has_audio: true, fit: "fit".into(), ..Default::default() };
         let vk = |t: f64, yaw: f64, pitch: f64, hfov: f64| ViewKey { t, view: View { yaw, pitch, roll: 0.0, hfov } };
         let segs = vec![

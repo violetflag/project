@@ -43,7 +43,7 @@ fn itest_real_ffmpeg() {
     assert_eq!(song.kind, "audio");
 
     // proxies
-    for (info, lens) in [(&osv, Lens { layout: "dual".into(), swap: false, fov: 190.0 }), (&walk, Lens { layout: "none".into(), swap: false, fov: 190.0 }), (&song, Lens::default())] {
+    for (info, lens) in [(&osv, Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: None }), (&walk, Lens { layout: "none".into(), swap: false, fov: 190.0, stitch: None }), (&song, Lens::default())] {
         let plan = media::proxy_plan(info, &lens, "libx264", &work, &info.name.replace('.', "_")).unwrap();
         ff::run_ffmpeg(&jobs, "p", jobs.generation("p"), &ffmpeg, &plan.args, |_| {}).unwrap_or_else(|e| panic!("proxy {}: {e}", info.name));
         println!("proxy {} -> {} ({:.2}s)", info.name, plan.out.display(), dur(&plan.out));
@@ -61,7 +61,7 @@ fn itest_real_ffmpeg() {
 
     let seg = |info: &media::MediaInfo, start: f64, d: f64, speed: f64, r360: bool| Seg {
         path: info.path.clone(), kind: info.kind.clone(), start, dur: d, speed, volume: 1.0, has_audio: info.has_audio,
-        lens: if r360 { Some(Lens { layout: info.layout360.clone(), swap: false, fov: 190.0 }) } else { None },
+        lens: if r360 { Some(Lens { layout: info.layout360.clone(), swap: false, fov: 190.0, stitch: None }) } else { None },
         view: if r360 { Some(View { yaw: 45.0, pitch: -10.0, roll: 0.0, hfov: 100.0 }) } else { None },
         fit: "fit".into(), fade_in: 0.3, fade_out: 0.3, ..Default::default()
     };

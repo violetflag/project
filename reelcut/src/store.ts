@@ -2,7 +2,7 @@
 import { useEffect, useReducer } from "preact/hooks";
 import { api, onJob, type AppInfo, type CcStatus, type ModelInfo, type QwenStatus } from "./api";
 import { draftDuration, newDraft, refineWords, rippleConnected, uid } from "./edit";
-import type { Asset, Draft, JobEvent, Project, Settings, Word } from "./types";
+import type { Asset, Draft, JobEvent, Lens, Project, Settings, Word } from "./types";
 
 export type Meta = { id: string; name: string; updated: number; created: number; assets: number; drafts: number; duration: number; poster?: string; clips: number };
 export type ExportJob = { id: string; draft: string; pct: number; state: string; message: string; out: string; result?: any; left?: number; name?: string };
@@ -278,8 +278,19 @@ export async function importPaths(paths: string[], folder = st.folder): Promise<
 export async function startProxy(id: string) {
   const a = asset(id);
   if (!a || a.info.kind === "image") return;
-  const lens = a.lens ?? { layout: a.info.layout360, swap: false, fov: 190 };
+  let lens: Lens = a.lens ?? { layout: a.info.layout360, swap: false, fov: 190 };
   patchAsset(id, { proxyState: "running", proxyPct: 0, proxyError: "" });
+  // Two-lens 360: line the lenses up and match their brightness first (automatic stitching).
+  if ((lens.layout === "dual" || lens.layout === "dfisheye") && lens.stitch?.on !== false && !lens.stitch?.calibrated) {
+    patchAsset(id, { stitching: true });
+    try {
+      lens = { ...lens, stitch: await api.calibrate360(a.info, lens) };
+      patchAsset(id, { lens });
+    } catch (e) {
+      toast(`이음새 자동 맞춤을 못 했습니다 (기본값으로 이어 붙입니다): ${e}`);
+    }
+    patchAsset(id, { stitching: false });
+  }
   try {
     const ready = await api.makeProxy(id, a.info, lens);
     if (ready) onProxyDone(id, ready);

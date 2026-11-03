@@ -12,7 +12,12 @@ export type MediaInfo = {
   layout360: string;
   lrf: string | null; created: number; recorded: string; bit_depth: number;
 };
-export type Lens = { layout: string; swap: boolean; fov: number };
+/** Seam stitching of the two lenses (see src-tauri/src/stitch.rs). a = back lens, b = front. */
+export type Stitch = {
+  on: boolean; fov: number; yaw: number; pitch: number; roll: number;
+  gain_a: number[]; gain_b: number[]; calibrated: boolean; before: number; after: number;
+};
+export type Lens = { layout: string; swap: boolean; fov: number; stitch?: Stitch | null };
 export type View = { yaw: number; pitch: number; roll: number; hfov: number };
 export type Word = { s: number; e: number; t: string };
 export type Hw = {
@@ -32,6 +37,8 @@ export type Asset = {
   proxyPct?: number;
   proxyError?: string;
   lens?: Lens;
+  /** Seam calibration of a two-lens 360 file is running. */
+  stitching?: boolean;
   words?: Word[];
   lang?: string;
   tState?: JobState;

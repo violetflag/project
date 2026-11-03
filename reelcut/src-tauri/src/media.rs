@@ -237,6 +237,9 @@ pub struct Lens {
     /// Each fisheye's field of view in degrees (Osmo 360 about 190).
     #[serde(default = "lens_fov")]
     pub fov: f64,
+    /// Seam stitching of the two lenses (on by default; see `stitch`).
+    #[serde(default)]
+    pub stitch: Option<crate::stitch::Stitch>,
 }
 fn lens_fov() -> f64 {
     190.0
@@ -331,8 +334,15 @@ pub fn proxy_plan(info: &MediaInfo, lens: &Lens, h264: &str, out_dir: &Path, key
                     _ => (info.path.clone(), Lens { layout, ..lens.clone() }),
                 };
                 a.extend(s(&["-i", &src]));
-                let pre = lens_source(0, &lens2, if lens2.layout == "dual" { Some(1024) } else { None }, "sb");
-                let graph = format!("{pre};[sb]{},scale=2048:1024:flags=bicubic,format=yuv420p[pv]", if lens2.layout == "equirect" { "null".to_string() } else { format!("v360={}:output=equirect:w=2048:h=1024", v360_in(&lens2)) });
+                let graph = if crate::stitch::active(&lens2) {
+                    // Both lenses, seam blended (DJI-style), straight to the 2048×1024 sphere.
+                    let each = if lens2.layout == "dual" { Some(1024) } else { None };
+                    let st = crate::stitch::graph(0, &lens2, each, "", &crate::stitch::Out::Equi { w: 2048, h: 1024 }, None, "sb");
+                    format!("{st};[sb]format=yuv420p[pv]")
+                } else {
+                    let pre = lens_source(0, &lens2, if lens2.layout == "dual" { Some(1024) } else { None }, "sb");
+                    format!("{pre};[sb]{},scale=2048:1024:flags=bicubic,format=yuv420p[pv]", if lens2.layout == "equirect" { "null".to_string() } else { format!("v360={}:output=equirect:w=2048:h=1024", v360_in(&lens2)) })
+                };
                 a.extend(s(&["-filter_complex", &graph, "-map", "[pv]"]));
                 enc(&mut a);
                 let has_audio = if src == info.path { info.has_audio } else { true };
@@ -410,7 +420,7 @@ pub fn frames(ffmpeg: &Path, req: &FrameReq) -> Result<Vec<String>, String> {
         let vf = match &req.view {
             Some(v) => {
                 let h = (w as f64 * 9.0 / 16.0).round() as u32 / 2 * 2;
-                v360_flat(&Lens { layout: "equirect".into(), swap: false, fov: 360.0 }, v, w, h)
+                v360_flat(&Lens { layout: "equirect".into(), swap: false, fov: 360.0, stitch: None }, v, w, h)
             }
             None => format!("scale={w}:-2"),
         };
@@ -453,14 +463,14 @@ mod tests {
 
     #[test]
     fn flat_view_args() {
-        let f = v360_flat(&Lens { layout: "dfisheye".into(), swap: false, fov: 190.0 }, &View { yaw: 30.0, pitch: -10.0, roll: 0.0, hfov: 90.0 }, 1920, 1080);
+        let f = v360_flat(&Lens { layout: "dfisheye".into(), swap: false, fov: 190.0, stitch: None }, &View { yaw: 30.0, pitch: -10.0, roll: 0.0, hfov: 90.0 }, 1920, 1080);
         assert!(f.starts_with("v360=input=dfisheye:ih_fov=190:iv_fov=190:output=flat:h_fov=90.000:v_fov=58.716"), "{f}");
         assert!(f.contains("yaw=30.000:pitch=-10.000"));
     }
 
     #[test]
     fn dual_source_swaps() {
-        let l = Lens { layout: "dual".into(), swap: true, fov: 190.0 };
+        let l = Lens { layout: "dual".into(), swap: true, fov: 190.0, stitch: None };
         assert_eq!(lens_source(2, &l, None, "x"), "[2:v:1][2:v:0]hstack[x]");
     }
 }
