@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { api, pickFolder } from "../api";
 import { EFFORTS, MODELS } from "../agent";
-import { refreshModels, refreshQwen, saveSettings, set, st, toast, useStore } from "../store";
+import { refreshModels, refreshQwen, saveNow, saveSettings, set, st, toast, useStore } from "../store";
 
 export function SettingsView() {
   const s = useStore();
@@ -140,7 +140,12 @@ export function SettingsView() {
             <li>GPU 인코더: AV1 {hw.av1 ?? "없음"} · HEVC {hw.hevc ?? "없음"} · H.264 {hw.h264 ?? "없음"}</li>
             <li>CPU 스레드: {hw.threads}</li>
             <li>ffmpeg: {s.info?.ffmpegVersion || "없음"}</li>
-            <li class="muted">데이터 폴더: {s.info?.dataDir}</li>
+            <li>
+              데이터 폴더 (프로젝트·설정·받아쓰기 모델): <span class="muted">{s.info?.dataDir}</span>{" "}
+              <button class="small" onClick={async () => { const d = await pickFolder(); if (d) { await saveNow(); api.setDataDir(d).catch((e) => toast(String(e))); } }}>바꾸기</button>{" "}
+              <button class="small" onClick={async () => { await saveNow(); api.setDataDir("").catch((e) => toast(String(e))); }}>기본으로</button>
+              <div class="muted">바꾸면 앱이 다시 시작됩니다. 큰 모델을 다른 드라이브에 두거나, 이미 받아 둔 모델 폴더를 쓸 때 바꾸세요.</div>
+            </li>
           </ul>
         ) : <p class="muted">확인 중…</p>}
         <button class="small" onClick={async () => { const h = await api.hwInfo(true); set({ info: st.info ? { ...st.info, hw: h } : st.info }); toast("다시 확인했습니다"); }}>그래픽카드 다시 확인</button>

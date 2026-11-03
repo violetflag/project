@@ -54,6 +54,7 @@ export const api = {
   transcribe: (id: string, path: string, model: string, lang: string, engine = "whisper") => invoke<void>("transcribe", { id, path, model, lang, engine }),
   qwenStatus: (deep: boolean) => invoke<QwenStatus>("qwen_status", { deep }),
   qwenSetup: () => invoke<void>("qwen_setup"),
+  setDataDir: (path: string) => invoke<void>("set_data_dir", { path }),
   export: (id: string, plan: Plan) => invoke<string>("export", { id, plan }),
   cancel: (tag: string) => invoke<number>("cancel", { tag }),
   reveal: (path: string) => invoke<void>("reveal", { path }),

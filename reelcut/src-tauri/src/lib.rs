@@ -487,13 +487,44 @@ async fn claude(key: String, body: Value, betas: Vec<String>) -> Result<Value, S
     .await
 }
 
+/// Where projects, settings and speech models live: REELCUT_DATA, else the folder named in
+/// `<app data>/data-dir.txt` (set from 설정), else the app data folder itself.
+fn resolve_data_dir(home: &Path) -> PathBuf {
+    if let Ok(p) = std::env::var("REELCUT_DATA") {
+        let p = PathBuf::from(p.trim());
+        if p.is_dir() {
+            return p;
+        }
+    }
+    if let Ok(t) = std::fs::read_to_string(home.join("data-dir.txt")) {
+        let p = PathBuf::from(t.trim());
+        if !t.trim().is_empty() && p.is_dir() {
+            return p;
+        }
+    }
+    home.to_path_buf()
+}
+
+/// Points the app at another data folder ("" = back to the default) and restarts it.
+#[tauri::command]
+fn set_data_dir(handle: tauri::AppHandle, path: String) -> Result<(), String> {
+    let home = handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
+    if !path.trim().is_empty() && !Path::new(path.trim()).is_dir() {
+        return Err("폴더가 없습니다".into());
+    }
+    std::fs::write(home.join("data-dir.txt"), path.trim()).map_err(|e| e.to_string())?;
+    handle.restart();
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let res = app.path().resource_dir().ok();
-            let data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("reelcut"));
+            let home = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("reelcut"));
+            let data_dir = resolve_data_dir(&home);
             let cache_dir = app.path().app_cache_dir().unwrap_or_else(|_| std::env::temp_dir().join("reelcut-cache"));
             let _ = std::fs::create_dir_all(&data_dir);
             let _ = std::fs::create_dir_all(&cache_dir);
@@ -509,6 +540,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             qwen_status,
+            set_data_dir,
             qwen_setup,
             hw_info,
             store_get,
