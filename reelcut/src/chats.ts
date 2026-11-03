@@ -59,8 +59,15 @@ export function needsCompaction(ctx: number | undefined, limit: number, s: Parti
 /** Token budget for the context after compaction (summary + recent turns). */
 export const compactBudget = (limit: number, s: Partial<Settings>) => Math.floor((limit * (s.compactTo || CTX_DEFAULTS.compactTo)) / 100);
 
-/** Rough token count of text (Korean and English mixed: about 1 token per 2.5 characters, rounded up). */
-export const estTokens = (text: string) => Math.ceil(text.length / 2.5);
+/**
+ * Rough, deliberately high token count (a high guess only makes the compacted context smaller):
+ * Hangul syllables are about one token each; digits, punctuation and spaces in Korean text close
+ * to one per character (measured on Haiku 5.5: 33k characters of Korean notes ≈ 32k tokens).
+ */
+export function estTokens(text: string): number {
+  const hangul = text.match(/[가-힣]/g)?.length ?? 0;
+  return Math.ceil(hangul * 1.05 + (text.length - hangul) / 1.2);
+}
 
 /** One message as plain text for a summary request or a seed. */
 export function plainOf(m: ChatMsg): string {

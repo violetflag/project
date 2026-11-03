@@ -68,3 +68,14 @@ describe("context limits and compaction", () => {
     expect(fmtK(420)).toBe("420");
   });
 });
+
+describe("token estimate", () => {
+  it("counts Hangul as about one token per syllable", () => {
+    // Measured: 700 Korean memo lines (about 31k characters) were about 32k tokens on Haiku 5.5.
+    const memo = Array.from({ length: 700 }, (_, i) => `문단1-${i}: 공원 산책로 촬영 메모 ${i}번, 연못 오리 ${i % 7}마리, 바람 ${i % 5}m/s.`).join(" ");
+    const n = estTokens(memo);
+    expect(n).toBeGreaterThan(28_000);
+    expect(n).toBeLessThan(40_000);
+    expect(estTokens("hello world, this is English text")).toBeLessThan(40);
+  });
+});
