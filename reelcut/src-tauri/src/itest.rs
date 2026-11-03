@@ -17,6 +17,11 @@ fn dur(p: &Path) -> f64 {
     out.trim().parse().unwrap_or(0.0)
 }
 
+fn ffmpeg_major() -> u32 {
+    let (_, out, _) = ff::output(&bin("ffmpeg"), &["-version".into()]).unwrap();
+    out.split_whitespace().nth(2).and_then(|v| v.trim_start_matches(|c: char| !c.is_ascii_digit()).split('.').next()?.parse().ok()).unwrap_or(6)
+}
+
 #[test]
 fn itest_real_ffmpeg() {
     let Ok(fx) = std::env::var("REELCUT_FX") else { return };
@@ -76,7 +81,7 @@ fn itest_real_ffmpeg() {
             std::fs::write(work.join("captions.ass"), &p.ass).unwrap();
         }
         let gf = work.join("graph.txt");
-        let b = render::build(&p, &hw, &gf.to_string_lossy(), false, has_ass, &out.to_string_lossy()).unwrap();
+        let b = render::build(&p, &hw, &gf.to_string_lossy(), ffmpeg_major() >= 7, has_ass, &out.to_string_lossy()).unwrap();
         std::fs::write(&gf, &b.graph).unwrap();
         ff::run_ffmpeg_in(&jobs, "e", jobs.generation("e"), &ffmpeg, &b.args, Some(&work), |_| {}).unwrap_or_else(|e| panic!("{name}: {e}\n{}", b.graph));
         let d = dur(&out);

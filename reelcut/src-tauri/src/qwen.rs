@@ -114,7 +114,7 @@ fn has_nvidia() -> bool {
 }
 
 /// Installs everything. `on(pct, message)`.
-pub fn setup(data: &Path, jobs: &Jobs, tag: &str, gen: u64, mut on: impl FnMut(f64, &str)) -> Result<(), String> {
+pub fn setup(data: &Path, gpus: &[String], jobs: &Jobs, tag: &str, gen: u64, mut on: impl FnMut(f64, &str)) -> Result<(), String> {
     let e = envs(data);
     let py = python(data);
     if !py.is_file() {
@@ -132,8 +132,14 @@ pub fn setup(data: &Path, jobs: &Jobs, tag: &str, gen: u64, mut on: impl FnMut(f
         ff::run_tracked_env(jobs, tag, gen, &py, &a, &e, |_| {}).map(|_| ()).map_err(|x| if x == ff::CANCELLED { x } else { format!("{what} 실패: {x}") })
     };
     pip(&["--upgrade", "pip"], "pip 업데이트", 4.0, &mut on)?;
+    let intel = gpus.iter().any(|g| { let g = g.to_lowercase(); g.contains("intel") && g.contains("arc") });
     if has_nvidia() {
-        pip(&["torch", "--index-url", "https://download.pytorch.org/whl/cu128"], "PyTorch(GPU용) 설치 중 · 약 3GB", 8.0, &mut on)?;
+        pip(&["torch", "--index-url", "https://download.pytorch.org/whl/cu128"], "PyTorch(NVIDIA GPU용) 설치 중 · 약 3GB", 8.0, &mut on)?;
+    } else if intel {
+        // Intel Arc (XPU) build; if it can't be installed, the CPU build still works.
+        if pip(&["torch", "--index-url", "https://download.pytorch.org/whl/xpu"], "PyTorch(Intel Arc GPU용) 설치 중", 8.0, &mut on).is_err() {
+            pip(&["torch"], "PyTorch(CPU용) 설치 중", 8.0, &mut on)?;
+        }
     } else {
         pip(&["torch"], "PyTorch(CPU용) 설치 중", 8.0, &mut on)?;
     }

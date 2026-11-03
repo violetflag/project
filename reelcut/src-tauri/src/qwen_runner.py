@@ -19,6 +19,15 @@ ALIGNER = "Qwen/Qwen3-ForcedAligner-0.6B"
 LANGS = {"ko": "Korean", "en": "English", "ja": "Japanese", "zh": "Chinese", "es": "Spanish", "fr": "French", "de": "German"}
 
 
+def pick_device(torch):
+    if torch.cuda.is_available():
+        return "cuda:0"
+    xpu = getattr(torch, "xpu", None)
+    if xpu is not None and xpu.is_available():
+        return "xpu:0"
+    return "cpu"
+
+
 def progress(p):
     print(f"progress = {p:.1f}", file=sys.stderr, flush=True)
 
@@ -32,9 +41,12 @@ def cmd_check(_a):
     try:
         import torch
         out["torch"] = torch.__version__
-        out["cuda"] = bool(torch.cuda.is_available())
-        out["gpu"] = torch.cuda.get_device_name(0) if out["cuda"] else ""
-        out["vram_gb"] = round(torch.cuda.get_device_properties(0).total_memory / 2**30, 1) if out["cuda"] else 0
+        dev = pick_device(torch)
+        out["device"] = dev
+        out["cuda"] = dev != "cpu"
+        mod = torch.cuda if dev.startswith("cuda") else getattr(torch, "xpu", None)
+        out["gpu"] = mod.get_device_name(0) if dev != "cpu" else ""
+        out["vram_gb"] = round(mod.get_device_properties(0).total_memory / 2**30, 1) if dev != "cpu" else 0
     except Exception as e:  # noqa: BLE001
         out["torch_error"] = str(e)
     try:
@@ -127,18 +139,27 @@ def cmd_transcribe(a):
     from qwen_asr import Qwen3ASRModel
 
     progress(1)
-    cuda = torch.cuda.is_available()
-    dev = "cuda:0" if cuda else "cpu"
+    dev = pick_device(torch)
+    cuda = dev != "cpu"
     dtype = torch.bfloat16 if cuda else torch.float32
     asr_path = local_dir(a.models, ASR)
     al_path = local_dir(a.models, ALIGNER)
     if not os.path.isdir(asr_path) or not os.path.isdir(al_path):
         print("error: Qwen 모델이 없습니다. 설정에서 내려받아 주세요.", file=sys.stderr, flush=True)
         sys.exit(2)
-    model = Qwen3ASRModel.from_pretrained(
-        asr_path, dtype=dtype, device_map=dev, max_inference_batch_size=4 if cuda else 1, max_new_tokens=1024,
-        forced_aligner=al_path, forced_aligner_kwargs=dict(dtype=dtype, device_map=dev),
-    )
+    def load(dev, dtype):
+        return Qwen3ASRModel.from_pretrained(
+            asr_path, dtype=dtype, device_map=dev, max_inference_batch_size=4 if dev != "cpu" else 1, max_new_tokens=1024,
+            forced_aligner=al_path, forced_aligner_kwargs=dict(dtype=dtype, device_map=dev),
+        )
+
+    try:
+        model = load(dev, dtype)
+    except Exception as e:  # noqa: BLE001 - a GPU that can't take the model: fall back to the CPU
+        if dev == "cpu":
+            raise
+        print(f"warning: {dev} failed ({e}); using CPU", file=sys.stderr, flush=True)
+        model = load("cpu", torch.float32)
     progress(20)
     lang = LANGS.get(a.lang) if a.lang and a.lang != "auto" else None
     # Long files: transcribe in pieces so progress moves and memory stays flat.

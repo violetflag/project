@@ -353,7 +353,8 @@ fn qwen_setup(handle: tauri::AppHandle, app: St<'_>) -> Result<(), String> {
     let tag = "qwen-setup".to_string();
     let gen = app.jobs.generation(&tag);
     std::thread::spawn(move || {
-        let r = qwen::setup(&app.data_dir, &app.jobs, &tag, gen, |p, m| emit(&handle, "qwen", "qwen-setup", p, "running", m, Value::Null));
+        let gpus = app.hw().gpus;
+        let r = qwen::setup(&app.data_dir, &gpus, &app.jobs, &tag, gen, |p, m| emit(&handle, "qwen", "qwen-setup", p, "running", m, Value::Null));
         match r {
             Ok(_) => emit(&handle, "qwen", "qwen-setup", 100.0, "done", "", Value::Null),
             Err(e) => emit(&handle, "qwen", "qwen-setup", 0.0, if e == CANCELLED { "cancelled" } else { "error" }, &e, Value::Null),

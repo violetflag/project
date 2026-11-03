@@ -5,6 +5,8 @@ const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
   plugins: [preact()],
+  // Own (empty) PostCSS config so a postcss.config in a parent folder is never picked up.
+  css: { postcss: {} },
   clearScreen: false,
   build: { target: "es2022" },
   server: {
