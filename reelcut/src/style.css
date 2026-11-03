@@ -208,10 +208,12 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .screen .ov { z-index: 2; object-fit: contain; }
 .screen .ov3 { z-index: 3; }
 .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px; z-index: 5; }
+.overlay.no-preview { background: var(--sunk); color: var(--muted); font-size: var(--fs); line-height: 1.6; }
 .caption { position: absolute; left: 6%; right: 6%; text-align: center; font-weight: 700; text-shadow: 0 0 3px #000, 0 0 3px #000, 0 0 6px #000; line-height: 1.25; pointer-events: none; z-index: 6; }
 .caption.bottom { bottom: 7%; } .caption.middle { top: 45%; } .caption.top { top: 7%; }
 .hint360 { position: absolute; left: 8px; top: 8px; background: #000b; padding: 2px 8px; border-radius: 4px; font-size: var(--fs-xs); pointer-events: none; z-index: 7; }
 .hint-r { position: absolute; right: 8px; top: 8px; background: #000b; padding: 2px 8px; border-radius: 4px; font-size: var(--fs-xs); pointer-events: none; z-index: 7; color: var(--warn); }
+.hint-r.info { color: var(--muted); right: auto; left: 50%; transform: translateX(-50%); top: auto; bottom: 8px; }
 .safe { position: absolute; inset: 0; pointer-events: none; z-index: 8; }
 .safe-action { position: absolute; inset: 5%; border: 1px dashed #ffffff70; }
 .safe-title { position: absolute; inset: 10%; border: 1px dashed #ffffff40; }
@@ -425,3 +427,21 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .compact-mark { display: flex; align-items: center; gap: 8px; color: var(--faint); font-size: var(--fs-xs); }
 .compact-mark::before, .compact-mark::after { content: ""; flex: 1; height: 1px; background: var(--line2); }
 .settings h3.sub { font-size: var(--fs); margin: 14px 0 2px; }
+
+/* Saved prompts (AI panel) */
+.msg.user { position: relative; }
+.msg-save { position: absolute; left: -6px; top: 50%; transform: translate(-100%, -50%); padding: 2px 7px; font-size: var(--fs-xs); opacity: 0; transition: opacity .12s; }
+.msg.user:hover .msg-save, .msg-save:focus-visible { opacity: 1; }
+.prompt-lib { border-top: 1px solid var(--line); background: var(--panel); padding: 8px; max-height: 45%; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+.prompt-lib-head { display: flex; align-items: center; gap: 4px; font-size: var(--fs-s); }
+.prompt-naming input { flex: 1; min-width: 0; }
+.prompt-empty { margin: 4px 0; font-size: var(--fs-s); }
+.prompt-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.prompt-row { display: flex; align-items: center; gap: 4px; }
+.prompt-row.editing { flex-direction: column; align-items: stretch; background: var(--panel2); padding: 6px; border-radius: var(--r); }
+.prompt-use { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; text-align: left; white-space: normal; padding: 5px 8px; }
+.prompt-name { font-weight: 600; }
+.prompt-text { font-size: var(--fs-xs); width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer .icon-btn { align-self: flex-end; }
+.prompt-lib-head b, .agent-sub .conn { white-space: nowrap; }
+.prompt-lib-head .muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-xs); }

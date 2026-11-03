@@ -1,7 +1,7 @@
 // Pure edit operations on drafts (no I/O), so they can be unit-tested and shared by the
 // editor and the AI agent.
 
-import type { Asset, CaptionStyle, Clip, ColorAdj, Draft, Lens, MusicClip, Overlay, Plan, PlanOverlay, Seg, ShrinkSettings, TrackId, Transform, View, ViewKey, Word } from "./types";
+import type { Asset, CaptionStyle, Clip, ColorAdj, Draft, Lens, MediaInfo, MusicClip, Overlay, Plan, PlanOverlay, Seg, ShrinkSettings, TrackId, Transform, View, ViewKey, Word } from "./types";
 
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 export const clamp = (x: number, a: number, b: number) => Math.min(b, Math.max(a, x));
@@ -29,6 +29,36 @@ export const trackState = (d: Draft, t: TrackId) => d.tracks?.[t] ?? {};
 export const audioTrack = (m: MusicClip) => m.track ?? 2;
 
 export const is360 = (a?: Asset) => !!a && a.info.layout360 !== "none" && a.info.kind === "video";
+
+/**
+ * Whether the WebView's video element can decode a file itself. The rest (an Osmo .osv's two lens
+ * tracks, 10-bit H.264, ProRes, MPEG-TS…) goes through the live preview (src-tauri/src/live.rs).
+ * HEVC plays only with the system's HEVC extension (`hevc`).
+ */
+export function playableInWebView(info: MediaInfo, hevc: boolean): boolean {
+  if (info.kind !== "video") return true;
+  if (info.layout360 === "dual" || info.videos.length > 1) return false;
+  if (["avi", "mts", "m2ts", "ts", "mxf", "wmv", "flv", "mpg", "mpeg", "3gp", "insv", "360"].includes(info.ext)) return false;
+  switch (info.vcodec) {
+    case "h264": return (info.bit_depth || 8) <= 8;
+    case "vp8": case "vp9": case "av1": return true;
+    case "hevc": return hevc;
+    default: return false;
+  }
+}
+
+/**
+ * What the preview plays for a file; nothing is converted ahead of time. `live`: ffmpeg decodes the
+ * original as it plays (an .osv's lenses stitched into a sphere on the way); otherwise the WebView
+ * plays the file and WebGL draws a 360 one flat (two side-by-side fisheyes shown unstitched).
+ */
+export type PreviewSrc = { live: boolean; path: string; proj: "flat" | "equirect" | "dfisheye"; fov: number; swap: boolean };
+export function previewSource(a: Asset, live = false): PreviewSrc {
+  const lens = { fov: a.lens?.fov ?? 190, swap: a.lens?.swap ?? false };
+  const l = a.info.kind === "video" ? a.info.layout360 : "none";
+  if (a.info.kind === "video" && (live || l === "dual")) return { live: true, path: a.info.path, proj: l === "none" ? "flat" : "equirect", ...lens };
+  return { live: false, path: a.info.path, proj: l === "equirect" || l === "dfisheye" ? l : "flat", ...lens };
+}
 export function defaultLens(a: Asset): Lens {
   return a.lens ?? { layout: a.info.layout360 === "none" ? "none" : a.info.layout360, swap: false, fov: 190 };
 }

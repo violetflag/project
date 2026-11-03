@@ -22,6 +22,12 @@ export function titleFrom(text: string): string {
   return t.length > 30 ? t.slice(0, 29) + "…" : t || "새 대화";
 }
 
+/** The default name of a saved prompt: its first ~20 characters. */
+export function promptName(text: string): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  return t.length > 20 ? t.slice(0, 20) + "…" : t;
+}
+
 /** Older projects had one conversation in `chat`/`ccSession`; it becomes the first session. */
 export function migrateChats(p: Project): Project {
   if (p.chats?.length) {

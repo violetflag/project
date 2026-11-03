@@ -925,26 +925,6 @@ pub fn motion_for(dir: &Path, ffmpeg: &Path, ffprobe: &Path, jobs: &Jobs, tag: &
     }
 }
 
-/// The stabilised, seam-aligned 2048×1024 sphere of a whole recording (the editing proxy).
-#[allow(clippy::too_many_arguments)]
-pub fn render_proxy(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo, lens: &Lens, m: Option<&Motion>, h264: &str, out: &Path, on: impl Fn(f64)) -> Result<(), String> {
-    let src = source_for(info, lens, 0.0, 0.0, Some(1024), true);
-    let s = crate::stitch::params(lens);
-    let stab = stab_of(lens);
-    let flow = s.flow;
-    let mut st = Stitcher::new(&s, src.n() as f64, 2048, 1024, flow, rs_of(m, &stab));
-    let tg = m.map(|m| targets(m, &stab)).unwrap_or_default();
-    let view = |_t: f64| (I3, None);
-    let setup = setup_fn(m, &tg, 0, &stab, &view);
-    let mut args: Vec<String> = vec!["-i".into(), src.path.clone(), "-map".into(), "0:v".into(), "-map".into(), "1:a:0?".into()];
-    args.extend(crate::media::proxy_venc(h264, src.fps));
-    args.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000", "-shortest", "-movflags", "+faststart", "-f", "mp4"].iter().map(|x| x.to_string()));
-    args.push(out.to_string_lossy().into_owned());
-    let total = (info.duration * src.fps).max(1.0);
-    pano::run::<u8>(ffmpeg, jobs, tag, gen, &src, &mut st, &setup, Sink::Encode { args }, |k| on(k as f64 / total))?;
-    Ok(())
-}
-
 /// One timeline clip of a 360 recording rendered flat at w×h through the engine: source
 /// seconds `start`..`start+dur` at the source's frame rate, the view following `view_at(t)` where
 /// t is in output seconds (source seconds / speed). Sound copied along as PCM.
@@ -1158,10 +1138,5 @@ mod tests {
         println!("frames {n0}/{n1}, mean frame change raw {j0:.2}, stabilised {j1:.2}");
         assert!(n0 >= 89 && n1 >= 89);
         assert!(j1 < j0 * 0.5, "{j1} vs {j0}");
-        // The proxy through the engine.
-        let p = work.join("proxy.mp4");
-        render_proxy(&ffmpeg, &jobs, "t", 0, &info, &st, Some(&m), "libx264", &p, |_| {}).unwrap();
-        let c = crate::probe::check(&ffprobe, &p.to_string_lossy()).unwrap();
-        assert!((c.duration - 4.0).abs() < 0.2, "{}", c.duration);
     }
 }

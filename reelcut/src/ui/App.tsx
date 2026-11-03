@@ -2,7 +2,7 @@ import { Film, Home as HomeIcon, Minus, Settings as Gear, Square, X } from "luci
 import { useEffect } from "preact/hooks";
 import { api, onFileDrop, windowCmd } from "../api";
 import { handleKey } from "../commands";
-import { createProject, importPaths, initJobs, loadProjects, loadSettings, refreshModels, refreshCc, refreshQwen, saveNow, set, st, useStore } from "../store";
+import { createProject, importPaths, initJobs, loadProjects, loadPrompts, loadSettings, refreshModels, refreshCc, refreshQwen, saveNow, set, st, useStore } from "../store";
 import { ExportDialog } from "./ExportDialog";
 import { Home, NewProjectDialog } from "./Home";
 import { MenuBar } from "./MenuBar";
@@ -20,6 +20,7 @@ async function boot() {
   await initJobs();
   await loadSettings();
   await loadProjects();
+  loadPrompts();
   refreshModels();
   refreshQwen(false);
   refreshCc();

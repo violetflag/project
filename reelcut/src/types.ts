@@ -38,12 +38,6 @@ export type Asset = {
   info: MediaInfo;
   /** Bin folder ("" = top). */
   folder: string;
-  proxy?: string | null;
-  proxyState?: JobState;
-  proxyPct?: number;
-  proxyError?: string;
-  /** What the proxy job is doing now ("흔들림 분석" while the motion is worked out). */
-  proxyStage?: string;
   lens?: Lens;
   /** Seam calibration of a two-lens 360 file is running. */
   stitching?: boolean;
@@ -197,7 +191,6 @@ export type Settings = {
   whisperModel: string;
   lang: string;
   exportDir: string;
-  autoProxy: boolean;
   autoTranscribe: boolean;
   /** Export presets saved by the user. */
   exportPresets?: SavedExport[];
@@ -209,6 +202,9 @@ export type Settings = {
 };
 
 export type SavedExport = { id: string; label: string; choice: Record<string, unknown> };
+
+/** An AI request kept for reuse (app store "prompts", shared by every project). */
+export type SavedPrompt = { id: string; name: string; text: string; created: number; updated: number };
 
 export type ShrinkSettings = { codec: string; crf: number; speed: number; fps: string; res: string; denoise: number; acodec: string; abr: number; container: string; screen: boolean; vfr: boolean };
 

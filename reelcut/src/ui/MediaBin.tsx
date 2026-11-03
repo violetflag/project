@@ -4,7 +4,7 @@ import { Check, Flag, FolderPlus, LayoutGrid, List, Music, Plus, Star, X as XIco
 import { useEffect, useState } from "preact/hooks";
 import { api, fileSrc, pickFiles } from "../api";
 import { draftDuration, fmtTC, insertClips, is360, newClip, overlays, uid } from "../edit";
-import { draft, editDraft, ensureStrip, importPaths, mutate, patchAsset, set, startProxy, startTranscribe, toast, useStore } from "../store";
+import { draft, editDraft, ensureStrip, importPaths, mutate, patchAsset, set, startTranscribe, toast, useStore } from "../store";
 import type { Asset } from "../types";
 import { player } from "./Viewer";
 
@@ -18,9 +18,7 @@ function Badges({ a }: { a: Asset }) {
     <div class="badges">
       {is360(a) && <span class="b b360">360</span>}
       {a.info.ext && ["osv", "lrf", "lrv"].includes(a.info.ext) && <span class="b">{a.info.ext.toUpperCase()}</span>}
-      {a.info.lrf && <span class="b" title={`미리보기용 짝 파일: ${a.info.lrf}`}>LRF 짝</span>}
-      {a.proxyState === "running" && <span class="b busy">{a.proxyStage ? "흔들림 분석" : "미리보기"} {Math.round(a.proxyPct ?? 0)}%</span>}
-      {a.proxyState === "error" && <span class="b err" title={a.proxyError}>미리보기 실패</span>}
+      {a.info.lrf && <span class="b" title={`저용량 짝 파일 (썸네일에 씀): ${a.info.lrf}`}>LRF 짝</span>}
       {a.tState === "running" && <span class="b busy">받아쓰기 {Math.round(a.tPct ?? 0)}%</span>}
       {a.words && <span class="b ok">대본</span>}
       {a.tState === "error" && <span class="b err" title={a.tError}>받아쓰기 실패</span>}
@@ -238,7 +236,6 @@ export function MediaBin() {
           <button role="menuitem" onClick={() => { setTagging(m.id); setMenu(null); }}>태그 달기…</button>
           <div class="menu-sep" />
           <button role="menuitem" onClick={() => { targets.forEach((id) => startTranscribe(id)); setMenu(null); }}>{m.words ? "다시 받아쓰기" : "받아쓰기"}</button>
-          <button role="menuitem" onClick={() => { targets.forEach((id) => { patchAsset(id, { strip: undefined }); startProxy(id); }); setMenu(null); }}>미리보기 파일 다시 만들기</button>
           {m.tState === "running" && <button role="menuitem" onClick={() => { api.cancel(`transcribe:${m.id}`); setMenu(null); }}>받아쓰기 취소</button>}
           <button role="menuitem" onClick={() => { api.reveal(m.info.path); setMenu(null); }}>탐색기에서 보기</button>
           {s.folder && <button role="menuitem" onClick={() => { mutate((pp) => ({ ...pp, assets: pp.assets.map((a) => (targets.includes(a.id) ? { ...a, folder: "" } : a)) })); setMenu(null); }}>맨 위 폴더로</button>}

@@ -42,20 +42,18 @@ fn itest_real_ffmpeg() {
     let song = media::inspect(&ffprobe, &fx.join("song.mp3").to_string_lossy()).unwrap();
     assert_eq!(song.kind, "audio");
 
-    // proxies
-    for (info, lens) in [(&osv, Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: None, stab: None }), (&walk, Lens { layout: "none".into(), swap: false, fov: 190.0, stitch: None, stab: None }), (&song, Lens::default())] {
-        let plan = media::proxy_plan(info, &lens, "libx264", &work, &info.name.replace('.', "_")).unwrap();
-        ff::run_ffmpeg(&jobs, "p", jobs.generation("p"), &ffmpeg, &plan.args, |_| {}).unwrap_or_else(|e| panic!("proxy {}: {e}", info.name));
-        println!("proxy {} -> {} ({:.2}s)", info.name, plan.out.display(), dur(&plan.out));
-        assert!(dur(&plan.out) > 1.0);
-    }
     let lrf = media::inspect(&ffprobe, &fx.join("CAM_0001.LRF").to_string_lossy()).unwrap();
     assert_eq!(lrf.layout360, "dfisheye", "LRF alone is side-by-side fisheye");
 
-    // frames + contact sheet on the equirect proxy
-    let eq = work.join("CAM_0001_OSV.mp4");
-    let shots = media::frames(&ffmpeg, &media::FrameReq { path: eq.to_string_lossy().into_owned(), times: vec![1.0, 2.0], width: Some(320), view: Some(View { yaw: 30.0, pitch: 0.0, roll: 0.0, hfov: 90.0 }) }).unwrap();
-    assert_eq!(shots.len(), 2);
+    // frames for the agent straight from the 360 files (no preview copy): the .osv's two tracks and its .lrf
+    let ahead = View { yaw: 30.0, pitch: 0.0, roll: 0.0, hfov: 90.0 };
+    for (info, layout) in [(&osv, "dual"), (&lrf, "dfisheye")] {
+        let lens = Lens { layout: layout.into(), swap: false, fov: 190.0, stitch: None, stab: None };
+        let shots = media::frames(&ffmpeg, &media::FrameReq { path: info.path.clone(), times: vec![1.0, 2.0], width: Some(320), view: Some(ahead.clone()), lens: Some(lens) }).unwrap();
+        assert_eq!(shots.len(), 2, "{}", info.name);
+    }
+    let plain = media::frames(&ffmpeg, &media::FrameReq { path: walk.path.clone(), times: vec![0.5], width: Some(320), view: None, lens: None }).unwrap();
+    assert_eq!(plain.len(), 1);
     let sheet = media::contact_sheet(&ffmpeg, &walk.path, 0.0, 1.0, 3, 2, 160).unwrap();
     assert!(sheet.len() > 1000);
 

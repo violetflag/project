@@ -289,9 +289,9 @@ async function run(name: string, inp: any): Promise<Out> {
       const a = getAsset(inp.asset_id);
       const times = (inp.times as number[]).slice(0, 8);
       const r360 = is360(a);
-      if (r360 && !a.proxy) return "360 영상의 미리보기 파일을 아직 만드는 중입니다. 잠시 뒤 다시 하세요.";
-      const path = r360 ? a.proxy! : a.info.kind === "image" ? a.info.path : a.proxy || a.info.path;
-      const shots = await api.frames(path, times, 768, r360 ? { yaw: 0, pitch: 0, roll: 0, hfov: 100, ...(inp.view ?? {}) } : undefined);
+      // 360: a flat view straight from the original (an .osv's two lens tracks put side by side).
+      const lens = r360 ? { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 } : undefined;
+      const shots = await api.frames(a.info.path, times, 768, r360 ? { yaw: 0, pitch: 0, roll: 0, hfov: 100, ...(inp.view ?? {}) } : undefined, lens);
       return shots.flatMap((b, i) => [{ type: "text", text: `${a.info.name} ${r3(times[i])}초` }, img(b)]);
     }
     case "contact_sheet": {
@@ -299,9 +299,10 @@ async function run(name: string, inp: any): Promise<Out> {
       const cols = Math.min(6, inp.cols ?? 5), rows = Math.min(6, inp.rows ?? 4);
       const start = inp.start ?? 0;
       const every = inp.every ?? Math.max(1, (a.info.duration - start) / (cols * rows));
-      const path = a.proxy && a.info.kind === "video" ? a.proxy : a.info.path;
+      // An .osv's .lrf (both lenses side by side) reads quicker than the full-size original.
+      const path = a.info.layout360 === "dual" && a.info.lrf ? a.info.lrf : a.info.path;
       const b = await api.contactSheet(path, start, every, cols, rows, 240);
-      return [{ type: "text", text: `${a.info.name}: ${r3(start)}초부터 ${r3(every)}초 간격, ${cols}×${rows}칸 (왼쪽 위부터 오른쪽으로)${is360(a) ? " — 360 영상이라 전체 구가 펼쳐진 그림입니다(가운데가 정면)" : ""}` }, img(b)];
+      return [{ type: "text", text: `${a.info.name}: ${r3(start)}초부터 ${r3(every)}초 간격, ${cols}×${rows}칸 (왼쪽 위부터 오른쪽으로)${is360(a) ? " — 360 원본의 어안 렌즈 그림이라 둥글게 휘어 보입니다. 특정 방향은 view_frames로 보세요" : ""}` }, img(b)];
     }
     case "create_draft": {
       let d = newDraft(String(inp.name || "새 편집본"), inp.aspect || "16:9");

@@ -177,7 +177,6 @@ export function SettingsView() {
 
       <section>
         <h2>미디어와 내보내기</h2>
-        <label class="check"><input type="checkbox" checked={cfg.autoProxy} onChange={(e) => saveSettings({ autoProxy: (e.target as HTMLInputElement).checked })} /> 가져올 때 미리보기 파일(프록시) 만들기 — 큰 파일·360 영상도 부드럽게 재생</label>
         <label>기본 내보내기 폴더
           <div class="row">
             <input value={cfg.exportDir || s.info?.videosDir || ""} readOnly style="flex:1" />

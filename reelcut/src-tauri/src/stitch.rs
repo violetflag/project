@@ -144,7 +144,8 @@ pub fn back_angles(view: &View, s: &Stitch) -> (f64, f64, f64) {
 pub enum Out<'a> {
     /// A flat view, w×h.
     Flat { view: &'a View, w: u32, h: u32 },
-    /// The whole sphere, equirectangular w×h (the playback proxy).
+    /// The whole sphere, equirectangular w×h (kept for the tests and a later full-sphere export).
+    #[allow(dead_code)]
     Equi { w: u32, h: u32 },
 }
 
@@ -205,7 +206,7 @@ fn commands(m: &Moves, w: u32, h: u32, targets: &[(&str, &dyn Fn(&View) -> (f64,
 }
 
 /// Graph text that makes the stitched picture `[name]` from input `i`. `pre` runs first on each
-/// lens stream (the clip's speed), `scale_each` shrinks each fisheye first (the proxy).
+/// lens stream (the clip's speed), `scale_each` shrinks each fisheye first.
 pub fn graph(i: usize, lens: &Lens, scale_each: Option<u32>, pre: &str, out: &Out, moves: Option<&Moves>, name: &str) -> String {
     let s = params(lens);
     let f = s.fov.clamp(181.0, 260.0);
@@ -645,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn swapped_side_by_side_and_proxy() {
+    fn swapped_side_by_side_to_sphere() {
         let mut l = lens("dfisheye");
         l.swap = true;
         l.stitch = Some(Stitch { gain_a: [1.05, 1.0, -2.0], ..Default::default() });
@@ -771,12 +772,7 @@ mod itest {
         run(&["-y", "-loglevel", "error", "-i", &out("ref.png").to_string_lossy(), "-i", &out("old.png").to_string_lossy(), "-i", &out("blend.png").to_string_lossy(), "-i", &out("stitched.png").to_string_lossy(), "-filter_complex", "[0][1]hstack[a];[2][3]hstack[b];[a][b]vstack", &out("compare.png").to_string_lossy()]);
         assert!((cal.fov - 193.0).abs() < 0.6 && (cal.yaw - 1.0).abs() < 0.4 && (cal.pitch + 0.7).abs() < 0.4 && (cal.roll - 0.4).abs() < 0.4, "{cal:?}");
         assert!(ps > po + 1.0, "stitched {ps} vs hard seam {po}");
-        // the proxy (LRF, whole sphere) and a moving export view run too
-        let plan = crate::media::proxy_plan(&info, &lens, "libx264", &work, "osv_proxy").unwrap();
-        let mut a: Vec<&str> = vec!["-y", "-loglevel", "error"];
-        a.extend(plan.args.iter().map(|s| s.as_str()));
-        run(&a);
-        run(&["-y", "-loglevel", "error", "-ss", "2", "-i", &plan.out.to_string_lossy(), "-frames:v", "1", &out("proxy.png").to_string_lossy()]);
+        // a moving export view runs too
         let m = Moves { v0: View { yaw: 60.0, ..view.clone() }, steps: (1..30).map(|k| (k as f64 / 15.0, View { yaw: 60.0 + k as f64 * 2.0, ..view.clone() })).collect() };
         let g = graph(0, &lens, None, "setpts=PTS-STARTPTS", &Out::Flat { view: &view, w: 640, h: 360 }, Some(&m), "mv") + ";[mv]null[o]";
         run(&["-y", "-loglevel", "error", "-i", &osv, "-t", "2", "-filter_complex", &g, "-map", "[o]", "-c:v", "libx264", "-preset", "ultrafast", &out("moving.mp4").to_string_lossy()]);

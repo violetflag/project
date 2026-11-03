@@ -50,13 +50,16 @@ export const api = {
   storeList: (prefix: string) => invoke<string[]>("store_list", { prefix }),
   expandPaths: (paths: string[]) => invoke<[string, string][]>("expand_paths", { paths }),
   inspect: (path: string) => invoke<MediaInfo>("inspect", { path }),
-  makeProxy: (id: string, info: MediaInfo, lens: Lens) => invoke<string | null>("make_proxy", { id, info, lens }),
+  analyzeMotion: (id: string, info: MediaInfo, lens: Lens) => invoke<void>("analyze_motion", { id, info, lens }),
+  /** A live preview stream ("stream") or still frame ("frame") of a file the WebView cannot play. */
+  liveUrl: (req: { slot: string; info: MediaInfo; lens: Lens | null; t: number; kind: "stream" | "frame"; rate?: number }) => invoke<string>("live_url", { req }),
+  liveStop: (slot: string) => invoke<boolean>("live_stop", { slot }),
   calibrate360: (info: MediaInfo, lens: Lens) => invoke<Stitch>("calibrate_360", { info, lens }),
   motionInfo: (path: string) => invoke<MotionInfo | null>("motion_info", { path }),
   filmstrip: (path: string, duration: number, count: number) => invoke<string>("filmstrip", { path, duration, count }),
   poster: (path: string, at: number) => invoke<string>("poster", { path, at }),
   waveform: (path: string) => invoke<number[]>("waveform", { path }),
-  frames: (path: string, times: number[], width?: number, view?: View) => invoke<string[]>("frames", { req: { path, times, width: width ?? null, view: view ?? null } }),
+  frames: (path: string, times: number[], width?: number, view?: View, lens?: Lens) => invoke<string[]>("frames", { req: { path, times, width: width ?? null, view: view ?? null, lens: lens ?? null } }),
   contactSheet: (path: string, start: number, every: number, cols: number, rows: number, tileW: number) =>
     invoke<string>("contact_sheet", { path, start, every, cols, rows, tileW }),
   whisperModels: () => invoke<ModelInfo[]>("whisper_models"),

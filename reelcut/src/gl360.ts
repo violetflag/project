@@ -1,6 +1,7 @@
-// Flat view of an equirectangular picture, drawn with WebGL. The math is the same as ffmpeg's
-// v360 filter (output=flat, yaw/pitch/roll quaternion in "ypr" order), so what the preview shows
-// is what the export makes.
+// Flat view of a 360 picture, drawn with WebGL: an equirectangular sphere, or two fisheye lenses
+// side by side (an Osmo .lrf, shown unstitched). The math is the same as ffmpeg's v360 filter
+// (output=flat, yaw/pitch/roll quaternion in "ypr" order; input=dfisheye puts the front lens on
+// the right half and the back lens mirrored on the left), so the preview looks where the export does.
 import type { View } from "./types";
 
 type Q = [number, number, number, number]; // w x y z
@@ -31,9 +32,27 @@ export function flatToEquirect(u: number, v: number, view: View, aspect: number)
   return [(phi / Math.PI + 1) / 2, (theta / (Math.PI / 2) + 1) / 2];
 }
 
+/**
+ * Direction → texture coordinate on two side-by-side fisheyes of `fov` degrees each (v360
+ * input=dfisheye). null = outside both lens circles.
+ */
+export function dirToDfisheye(x: number, y: number, z: number, fov: number, swap = false): [number, number] | null {
+  const h = Math.hypot(x, y);
+  const r = Math.acos(Math.min(1, Math.abs(z))) / Math.PI / (fov / 360);
+  if (r > 1) return null;
+  const fx = 0.5 + 0.5 * r * (h > 0 ? x / h : 0), fy = 0.5 + 0.5 * r * (h > 0 ? y / h : 0);
+  let u = z >= 0 ? 0.5 + fx * 0.5 : (1 - fx) * 0.5;
+  if (swap) u = (u + 0.5) % 1;
+  return [u, fy];
+}
+
+/** How the picture on the texture is laid out. */
+export type Proj = { kind: "equirect" } | { kind: "dfisheye"; fov: number; swap: boolean };
+
 const VS = `attribute vec2 p; varying vec2 uv; void main(){ uv = vec2(p.x*0.5+0.5, 0.5-p.y*0.5); gl_Position = vec4(p,0.0,1.0); }`;
 const FS = `precision highp float;
 varying vec2 uv; uniform sampler2D tex; uniform vec4 q; uniform vec2 rng;
+uniform float fish; uniform float frng; uniform float swp;
 vec4 qm(vec4 a, vec4 b){ return vec4(
   a.x*b.x - a.y*b.y - a.z*b.z - a.w*b.w,
   a.x*b.y + a.y*b.x + a.z*b.w - a.w*b.z,
@@ -42,9 +61,20 @@ vec4 qm(vec4 a, vec4 b){ return vec4(
 void main(){
   vec3 d = normalize(vec3(rng.x*(2.0*uv.x-1.0), rng.y*(2.0*uv.y-1.0), 1.0));
   vec4 r = qm(qm(q, vec4(0.0, d)), vec4(q.x, -q.yzw));
-  float phi = atan(r.y, r.w);
-  float th = asin(clamp(r.z, -1.0, 1.0));
-  vec2 t = vec2((phi/3.14159265 + 1.0)*0.5, (th/1.5707963 + 1.0)*0.5);
+  vec2 t;
+  if (fish > 0.5) {
+    vec3 v = r.yzw;
+    float h = length(v.xy);
+    float k = acos(min(1.0, abs(v.z))) / 3.14159265 / frng;
+    if (k > 1.0) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+    vec2 f = 0.5 + 0.5 * k * (h > 0.0 ? v.xy / h : vec2(0.0));
+    t = vec2(v.z >= 0.0 ? 0.5 + f.x * 0.5 : (1.0 - f.x) * 0.5, f.y);
+    if (swp > 0.5) t.x = fract(t.x + 0.5);
+  } else {
+    float phi = atan(r.y, r.w);
+    float th = asin(clamp(r.z, -1.0, 1.0));
+    t = vec2((phi/3.14159265 + 1.0)*0.5, (th/1.5707963 + 1.0)*0.5);
+  }
   gl_FragColor = texture2D(tex, t);
 }`;
 
@@ -82,7 +112,7 @@ export class Flat360 {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   }
-  draw(src: TexImageSource, view: View) {
+  draw(src: TexImageSource, view: View, proj: Proj = { kind: "equirect" }) {
     const { gl, canvas } = this;
     const w = canvas.clientWidth * devicePixelRatio, h = canvas.clientHeight * devicePixelRatio;
     if (canvas.width !== Math.round(w) || canvas.height !== Math.round(h)) { canvas.width = Math.round(w); canvas.height = Math.round(h); }
@@ -94,6 +124,10 @@ export class Flat360 {
     const tx = Math.tan((Math.max(20, Math.min(160, view.hfov)) * Math.PI) / 360);
     gl.uniform4f(gl.getUniformLocation(this.prog, "q"), q[0], q[1], q[2], q[3]);
     gl.uniform2f(gl.getUniformLocation(this.prog, "rng"), tx, (tx * canvas.height) / Math.max(1, canvas.width));
+    const fish = proj.kind === "dfisheye";
+    gl.uniform1f(gl.getUniformLocation(this.prog, "fish"), fish ? 1 : 0);
+    gl.uniform1f(gl.getUniformLocation(this.prog, "frng"), fish ? proj.fov / 360 : 1);
+    gl.uniform1f(gl.getUniformLocation(this.prog, "swp"), fish && proj.swap ? 1 : 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 }

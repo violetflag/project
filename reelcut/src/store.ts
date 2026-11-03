@@ -1,9 +1,10 @@
 // App state: one module-level store, components re-render through useStore().
 import { useEffect, useReducer } from "preact/hooks";
 import { api, onJob, type AppInfo, type CcStatus, type ModelInfo, type QwenStatus } from "./api";
-import { CTX_DEFAULTS, migrateChats, newSession } from "./chats";
+import { CTX_DEFAULTS, migrateChats, newSession, promptName } from "./chats";
+export { promptName };
 import { draftDuration, newDraft, refineWords, rippleConnected, uid } from "./edit";
-import type { Asset, ChatSession, Draft, JobEvent, Lens, Project, Settings, Word } from "./types";
+import type { Asset, ChatSession, Draft, JobEvent, Lens, Project, SavedPrompt, Settings, Word } from "./types";
 
 export type Meta = { id: string; name: string; updated: number; created: number; assets: number; drafts: number; duration: number; poster?: string; clips: number };
 export type ExportJob = { id: string; draft: string; pct: number; state: string; message: string; out: string; result?: any; left?: number; name?: string };
@@ -15,7 +16,7 @@ export type Workspace = "edit" | "transcript" | "r360";
 export type AiRun = { id: string; chat: string; at: number; prompt: string; before: Draft[]; after?: Draft[]; draftId: string | null; done: boolean; undone?: boolean };
 
 export const DEFAULT_SETTINGS: Settings = {
-  aiMode: "account", apiKey: "", model: "claude-opus-5-5", effort: "high", engine: "whisper", whisperModel: "turbo", lang: "ko", exportDir: "", autoProxy: true, autoTranscribe: true,
+  aiMode: "account", apiKey: "", model: "claude-opus-5-5", effort: "high", engine: "whisper", whisperModel: "turbo", lang: "ko", exportDir: "", autoTranscribe: true,
   ...CTX_DEFAULTS,
 };
 
@@ -58,13 +59,17 @@ type S = {
   showSafe: boolean;
   /** Timeline shows where silence removal would cut. */
   showSilence: boolean;
+  /** 360 motion analysis running, by asset id: percent. */
+  motion: Record<string, number>;
+  /** AI requests saved for reuse (all projects). */
+  prompts: SavedPrompt[];
 };
 
 export const st: S = {
   route: "home", projects: [], project: null, draftId: null, sourceId: null, folder: "", playhead: 0, selClip: null,
   settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, ccConnect: null, qwenSetup: null, downloads: {}, exportJob: null, toast: "",
   agentBusy: false, agentStatus: "", rightTab: "inspect", leftTab: "media",
-  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, dialog: "", showSafe: false, showSilence: false,
+  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, dialog: "", showSafe: false, showSilence: false, motion: {}, prompts: [],
 };
 
 const subs = new Set<() => void>();
@@ -105,7 +110,7 @@ export async function saveNow() {
   clearTimeout(saveT);
   const p = st.project;
   if (!p) return;
-  const clean: Project = { ...p, assets: p.assets.map((a) => ({ ...a, proxyState: a.proxyState === "running" ? "idle" : a.proxyState, tState: a.tState === "running" ? "idle" : a.tState })) };
+  const clean: Project = { ...p, assets: p.assets.map((a) => ({ ...a, stitching: false, tState: a.tState === "running" ? "idle" : a.tState })) };
   await api.storeSet("project-" + p.id, JSON.stringify(clean));
   const meta = metaOf(p);
   set({ projects: [meta, ...st.projects.filter((m) => m.id !== p.id)].sort((a, b) => b.updated - a.updated), savedAt: Date.now() });
@@ -156,12 +161,15 @@ export async function openProject(id: string) {
   if (!raw) return toast("프로젝트를 찾을 수 없습니다");
   const p: Project = migrateChats(JSON.parse(raw));
   p.folders ??= [];
+  // Projects from before 2.5.0 carry preview-copy (proxy) fields; the preview plays the files now.
+  p.assets = p.assets.map(({ proxy: _p, proxyState: _s, proxyPct: _c, proxyError: _e, proxyStage: _g, ...a }: any) => a);
   if (!p.drafts.length) p.drafts.push(newDraft("첫 편집본"));
   undoStack.length = 0; redoStack.length = 0;
   set({ project: p, draftId: p.drafts[0].id, route: "project", sourceId: null, playhead: 0, selClip: null, selItem: null, folder: "", aiRuns: [] });
   // Resume work that was cut off when the app closed.
   for (const a of p.assets) {
-    if (st.settings.autoProxy && !a.proxy && a.info.kind !== "image") startProxy(a.id);
+    prepare360(a.id);
+    if (st.settings.autoTranscribe && a.info.has_audio && !a.words && (a.tState === "idle" || a.tState === "running")) startTranscribe(a.id);
     // Transcripts made before word-time repair existed.
     if (a.words?.length && !a.refined) refineAsset(a.id);
   }
@@ -260,8 +268,8 @@ export async function importPaths(paths: string[], folder = st.folder): Promise<
   if (!st.project || !paths.length) return [];
   const list = await api.expandPaths(paths);
   const have = new Set(st.project.assets.map((a) => a.info.path));
-  // An .lrf/.lrv next to an .osv/.mp4 of the same name is its low-res copy; it's used for the
-  // preview, not listed as its own clip.
+  // An .lrf/.lrv next to an .osv/.mp4 of the same name is its low-res copy (used for thumbnails),
+  // not listed as its own clip.
   const stems = new Set(list.map(([p]) => p.replace(/\.[^.\\/]+$/, "").toLowerCase()).filter((_, i) => !/\.(lrf|lrv)$/i.test(list[i][0])));
   const added: Asset[] = [];
   let skipped = 0;
@@ -271,14 +279,15 @@ export async function importPaths(paths: string[], folder = st.folder): Promise<
     try {
       const info = await api.inspect(path);
       const f = [folder, rel].filter(Boolean).join("/");
-      const a: Asset = { id: uid(), info, folder: f, proxyState: "idle", tState: "idle", added: Date.now() };
+      const a: Asset = { id: uid(), info, folder: f, tState: "idle", added: Date.now() };
       added.push(a);
       mutate((p) => ({ ...p, assets: [...p.assets, a], folders: f && !p.folders.includes(f) ? [...p.folders, f] : p.folders }));
       if (info.kind !== "audio") {
         api.poster(path, Math.min(1, info.duration / 3)).then((poster) => patchAsset(a.id, { poster })).catch(() => {});
       }
-      if (st.settings.autoProxy && info.kind !== "image") startProxy(a.id);
-      else if (st.settings.autoTranscribe && info.has_audio) startTranscribe(a.id);
+      // Nothing to wait for: the preview plays the file, transcription starts now.
+      prepare360(a.id);
+      if (st.settings.autoTranscribe && info.has_audio) startTranscribe(a.id);
     } catch (e) {
       toast(`가져오지 못했습니다: ${path.split(/[\\/]/).pop()} (${e})`);
     }
@@ -287,34 +296,40 @@ export async function importPaths(paths: string[], folder = st.folder): Promise<
   return added;
 }
 
-export async function startProxy(id: string) {
+/**
+ * Two-lens 360: lines the lenses up and matches their brightness (automatic stitching) for the
+ * export. Runs at import and again when the lens settings change; the preview does not wait for it.
+ */
+export async function prepare360(id: string) {
   const a = asset(id);
-  if (!a || a.info.kind === "image") return;
-  let lens: Lens = a.lens ?? { layout: a.info.layout360, swap: false, fov: 190 };
-  patchAsset(id, { proxyState: "running", proxyPct: 0, proxyError: "" });
-  // Two-lens 360: line the lenses up and match their brightness first (automatic stitching).
-  if ((lens.layout === "dual" || lens.layout === "dfisheye") && lens.stitch?.on !== false && !lens.stitch?.calibrated) {
-    patchAsset(id, { stitching: true });
-    try {
-      lens = { ...lens, stitch: await api.calibrate360(a.info, lens) };
-      patchAsset(id, { lens });
-    } catch (e) {
-      toast(`이음새 자동 맞춤을 못 했습니다 (기본값으로 이어 붙입니다): ${e}`);
-    }
-    patchAsset(id, { stitching: false });
-  }
+  if (!a || a.info.kind !== "video" || a.stitching) return;
+  const lens: Lens = a.lens ?? { layout: a.info.layout360, swap: false, fov: 190 };
+  if ((lens.layout !== "dual" && lens.layout !== "dfisheye") || lens.stitch?.on === false || lens.stitch?.calibrated) return;
+  patchAsset(id, { stitching: true });
   try {
-    const ready = await api.makeProxy(id, a.info, lens);
-    if (ready) onProxyDone(id, ready);
+    const stitch = await api.calibrate360(a.info, lens);
+    patchAsset(id, { lens: { ...(asset(id)?.lens ?? lens), stitch } });
   } catch (e) {
-    patchAsset(id, { proxyState: "error", proxyError: String(e) });
+    toast(`이음새 자동 맞춤을 못 했습니다 (기본값으로 이어 붙입니다): ${e}`);
   }
+  patchAsset(id, { stitching: false });
 }
 
-function onProxyDone(id: string, path: string) {
-  patchAsset(id, { proxy: path, proxyState: "done", proxyPct: 100 });
+/** Works out how a 360 camera moved (for stabilisation at export), in the background. */
+export async function analyzeMotion(id: string) {
   const a = asset(id);
-  if (a && st.settings.autoTranscribe && a.info.has_audio && !a.words && a.tState !== "running") startTranscribe(id);
+  if (!a || id in st.motion) return;
+  set({ motion: { ...st.motion, [id]: 0 } });
+  try {
+    await api.analyzeMotion(id, a.info, a.lens ?? { layout: a.info.layout360, swap: false, fov: 190 });
+  } catch (e) {
+    endMotion(id);
+    toast(`흔들림 분석 실패: ${e}`);
+  }
+}
+function endMotion(id: string) {
+  const { [id]: _, ...rest } = st.motion;
+  set({ motion: rest });
 }
 
 export async function startTranscribe(id: string) {
@@ -392,10 +407,13 @@ export async function initJobs() {
     if (e.state === "running" && Date.now() - lastPaint < 160) return;
     lastPaint = Date.now();
     switch (e.kind) {
-      case "proxy":
-        if (e.state === "running") patchAsset(e.id, { proxyState: "running", proxyPct: e.pct, proxyStage: e.message });
-        else if (e.state === "done") onProxyDone(e.id, e.result);
-        else patchAsset(e.id, { proxyState: e.state, proxyError: e.message });
+      case "motion":
+        if (e.state === "running") { if (e.id in st.motion) set({ motion: { ...st.motion, [e.id]: e.pct } }); }
+        else {
+          endMotion(e.id);
+          if (e.state === "done") toast(`흔들림 분석 완료: ${asset(e.id)?.info.name ?? ""}`);
+          else if (e.state === "error") toast(`흔들림 분석 실패: ${e.message}`);
+        }
         break;
       case "transcribe":
         if (e.state === "running") patchAsset(e.id, { tState: "running", tPct: e.pct });
@@ -434,9 +452,8 @@ const stripBusy = new Set<string>();
 /** A row of 30 frames across the whole media (timeline thumbnails), made once per file. */
 export async function ensureStrip(a: Asset) {
   if (a.strip || a.info.kind !== "video" || stripBusy.has(a.id)) return;
-  // 360 originals are two fisheye circles; their equirect proxy reads better as thumbnails.
-  const path = a.info.layout360 !== "none" ? a.proxy : a.info.path;
-  if (!path) return;
+  // An .osv's thumbnails come from its .lrf when there is one (both lenses, quick to read).
+  const path = a.info.layout360 === "dual" && a.info.lrf ? a.info.lrf : a.info.path;
   stripBusy.add(a.id);
   try { patchAsset(a.id, { strip: await api.filmstrip(path, a.info.duration, 30) }); } catch { /* keep the poster */ }
   finally { stripBusy.delete(a.id); }
@@ -462,4 +479,32 @@ export async function loadWave(a: Asset): Promise<Uint8Array | null> {
     set({});
     return w;
   } catch { return null; }
+}
+
+// ---------------------------------------------------------------- saved AI prompts
+
+export async function loadPrompts() {
+  try {
+    const raw = await api.storeGet("prompts");
+    if (raw) set({ prompts: JSON.parse(raw) });
+  } catch { /* none yet */ }
+}
+function savePrompts(prompts: SavedPrompt[]) {
+  set({ prompts });
+  api.storeSet("prompts", JSON.stringify(prompts)).catch((e) => toast(`프롬프트를 저장하지 못했습니다: ${e}`));
+}
+/** Keeps a request for reuse. */
+export function addPrompt(text: string, name?: string): SavedPrompt | null {
+  const t = text.trim();
+  if (!t) return null;
+  const now = Date.now();
+  const p: SavedPrompt = { id: uid(), name: (name ?? "").trim() || promptName(t), text: t, created: now, updated: now };
+  savePrompts([p, ...st.prompts]);
+  return p;
+}
+export function updatePrompt(id: string, patch: Partial<Pick<SavedPrompt, "name" | "text">>) {
+  savePrompts(st.prompts.map((p) => (p.id === id ? { ...p, ...patch, updated: Date.now() } : p)));
+}
+export function deletePrompt(id: string) {
+  savePrompts(st.prompts.filter((p) => p.id !== id));
 }

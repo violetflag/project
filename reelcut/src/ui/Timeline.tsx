@@ -76,7 +76,7 @@ export function Timeline() {
       if (a.info.has_audio && !waves.has(id)) loadWave(a);
       ensureStrip(a);
     }
-  }, [d?.clips.length, d?.music.length, d?.overlays?.length, s.project?.assets.filter((a) => a.proxy).length]);
+  }, [d?.clips.length, d?.music.length, d?.overlays?.length, s.project?.assets.length]);
 
   // Keep the playhead in view while playing.
   useEffect(() => {

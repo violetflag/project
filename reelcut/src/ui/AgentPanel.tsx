@@ -1,10 +1,10 @@
-import { LoaderCircle, Pencil, Plus, Sparkles, Trash2, Undo2 } from "lucide-preact";
+import { Bookmark, BookmarkPlus, LoaderCircle, Pencil, Plus, Send, Sparkles, Trash2, Undo2 } from "lucide-preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { ask, EFFORTS, MODELS, newChat, stopAgent, TOOL_LABEL } from "../agent";
 import { ctxLimit, fmtK, newSession, sessionsNewestFirst } from "../chats";
 import { draftDuration, fmtTC, overlays, starts } from "../edit";
-import { activeChat, mutate, mutateChat, set, setDrafts, st, toast, useStore, type AiRun } from "../store";
-import type { ChatBlock, ChatSession, Draft } from "../types";
+import { activeChat, addPrompt, deletePrompt, mutate, mutateChat, promptName, set, setDrafts, st, toast, updatePrompt, useStore, type AiRun } from "../store";
+import type { ChatBlock, ChatSession, Draft, SavedPrompt } from "../types";
 import { player } from "./Viewer";
 
 const SUGGEST = [
@@ -133,6 +133,67 @@ function Meter({ c }: { c: ChatSession }) {
   );
 }
 
+/** One saved prompt in the list: insert, send now, rename/edit, delete. */
+function PromptRow({ p, busy, onInsert, onSend }: { p: SavedPrompt; busy: boolean; onInsert: () => void; onSend: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(p.name);
+  const [body, setBody] = useState(p.text);
+  if (editing) {
+    const save = () => { if (body.trim()) { updatePrompt(p.id, { name: name.trim() || promptName(body), text: body.trim() }); setEditing(false); } };
+    return (
+      <li class="prompt-row editing">
+        <input value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} aria-label="프롬프트 이름" placeholder="이름" />
+        <textarea rows={3} value={body} onInput={(e) => setBody((e.target as HTMLTextAreaElement).value)} aria-label="프롬프트 내용" />
+        <div class="row">
+          <span class="spacer" />
+          <button class="small" onClick={() => { setName(p.name); setBody(p.text); setEditing(false); }}>취소</button>
+          <button class="small primary" disabled={!body.trim()} onClick={save}>저장</button>
+        </div>
+      </li>
+    );
+  }
+  return (
+    <li class="prompt-row">
+      <button class="prompt-use" onClick={onInsert} title={`입력칸에 넣기\n\n${p.text}`}>
+        <span class="prompt-name">{p.name}</span>
+        <span class="prompt-text muted">{p.text}</span>
+      </button>
+      <button class="small" disabled={busy} onClick={onSend} title="입력칸을 거치지 않고 바로 보냅니다"><Send size={12} aria-hidden="true" /> 바로 보내기</button>
+      <button class="icon-btn" onClick={() => setEditing(true)} aria-label={`${p.name} 고치기`} title="이름·내용 고치기"><Pencil size={13} /></button>
+      <button class="icon-btn" onClick={() => { if (confirm(`저장한 프롬프트 "${p.name}"를 지울까요?`)) deletePrompt(p.id); }} aria-label={`${p.name} 지우기`} title="지우기"><Trash2 size={13} /></button>
+    </li>
+  );
+}
+
+/** Saved prompts (shared by every project): save the current text, insert or send one. */
+function PromptLibrary({ text, busy, onInsert, onSend, onClose }: { text: string; busy: boolean; onInsert: (t: string) => void; onSend: (t: string) => void; onClose: () => void }) {
+  const s = useStore();
+  const [naming, setNaming] = useState<string | null>(null);
+  const saveNow = () => { if (addPrompt(text, naming ?? undefined)) toast("프롬프트를 저장했습니다"); setNaming(null); };
+  return (
+    <div class="prompt-lib" role="dialog" aria-label="저장한 프롬프트" onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}>
+      <div class="prompt-lib-head">
+        <b>저장한 프롬프트</b><span class="muted"> {s.prompts.length}개 · 모든 프로젝트에서 씁니다</span>
+        <span class="spacer" />
+        {naming == null && <button class="small" disabled={!text.trim()} onClick={() => setNaming(promptName(text))} title="입력칸의 내용을 저장합니다"><BookmarkPlus size={13} aria-hidden="true" /> 현재 입력 저장</button>}
+      </div>
+      {naming != null && (
+        <div class="row prompt-naming">
+          <input autoFocus value={naming} onInput={(e) => setNaming((e.target as HTMLInputElement).value)} aria-label="저장할 이름"
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); saveNow(); } if (e.key === "Escape") { e.stopPropagation(); setNaming(null); } }} />
+          <button class="small" onClick={() => setNaming(null)}>취소</button>
+          <button class="small primary" onClick={saveNow}>저장</button>
+        </div>
+      )}
+      {!s.prompts.length ? <p class="muted prompt-empty">아직 없습니다. 잘 된 요청은 입력칸에서 "현재 입력 저장"으로, 보낸 요청은 말풍선의 "저장"으로 남겨 두세요.</p> : (
+        <ul class="prompt-list">
+          {s.prompts.map((p) => <PromptRow key={p.id} p={p} busy={busy} onInsert={() => onInsert(p.text)} onSend={() => onSend(p.text)} />)}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export function AgentPanel() {
   const s = useStore();
   const p = s.project!;
@@ -143,7 +204,9 @@ export function AgentPanel() {
   const setText = (t: string) => { setTextState(t); savePrompt(projectId, chatId, t); };
   const [err, setErr] = useState("");
   const [renaming, setRenaming] = useState(false);
+  const [lib, setLib] = useState(false);
   const list = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLTextAreaElement>(null);
   useEffect(() => { list.current?.scrollTo(0, list.current.scrollHeight); }, [chat.length, s.agentStatus, s.aiRuns.length, chatId]);
   // Another project or conversation: show its own unsent prompt.
   useEffect(() => { setTextState(loadPrompt(projectId, chatId)); setErr(""); }, [projectId, chatId]);
@@ -219,13 +282,23 @@ export function AgentPanel() {
             {SUGGEST.map((t) => <button class="chip" onClick={() => send(t)}>{t}</button>)}
           </div>
         )}
-        {items.map((it) => it.kind === "mark" ? <div class="compact-mark" role="separator"><span>{it.text}</span></div> : <div class={`msg ${it.kind}`}>{it.kind === "ai" ? <Md text={it.text} /> : it.text}</div>)}
+        {items.map((it) => it.kind === "mark" ? <div class="compact-mark" role="separator"><span>{it.text}</span></div>
+          : it.kind === "user" ? (
+            <div class="msg user">{it.text}
+              <button class="msg-save" onClick={() => { if (addPrompt(it.text)) toast("저장한 프롬프트에 넣었습니다"); }} title="이 요청을 저장한 프롬프트에 넣습니다" aria-label="이 요청 저장"><Bookmark size={11} aria-hidden="true" /> 저장</button>
+            </div>
+          )
+          : <div class={`msg ${it.kind}`}>{it.kind === "ai" ? <Md text={it.text} /> : it.text}</div>)}
         {runs.length > 0 && <RunCard r={runs[runs.length - 1]} last={st.aiRuns[st.aiRuns.length - 1]?.id === runs[runs.length - 1].id} />}
         {s.agentBusy && <div class="msg status"><LoaderCircle size={13} class="spin-i" aria-hidden="true" /> {s.agentStatus}</div>}
         {err && <div class="msg err">{err} <a onClick={() => set({ route: "settings" })}>설정 열기</a></div>}
       </div>
+      {lib && <PromptLibrary text={text} busy={s.agentBusy}
+        onInsert={(t) => { setText(t); setLib(false); setTimeout(() => box.current?.focus(), 0); }}
+        onSend={(t) => { setLib(false); send(t); }} onClose={() => setLib(false)} />}
       <div class="composer">
-        <textarea rows={3} placeholder="예: 인트로를 짧게 줄이고 자막 넣어 줘 (Enter 보내기, Shift+Enter 줄바꿈)" value={text} aria-label="AI에게 편집 요청"
+        <button class={`icon-btn ${lib ? "on" : ""}`} onClick={() => setLib(!lib)} aria-pressed={lib} aria-label="저장한 프롬프트" title="저장한 프롬프트"><Bookmark size={16} /></button>
+        <textarea ref={box} rows={3} placeholder="예: 인트로를 짧게 줄이고 자막 넣어 줘 (Enter 보내기, Shift+Enter 줄바꿈)" value={text} aria-label="AI에게 편집 요청"
           onInput={(e) => setText((e.target as HTMLTextAreaElement).value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } }} />
         {s.agentBusy ? <button onClick={stopAgent}>멈추기</button> : <button class="primary" disabled={!text.trim()} onClick={() => send()}>보내기</button>}

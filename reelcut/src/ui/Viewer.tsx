@@ -1,24 +1,51 @@
-// Preview player. Draft mode plays the main track's clips one after another on their proxies,
-// with V2/V3 pictures on top and the A1–A3 sounds; source mode plays one media file with in/out
-// marks. 360 media is drawn as a flat view with WebGL (same math as the export).
+// Preview player. Draft mode plays the main track's clips one after another straight from their
+// files, with V2/V3 pictures on top and the A1–A3 sounds; source mode plays one media file with
+// in/out marks. Files the WebView cannot decode (an Osmo .osv, 10-bit HEVC…) play through the live
+// preview: ffmpeg streams them from the asked time (an .osv's lenses stitched into a sphere), and
+// while paused a single decoded frame stands in. 360 media is drawn as a flat view with WebGL.
 import { Grid3x3, Layers, Maximize, Pause, Play, Rewind, FastForward, SkipBack, SkipForward } from "lucide-preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import { fileSrc } from "../api";
+import { api, fileSrc } from "../api";
 import { captionLines } from "../captions";
 import {
   audioTrack, clipAt, clipDur, DEFAULT_VIEW, draftDuration, draftWords, fmtTCF, insertClips, is360, isDefaultColor, isGap, newClip, newOverlay, overlays,
-  parseTC, setViewKey, starts, timedDur, trackState, updateClip, viewAt,
+  parseTC, playableInWebView, previewSource, setViewKey, starts, timedDur, trackState, updateClip, viewAt,
 } from "../edit";
-import { Flat360 } from "../gl360";
+import { Flat360, type Proj } from "../gl360";
 import { asset, assetMap, draft, editDraft, set, st, toast, useStore } from "../store";
 import type { Asset, Clip, ColorAdj, Draft, Overlay, Transform, View } from "../types";
 
+/** Files the WebView started but could not decode; they go through the live preview from then on. */
+const failed = new Set<string>();
+/** Files even the live preview could not open. */
+const liveFailed = new Set<string>();
+let hevc: boolean | null = null;
+function webHevc(): boolean {
+  if (hevc == null) {
+    try { hevc = document.createElement("video").canPlayType('video/mp4; codecs="hvc1.2.4.L153.B0"') !== ""; } catch { hevc = false; }
+  }
+  return hevc;
+}
+
+/** How the preview shows a file (straight from the file, or the live stream). */
+export function srcOf(a: Asset) {
+  return previewSource(a, failed.has(a.info.path) || !playableInWebView(a.info, webHevc()));
+}
+
+/** A URL the WebView plays itself; null for files that go through the live preview. */
 function mediaUrl(a: Asset): string | null {
   if (a.info.kind === "image") return fileSrc(a.info.path);
-  if (a.proxy) return fileSrc(a.proxy);
-  if (is360(a)) return null;
-  return fileSrc(a.info.path);
+  const p = srcOf(a);
+  return p.live ? null : fileSrc(p.path);
 }
+
+function projOf(a: Asset): Proj {
+  const p = srcOf(a);
+  return p.proj === "dfisheye" ? { kind: "dfisheye", fov: p.fov, swap: p.swap } : { kind: "equirect" };
+}
+
+/** Text shown over the viewer for a file that cannot be shown at all. */
+export const NO_PREVIEW = "이 파일은 미리보기를 할 수 없습니다. 편집과 내보내기는 그대로 됩니다.";
 
 /** CSS look of a transform and colour (an approximation of the export filters). */
 export function cssLook(t?: Transform | null, c?: ColorAdj | null): { transform: string; clipPath: string; filter: string; opacity: string } {
@@ -55,15 +82,166 @@ class Player {
   drag: View | null = null;
   lastPaint = 0;
   lastRev = 0;
+  /** The file the main video element is on. */
+  path = "";
+  private slowT: any;
+  /** Live preview: the stream's time 0 is `base` seconds into the file; `liveKey` = file@speed. */
+  base = 0;
+  liveKey = "";
+  private liveGen = 0;
+  private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  /** A decoded still frame stands in for the picture (live files while paused, or until the stream runs). */
+  still: HTMLImageElement | null = null;
+  stillOn = false;
+  private stillGen = 0;
+  private stillT: any;
+  /** When the stream for the latest play/seek was asked for, and how long its first picture took. */
+  private askedAt = 0;
+  lastOpenMs = 0;
 
-  attach(v: HTMLVideoElement, img: HTMLImageElement, canvas: HTMLCanvasElement, ov: NonNullable<Player["ov"]>) {
-    this.video = v; this.img = img; this.ov = ov;
+  attach(v: HTMLVideoElement, img: HTMLImageElement, still: HTMLImageElement, canvas: HTMLCanvasElement, ov: NonNullable<Player["ov"]>) {
+    this.video = v; this.img = img; this.still = still; this.ov = ov;
     try { this.gl = new Flat360(canvas); } catch { this.gl = null; }
+    v.onerror = () => this.failed();
+    // A codec the WebView lacks (e.g. HEVC without the system extension) can still play its sound.
+    v.onloadedmetadata = () => { if (!this.liveKey && this.url && this.currentAsset()?.info.kind === "video" && v.videoWidth === 0) this.failed(); };
+    // The stream runs: its picture replaces the still.
+    v.ontimeupdate = () => {
+      if (this.liveKey && this.stillOn && v.currentTime > 0) {
+        this.stillOn = false;
+        this.lastOpenMs = Math.round(performance.now() - this.askedAt);
+        set({});
+      }
+    };
+    still.onerror = () => { if (still.getAttribute("src")) { liveFailed.add(this.path); set({}); } };
+    still.onload = () => set({});
     cancelAnimationFrame(this.raf);
     const loop = (ts: number) => { this.frame(ts); this.raf = requestAnimationFrame(loop); };
     this.raf = requestAnimationFrame(loop);
   }
   detach() { cancelAnimationFrame(this.raf); this.pause(); this.video = null; this.stopSounds(); }
+
+  /** The video element could not play what it was given. */
+  private failed() {
+    const path = this.path;
+    if (!path || !this.url) return;
+    if (this.liveKey) { liveFailed.add(path); this.stopLive(); set({}); return; }
+    // Not decodable here after all: from now on this file goes through the live preview.
+    failed.add(path);
+    this.url = "";
+    if (st.sourceId) { const a = asset(st.sourceId); if (a) this.show(a, this.srcT); } else this.refresh();
+    set({});
+  }
+  /** Points the main video at a file and gives up on it if nothing plays within a while. */
+  private setSrc(url: string, path: string) {
+    const v = this.video!;
+    this.url = url;
+    this.path = path;
+    v.src = url;
+    clearTimeout(this.slowT);
+    this.slowT = setTimeout(() => { if (this.url === url && !this.liveKey && v.readyState < 2) this.failed(); }, 10000);
+  }
+  /** Where the main video is, in seconds of its file. */
+  pos() { return this.base + (this.video?.currentTime ?? 0); }
+  /** A live file whose stream has not shown its first picture yet. */
+  waitingLive() { return !!this.liveKey && this.stillOn; }
+
+  /** Stops the live stream (paused, or moved to a file the WebView plays); the last picture stays. */
+  stopLive() {
+    if (!this.liveKey) return;
+    this.liveKey = "";
+    this.liveGen++;
+    this.video?.pause();
+    this.reader?.cancel().catch(() => {});
+    this.reader = null;
+    api.liveStop("main").catch(() => {});
+  }
+
+  /** One decoded frame of a live file at `t` (asked for a moment after the last move). */
+  private showStill(a: Asset, t: number) {
+    this.stillOn = true;
+    this.path = a.info.path;
+    clearTimeout(this.stillT);
+    const gen = ++this.stillGen;
+    this.stillT = setTimeout(async () => {
+      try {
+        const url = await api.liveUrl({ slot: "main", info: a.info, lens: a.lens ?? null, t, kind: "frame" });
+        if (gen === this.stillGen && this.still) this.still.src = url;
+      } catch { /* the next move asks again */ }
+    }, 50);
+  }
+
+  /** A file the WebView cannot play: the stream from `t` while playing forward, else a still. */
+  private loadLive(a: Asset, t: number, speed: number) {
+    const v = this.video!;
+    if (!this.playing || this.rate <= 0) {
+      this.stopLive();
+      this.showStill(a, t);
+      return;
+    }
+    const key = `${a.info.path}@${speed}`;
+    if (this.liveKey === key && Math.abs(this.pos() - t) < 0.35) {
+      if (v.paused) v.play().catch(() => {});
+      return;
+    }
+    // Keep showing a picture until the stream's first frame arrives.
+    if (!this.stillOn || this.path !== a.info.path) this.showStill(a, t);
+    this.liveKey = key;
+    this.base = t;
+    this.path = a.info.path;
+    this.askedAt = performance.now();
+    clearTimeout(this.slowT);
+    v.pause();
+    v.removeAttribute("src");
+    v.load();
+    this.url = "live";
+    const gen = ++this.liveGen;
+    api.liveUrl({ slot: "main", info: a.info, lens: a.lens ?? null, t, kind: "stream", rate: speed }).then((url) => {
+      if (gen !== this.liveGen || !this.video) return;
+      this.url = url;
+      this.feed(v, url, a, t, gen);
+      v.playbackRate = speed;
+      v.play().catch(() => {});
+    }).catch(() => { liveFailed.add(a.info.path); set({}); });
+  }
+
+  /**
+   * Plays a live stream through Media Source Extensions: the stream has no length, and a plain
+   * src would end after the first fragment, so the element is told the rest of the file's length.
+   */
+  private feed(v: HTMLVideoElement, url: string, a: Asset, t: number, gen: number) {
+    const ms = new MediaSource();
+    v.src = URL.createObjectURL(ms);
+    const once = (sb: SourceBuffer) => new Promise((r) => sb.addEventListener("updateend", r, { once: true }));
+    ms.addEventListener("sourceopen", async () => {
+      try {
+        URL.revokeObjectURL(v.src);
+        const sb = ms.addSourceBuffer(`video/mp4; codecs="avc1.640028${a.info.has_audio ? ", mp4a.40.2" : ""}"`);
+        ms.duration = Math.max(0.5, a.info.duration - t);
+        const res = await fetch(url);
+        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+        const rd = res.body.getReader();
+        this.reader = rd;
+        let first = true;
+        for (;;) {
+          const { done, value } = await rd.read();
+          if (done || gen !== this.liveGen) break;
+          try { sb.appendBuffer(value); } catch {
+            // Full: drop what has already played, then try once more.
+            if (v.currentTime > 6) { sb.remove(0, v.currentTime - 4); await once(sb); }
+            sb.appendBuffer(value);
+          }
+          await once(sb);
+          // The first picture may sit a few ms after 0 (audio priming); start there.
+          if (first && sb.buffered.length && sb.buffered.start(0) > v.currentTime) { v.currentTime = sb.buffered.start(0); first = false; }
+          else if (sb.buffered.length) first = false;
+        }
+        if (gen === this.liveGen && ms.readyState === "open") ms.endOfStream();
+      } catch (e) {
+        if (gen === this.liveGen) { console.warn("live preview", e); liveFailed.add(a.info.path); this.stopLive(); set({}); }
+      }
+    }, { once: true });
+  }
 
   fps() { return st.sourceId ? asset(st.sourceId)?.info.fps || 30 : draft()?.fps || 30; }
   now() { return st.sourceId ? this.srcT : st.playhead; }
@@ -83,17 +261,21 @@ class Player {
     return viewAt(hit.clip.view, hit.clip.viewKeys, hit.src);
   }
 
-  private load(a: Asset, t: number, rate = 1, vol = 1) {
+  /** Shows file `a` at `t` seconds (playing on if the player plays). */
+  show(a: Asset, t: number, rate = 1, vol = 1) {
     const v = this.video!;
-    const url = mediaUrl(a);
-    if (a.info.kind === "image") { this.url = url ?? ""; this.img!.src = url ?? ""; v.pause(); return; }
-    if (!url) { v.removeAttribute("src"); this.url = ""; return; }
-    v.playbackRate = Math.min(16, rate * Math.max(1, this.rate));
+    if (a.info.kind === "image") { this.stopLive(); this.stillOn = false; const url = fileSrc(a.info.path); this.url = url; this.img!.src = url; v.pause(); return; }
+    const speed = Math.min(16, rate * Math.max(1, this.rate));
     v.volume = Math.min(1, Math.max(0, vol));
     v.muted = vol <= 0 || this.rate > 2;
+    const url = mediaUrl(a);
+    if (!url) { this.loadLive(a, t, speed); return; }
+    this.stopLive();
+    this.stillOn = false;
+    this.base = 0;
+    v.playbackRate = speed;
     if (this.url !== url) {
-      this.url = url;
-      v.src = url;
+      this.setSrc(url, a.info.path);
       const go = () => { v.currentTime = t; if (this.playing && this.rate > 0) v.play().catch(() => {}); v.removeEventListener("loadedmetadata", go); };
       v.addEventListener("loadedmetadata", go);
     } else {
@@ -105,11 +287,11 @@ class Player {
   private loadClip(c: Clip, src: number) {
     const d = draft();
     this.clipId = c.id;
-    if (isGap(c) || (d && trackState(d, "V1").hide)) { this.video?.pause(); this.video?.removeAttribute("src"); this.url = ""; if (this.img) this.img.src = ""; return; }
+    if (isGap(c) || (d && trackState(d, "V1").hide)) { this.stopLive(); this.stillOn = false; this.video?.pause(); this.video?.removeAttribute("src"); this.url = ""; if (this.img) this.img.src = ""; return; }
     const a = asset(c.asset);
     if (!a) return;
     const muted = c.detached || (d && trackState(d, "A1").mute);
-    this.load(a, src, c.speed, muted ? 0 : c.volume);
+    this.show(a, src, c.speed, muted ? 0 : c.volume);
   }
 
   toggle() { this.playing ? this.pause() : (this.rate = 1, this.play()); }
@@ -118,7 +300,7 @@ class Player {
       const a = asset(st.sourceId);
       if (!a || !this.video) return;
       this.playing = true;
-      if (a.info.kind !== "image" && this.rate > 0) { this.video.playbackRate = this.rate; this.video.play().catch(() => {}); }
+      if (a.info.kind !== "image" && this.rate > 0) this.show(a, this.srcT);
       set({});
       return;
     }
@@ -136,6 +318,7 @@ class Player {
   pause() {
     this.playing = false;
     this.video?.pause();
+    this.stopLive();
     this.stopSounds();
     for (const o of Object.values(this.ov ?? {})) o.v.pause();
     set({});
@@ -158,7 +341,7 @@ class Player {
       const a = asset(st.sourceId);
       if (!a || !this.video) return;
       this.srcT = Math.max(0, Math.min(a.info.duration, t));
-      if (a.info.kind !== "image") this.video.currentTime = this.srcT;
+      if (a.info.kind !== "image") this.show(a, this.srcT);
       set({});
       return;
     }
@@ -186,8 +369,8 @@ class Player {
     if (st.sourceId) {
       if (a && a.info.kind !== "image") {
         if (this.playing && this.rate < 0) {
-          if (ts - this.lastRev > 60) { this.lastRev = ts; this.srcT = Math.max(0, this.srcT + (this.rate * 0.06)); v.currentTime = this.srcT; if (this.srcT <= 0) this.pause(); }
-        } else this.srcT = v.currentTime;
+          if (ts - this.lastRev > 60) { this.lastRev = ts; this.srcT = Math.max(0, this.srcT + (this.rate * 0.06)); this.show(a, this.srcT); if (this.srcT <= 0) this.pause(); }
+        } else if (this.playing && !this.waitingLive()) this.srcT = this.pos();
         if (this.playing && v.ended) this.pause();
       }
       if (ts - this.lastPaint > 66) { this.lastPaint = ts; set({}); }
@@ -211,8 +394,8 @@ class Player {
       if (this.clipId !== c.id) this.loadClip(c, hit.src);
       if (!ca || ca.info.kind === "image" || !this.url) {
         t += ((ts - this.last) / 1000) * Math.abs(this.rate);
-      } else {
-        t = hit.at + (v.currentTime - c.start) / c.speed;
+      } else if (!this.waitingLive()) {
+        t = hit.at + (this.pos() - c.start) / c.speed;
       }
       this.last = ts;
       const ss = starts(d);
@@ -228,7 +411,11 @@ class Player {
       }
       this.syncLayers(d, st.playhead, false);
     }
-    if (a && is360(a) && this.gl && v.readyState >= 2) this.gl.draw(v, this.currentView());
+    if (a && is360(a) && this.gl) {
+      const s = this.still;
+      if (this.stillOn) { if (s && s.complete && s.naturalWidth) this.gl.draw(s, this.currentView(), projOf(a)); }
+      else if (v.readyState >= 2) this.gl.draw(v, this.currentView(), projOf(a));
+    }
   }
 
   // ------------------------------------------------------------ V2/V3 and A1–A3
@@ -337,13 +524,14 @@ export function Viewer() {
   const box = useRef<HTMLDivElement>(null);
   const vref = useRef<HTMLVideoElement>(null);
   const iref = useRef<HTMLImageElement>(null);
+  const sref = useRef<HTMLImageElement>(null);
   const cref = useRef<HTMLCanvasElement>(null);
   const o2v = useRef<HTMLVideoElement>(null), o2i = useRef<HTMLImageElement>(null), o3v = useRef<HTMLVideoElement>(null), o3i = useRef<HTMLImageElement>(null);
   const dragRef = useRef<{ x: number; y: number; v: View } | null>(null);
   const [, bump] = useState(0);
 
   useEffect(() => {
-    player.attach(vref.current!, iref.current!, cref.current!, {
+    player.attach(vref.current!, iref.current!, sref.current!, cref.current!, {
       2: { v: o2v.current!, i: o2i.current!, id: null, url: "" },
       3: { v: o3v.current!, i: o3i.current!, id: null, url: "" },
     });
@@ -355,19 +543,15 @@ export function Viewer() {
   const d = draft();
   const src = s.sourceId ? asset(s.sourceId) : null;
 
-  const cur = player.currentAsset();
   useEffect(() => {
     player.pause();
     if (src) {
       player.srcT = 0; player.markIn = 0; player.markOut = src.info.duration; player.srcView = { ...DEFAULT_VIEW };
       player.url = "";
-      const url = mediaUrl(src);
-      if (src.info.kind === "image") iref.current!.src = url ?? "";
-      else if (url) { vref.current!.src = url; player.url = url; }
-      else vref.current!.removeAttribute("src");
+      player.show(src, 0);
     } else player.refresh();
     bump((x) => x + 1);
-  }, [s.sourceId, s.draftId, cur?.proxy]);
+  }, [s.sourceId, s.draftId]);
 
   useEffect(() => {
     if (!d || src || player.playing) return;
@@ -388,7 +572,11 @@ export function Viewer() {
   const isImg = shown?.info.kind === "image";
   const fit = hitClip?.fit ?? "fit";
   const aspect = src ? (r360 ? "16 / 9" : src.info.width && src.info.height ? `${src.info.width} / ${src.info.height}` : "16 / 9") : (d?.aspect ?? "16:9").replace(":", " / ");
-  const waiting = shown && !mediaUrl(shown);
+  const shownSrc = shown && shown.info.kind === "video" ? srcOf(shown) : null;
+  const noPreview = !!shownSrc && liveFailed.has(shownSrc.path);
+  const fish = !!shownSrc && r360 && shownSrc.proj === "dfisheye";
+  const liveFlat = !!shownSrc?.live && !r360;
+  const opening = !!shownSrc?.live && !noPreview && player.stillOn && !sref.current?.naturalWidth;
   const look = !src && hitClip ? cssLook(r360 ? null : hitClip.transform, hitClip.color) : null;
   const lut = !src && hitClip?.color?.lut;
   const fps = src ? src.info.fps || 30 : d?.fps || 30;
@@ -466,15 +654,18 @@ export function Viewer() {
           {/* crossOrigin: media comes from asset.localhost; without CORS WebGL may not read it (360 view). */}
           <video ref={vref} crossOrigin="anonymous" class={r360 || isImg ? "hidden" : ""} playsInline preload="auto" style={look ? { transform: look.transform, clipPath: look.clipPath, filter: look.filter, opacity: look.opacity } : undefined} />
           <img ref={iref} class={isImg ? "" : "hidden"} alt="" style={look ? { transform: look.transform, clipPath: look.clipPath, filter: look.filter, opacity: look.opacity } : undefined} />
+          {/* A decoded frame of a live file while paused (360 ones are drawn through the canvas). */}
+          <img ref={sref} crossOrigin="anonymous" class={liveFlat && player.stillOn ? "" : "hidden"} alt="" style={look ? { transform: look.transform, clipPath: look.clipPath, filter: look.filter, opacity: look.opacity } : undefined} />
           <canvas ref={cref} class={r360 ? "" : "hidden"} style={look?.filter ? { filter: look.filter } : undefined} />
           <video ref={o2v} crossOrigin="anonymous" class="ov" playsInline muted preload="auto" style={{ display: "none" }} />
           <img ref={o2i} class="ov" alt="" style={{ display: "none" }} />
           <video ref={o3v} crossOrigin="anonymous" class="ov ov3" playsInline muted preload="auto" style={{ display: "none" }} />
           <img ref={o3i} class="ov ov3" alt="" style={{ display: "none" }} />
-          {waiting && <div class="overlay">미리보기 파일 만드는 중… {Math.round(shown?.proxyPct ?? 0)}%</div>}
+          {noPreview && <div class="overlay no-preview" role="note">{NO_PREVIEW}</div>}
           {!shown && !hitClip && <div class="overlay muted">{d && !d.clips.length ? "미디어를 타임라인에 끌어다 놓거나, 미디어를 두 번 눌러 구간을 골라 넣으세요." : ""}</div>}
           {line && <div class={`caption ${d!.captionStyle.position}`} style={{ fontSize: `${d!.captionStyle.size * 0.9}cqh`, color: d!.captionStyle.color }}>{line.text}</div>}
-          {r360 && <div class="hint360">360° · 끌어서 방향, 휠로 화각 · yaw {Math.round(player.currentView().yaw)}° pitch {Math.round(player.currentView().pitch)}° 화각 {Math.round(player.currentView().hfov)}°{hitClip?.viewKeys?.length ? " · 키프레임" : ""}</div>}
+          {r360 && <div class="hint360">360° · 끌어서 방향, 휠로 화각 · yaw {Math.round(player.currentView().yaw)}° pitch {Math.round(player.currentView().pitch)}° 화각 {Math.round(player.currentView().hfov)}°{hitClip?.viewKeys?.length ? " · 키프레임" : ""}{fish ? " · 미리보기는 이음새·흔들림 보정 전 (내보낸 파일에 적용)" : shownSrc?.live ? " · 원본 실시간 스티칭 (흔들림 보정은 내보낸 파일에)" : ""}</div>}
+          {opening && <div class="hint-r info">원본 여는 중…</div>}
           {(lut || ov360) && <div class="hint-r">{lut ? "LUT·색온도는 내보낸 파일에 정확히 반영됩니다" : "360 V2/V3는 내보낸 파일에서 보입니다"}</div>}
           {hit && hitClip?.xin && Math.abs(s.playhead - hit.at) < (hitClip.xin ?? 0) && <div class="hint-r">디졸브 구간 (미리보기는 컷, 내보내기에 반영)</div>}
           {safe}

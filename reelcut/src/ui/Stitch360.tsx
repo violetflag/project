@@ -1,6 +1,7 @@
 // The 360 seam-stitching control in the inspector's 렌즈 group: on/off, what the automatic
-// calibration found, and a button to run it again. The work is in src-tauri/src/stitch.rs.
-import { patchAsset, startProxy } from "../store";
+// calibration found, and a button to run it again. The work is in src-tauri/src/stitch.rs; the
+// live preview of an .osv uses it too.
+import { patchAsset, prepare360 } from "../store";
 import type { Asset, Lens, Stitch } from "../types";
 
 const defaults: Stitch = { on: true, fov: 0, yaw: 0, pitch: 0, roll: 0, gain_a: [1, 0, 0], gain_b: [1, 0, 0], calibrated: false, before: 0, after: 0, flow: true };
@@ -10,8 +11,8 @@ function lensOf(a: Asset): Lens {
 }
 
 function setStitch(a: Asset, s: Stitch) {
-  patchAsset(a.id, { lens: { ...lensOf(a), stitch: s }, proxy: null, strip: undefined });
-  startProxy(a.id);
+  patchAsset(a.id, { lens: { ...lensOf(a), stitch: s } });
+  prepare360(a.id);
 }
 
 const pct = (g: number) => `${g >= 1 ? "+" : ""}${Math.round((g - 1) * 1000) / 10}%`;

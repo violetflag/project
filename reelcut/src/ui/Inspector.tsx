@@ -9,7 +9,7 @@ import {
   ASPECTS, audioTrack, clipAt, clipDur, DEFAULT_COLOR, DEFAULT_TRANSFORM, DEFAULT_VIEW, detachAudio, fmtTCF, is360, isGap, overlays, parseTC, r3, setTransition, setViewKey, starts,
   timedDur, updateAudio, updateClip, updateOverlay, viewAt,
 } from "../edit";
-import { asset, draft, editDraft, patchAsset, st, startProxy, toast, useStore } from "../store";
+import { asset, draft, editDraft, patchAsset, prepare360, st, toast, useStore } from "../store";
 import type { Clip, ColorAdj, Draft, MusicClip, Overlay, Transform, View } from "../types";
 import { player } from "./Viewer";
 import { Stab360 } from "./Stab360";
@@ -219,15 +219,15 @@ function ClipView({ d, c }: { d: Draft; c: Clip }) {
           <Section id="lens" title={`렌즈 (${a.info.layout360 === "dual" ? "OSV 두 렌즈" : a.info.layout360 === "dfisheye" ? "두 어안 나란히" : "펼친 360"})`} defaultOpen={false}>
             {a.info.layout360 !== "equirect" ? (
               <>
-                <label class="check"><input type="checkbox" checked={a.lens?.swap ?? false} onChange={(e) => { patchAsset(a.id, { lens: { ...a.lens, layout: a.info.layout360, fov: a.lens?.fov ?? 190, swap: (e.target as HTMLInputElement).checked, stitch: a.lens?.stitch ? { ...a.lens.stitch, calibrated: false } : null }, proxy: null, strip: undefined }); startProxy(a.id); }} /> 앞뒤 렌즈 바꾸기 (정면이 뒤로 보이면)</label>
+                <label class="check"><input type="checkbox" checked={a.lens?.swap ?? false} onChange={(e) => { patchAsset(a.id, { lens: { ...a.lens, layout: a.info.layout360, fov: a.lens?.fov ?? 190, swap: (e.target as HTMLInputElement).checked, stitch: a.lens?.stitch ? { ...a.lens.stitch, calibrated: false } : null } }); prepare360(a.id); }} /> 앞뒤 렌즈 바꾸기 (정면이 뒤로 보이면)</label>
                 <label>렌즈 화각
-                  <select value={String(a.lens?.fov ?? 190)} onChange={(e) => { patchAsset(a.id, { lens: { ...a.lens, layout: a.info.layout360, swap: a.lens?.swap ?? false, fov: Number((e.target as HTMLSelectElement).value), stitch: a.lens?.stitch ? { ...a.lens.stitch, calibrated: false } : null }, proxy: null, strip: undefined }); startProxy(a.id); }}>
+                  <select value={String(a.lens?.fov ?? 190)} onChange={(e) => { patchAsset(a.id, { lens: { ...a.lens, layout: a.info.layout360, swap: a.lens?.swap ?? false, fov: Number((e.target as HTMLSelectElement).value), stitch: a.lens?.stitch ? { ...a.lens.stitch, calibrated: false } : null } }); prepare360(a.id); }}>
                     {[180, 185, 190, 195, 200].map((x) => <option value={String(x)}>{x}°</option>)}
                   </select>
                 </label>
                 <Stitch360 a={a} />
                 <Stab360 a={a} />
-                <p class="muted tip">바꾸면 미리보기 파일을 다시 만듭니다. 이음매가 겹치거나 벌어지면 화각을 조정하세요.</p>
+                <p class="muted tip">.osv 원본은 미리보기에서 바로 이어 붙여 보여 줍니다. 흔들림 보정은 내보낸 파일에 적용됩니다. 이음매가 겹치거나 벌어지면 화각을 조정하세요.</p>
               </>
             ) : <p class="muted">이미 펼친 360 영상입니다.</p>}
           </Section>

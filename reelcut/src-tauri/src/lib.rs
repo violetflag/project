@@ -2,6 +2,7 @@ mod args;
 mod cc;
 mod ff;
 mod hw;
+mod live;
 mod media;
 mod probe;
 mod qwen;
@@ -31,6 +32,7 @@ struct App {
     hw: Mutex<Option<Hw>>,
     jobs: Jobs,
     cc: Arc<cc::Bridge>,
+    live: Arc<live::Live>,
 }
 
 type St<'a> = State<'a, Arc<App>>;
@@ -216,90 +218,36 @@ fn motion_info(app: St<'_>, path: String) -> Option<Value> {
     Some(json!({ "source": m.source, "note": m.note, "readout": m.readout, "product": m.product }))
 }
 
-/// Starts making the proxy in the background; progress and the result path come as "job" events.
+/// Works out how the camera moved (360 stabilisation) in the background, so the first export of
+/// the recording does not have to; progress and the end come as "motion" job events. The result
+/// is cached by `motion::motion_for` and read back with `motion_info`.
 #[tauri::command]
-fn make_proxy(handle: tauri::AppHandle, app: St<'_>, id: String, info: MediaInfo, lens: Lens) -> Result<Option<String>, String> {
+fn analyze_motion(handle: tauri::AppHandle, app: St<'_>, id: String, info: MediaInfo, lens: Lens) {
     let app = app.inner().clone();
-    let engine = motion::engine_lens(&info, &lens);
-    let key = if engine {
-        // Reelcut's 360 engine: seam lined up per frame and the shake taken out.
-        format!("{}-{:x}", file_key(&info.path), hash(&(&lens.layout, lens.swap, (lens.fov * 10.0) as i64, serde_json::to_string(&lens.stitch).unwrap_or_default(), serde_json::to_string(&motion::stab_of(&lens)).unwrap_or_default(), 5u8)))
-    } else if stitch::active(&lens) {
-        // Seam-blended proxies (and every new calibration) get their own file.
-        format!("{}-{:x}", file_key(&info.path), hash(&(&lens.layout, lens.swap, (lens.fov * 10.0) as i64, serde_json::to_string(&lens.stitch).unwrap_or_default(), 4u8)))
-    } else {
-        format!("{}-{:x}", file_key(&info.path), hash(&(&lens.layout, lens.swap, (lens.fov * 10.0) as i64, 3u8)))
-    };
-    let out_dir = app.dir("proxies");
-    let h264 = app.hw().h264.unwrap_or_else(|| "libx264".into());
-    let Some(plan) = media::proxy_plan(&info, &lens, &h264, &out_dir, &key) else { return Ok(None) };
-    if plan.out.is_file() {
-        return Ok(Some(plan.out.to_string_lossy().into_owned()));
-    }
-    let tag = format!("proxy:{id}");
+    let tag = format!("motion:{id}");
     let gen = app.jobs.generation(&tag);
     std::thread::spawn(move || {
-        let part = plan.out.with_extension(format!("part.{}", plan.out.extension().unwrap().to_string_lossy()));
-        let mut args = plan.args.clone();
-        *args.last_mut().unwrap() = part.to_string_lossy().into_owned();
-        let dur = info.duration.max(0.1);
-        if engine {
-            let mkey = file_key(&info.path);
-            let has_stab = motion::stab_of(&lens).mode != "off";
-            let split = if has_stab { 35.0 } else { 0.0 };
-            let r = motion::motion_for(&app.dir("motion"), &app.bins.ffmpeg, &app.bins.ffprobe, &app.jobs, &tag, gen, &info, &lens, &mkey, |f| {
-                emit(&handle, &id, "proxy", f * split, "running", "흔들림 분석", Value::Null);
-            })
-            .and_then(|m| {
-                motion::render_proxy(&app.bins.ffmpeg, &app.jobs, &tag, gen, &info, &lens, m.as_ref(), &h264, &part, |f| {
-                    emit(&handle, &id, "proxy", (split + f * (99.0 - split)).min(99.0), "running", "", Value::Null);
-                })
-            });
-            match r {
-                Ok(()) => {
-                    match std::fs::rename(&part, &plan.out) {
-                        Ok(_) => emit(&handle, &id, "proxy", 100.0, "done", "", json!(plan.out.to_string_lossy())),
-                        Err(e) => emit(&handle, &id, "proxy", 0.0, "error", &e.to_string(), Value::Null),
-                    }
-                    return;
-                }
-                Err(e) if e == CANCELLED => {
-                    let _ = std::fs::remove_file(&part);
-                    emit(&handle, &id, "proxy", 0.0, "cancelled", &e, Value::Null);
-                    return;
-                }
-                // Anything else: the ffmpeg-only stitch below.
-                Err(e) => {
-                    let _ = std::fs::remove_file(&part);
-                    eprintln!("360 engine failed, using the ffmpeg stitch: {e}");
-                }
-            }
-        }
-        let mut res = ff::run_ffmpeg(&app.jobs, &tag, gen, &app.bins.ffmpeg, &args, |p| {
-            emit(&handle, &id, "proxy", (p.out_time / dur * 100.0).min(99.0), "running", "", Value::Null);
+        let r = motion::motion_for(&app.dir("motion"), &app.bins.ffmpeg, &app.bins.ffprobe, &app.jobs, &tag, gen, &info, &lens, &file_key(&info.path), |f| {
+            emit(&handle, &id, "motion", (f * 100.0).min(99.0), "running", "", Value::Null);
         });
-        // A GPU encoder can refuse odd sizes; fall back to x264 once.
-        if res.as_ref().is_err_and(|e| e != CANCELLED) && h264 != "libx264" {
-            if let Some(p2) = media::proxy_plan(&info, &lens, "libx264", &out_dir, &key) {
-                let mut a2 = p2.args.clone();
-                *a2.last_mut().unwrap() = part.to_string_lossy().into_owned();
-                res = ff::run_ffmpeg(&app.jobs, &tag, gen, &app.bins.ffmpeg, &a2, |p| {
-                    emit(&handle, &id, "proxy", (p.out_time / dur * 100.0).min(99.0), "running", "", Value::Null);
-                });
-            }
-        }
-        match res {
-            Ok(_) => match std::fs::rename(&part, &plan.out) {
-                Ok(_) => emit(&handle, &id, "proxy", 100.0, "done", "", json!(plan.out.to_string_lossy())),
-                Err(e) => emit(&handle, &id, "proxy", 0.0, "error", &e.to_string(), Value::Null),
-            },
-            Err(e) => {
-                let _ = std::fs::remove_file(&part);
-                emit(&handle, &id, "proxy", 0.0, if e == CANCELLED { "cancelled" } else { "error" }, &e, Value::Null)
-            }
+        match r {
+            Ok(Some(_)) => emit(&handle, &id, "motion", 100.0, "done", "", Value::Null),
+            Ok(None) => emit(&handle, &id, "motion", 0.0, "error", "흔들림을 분석하지 못했습니다", Value::Null),
+            Err(e) => emit(&handle, &id, "motion", 0.0, if e == CANCELLED { "cancelled" } else { "error" }, &e, Value::Null),
         }
     });
-    Ok(None)
+}
+
+/// The address of a live preview stream or still frame (see `live`) for a file the WebView cannot play.
+#[tauri::command]
+fn live_url(app: St<'_>, req: live::Req) -> String {
+    app.live.url(req)
+}
+
+/// Ends the live preview of a viewer slot (paused, or moved to another file).
+#[tauri::command]
+fn live_stop(app: St<'_>, slot: String) -> bool {
+    app.live.stop(&slot)
 }
 
 #[tauri::command]
@@ -748,11 +696,19 @@ pub fn run() {
             bridge.set_sink(Arc::new(move |id, name, input| {
                 let _ = h.emit("cc-tool", json!({ "id": id, "name": name, "input": input }));
             }));
-            let st = Arc::new(App { bins: ff::locate(res.as_deref()), data_dir, cache_dir, hw: Mutex::new(None), jobs: Jobs::default(), cc: bridge });
-            // Detect encoders in the background so the first proxy does not wait for it.
+            let bins = ff::locate(res.as_deref());
+            let live = live::Live::start(bins.ffmpeg.clone()).expect("local preview server");
+            let st = Arc::new(App { bins, data_dir, cache_dir, hw: Mutex::new(None), jobs: Jobs::default(), cc: bridge, live });
+            // Detect encoders in the background so the first export does not wait for it.
             let st2 = st.clone();
             std::thread::spawn(move || {
                 st2.hw();
+                // 2.5.0 dropped preview copies (proxies): clear the ones older versions made.
+                for d in [st2.cache_dir.join("proxies"), st2.data_dir.join("proxies")] {
+                    if d.is_dir() {
+                        let _ = std::fs::remove_dir_all(&d);
+                    }
+                }
             });
             app.manage(st);
             Ok(())
@@ -770,7 +726,9 @@ pub fn run() {
             store_list,
             expand_paths,
             inspect,
-            make_proxy,
+            analyze_motion,
+            live_url,
+            live_stop,
             calibrate_360,
             filmstrip,
             poster,

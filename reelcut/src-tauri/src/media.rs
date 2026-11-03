@@ -1,6 +1,6 @@
 //! Media the editor can hold: what a file is (plain video, audio, still, or a 360 recording such
-//! as DJI Osmo 360 `.osv`/`.lrf`), its proxy for smooth playback, filmstrips, waveforms and
-//! frames for the AI agent.
+//! as DJI Osmo 360 `.osv`/`.lrf`), filmstrips, waveforms and frames for the AI agent. The
+//! preview plays the files themselves (an .osv through its .lrf); nothing is transcoded for it.
 
 use crate::ff;
 use base64::Engine;
@@ -291,84 +291,7 @@ pub fn v360_flat(lens: &Lens, view: &View, w: u32, h: u32) -> String {
     format!("v360={}:output=flat:h_fov={hf:.3}:v_fov={vf:.3}:yaw={:.3}:pitch={:.3}:roll={:.3}:w={w}:h={h}:interp=lanczos", v360_in(lens), view.yaw, view.pitch, view.roll)
 }
 
-pub struct ProxyPlan {
-    pub args: Vec<String>,
-    pub out: PathBuf,
-}
-
-/// The proxy: a small H.264 file with a key frame every half second so scrubbing is instant.
-/// 360 recordings become an equirectangular 2048×1024 picture (the player turns it into a flat
-/// view); an .osv with its .lrf companion is made from the .lrf, which is already small.
-/// The proxy's video encoder options (light, a keyframe every half second for scrubbing).
-pub fn proxy_venc(h264: &str, fps: f64) -> Vec<String> {
-    let mut a = if h264 == "libx264" {
-        s(&["-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p"])
-    } else if h264.ends_with("_nvenc") {
-        s(&["-c:v", h264, "-preset", "p2", "-rc", "vbr", "-cq", "28", "-b:v", "0", "-pix_fmt", "yuv420p"])
-    } else if h264.ends_with("_qsv") {
-        s(&["-c:v", h264, "-preset", "veryfast", "-global_quality", "30", "-pix_fmt", "nv12"])
-    } else {
-        s(&["-c:v", h264, "-rc", "cqp", "-qp_i", "28", "-qp_p", "28", "-qp_b", "28", "-pix_fmt", "nv12"])
-    };
-    let g = (fps.max(1.0) / 2.0).round().max(1.0) as u32;
-    a.extend(s(&["-g", &g.to_string(), "-keyint_min", &g.to_string(), "-sc_threshold", "0", "-bf", "0"]));
-    a
-}
-
-pub fn proxy_plan(info: &MediaInfo, lens: &Lens, h264: &str, out_dir: &Path, key: &str) -> Option<ProxyPlan> {
-    match info.kind.as_str() {
-        "image" => None,
-        "audio" => {
-            let out = out_dir.join(format!("{key}.m4a"));
-            let mut a = s(&["-i", &info.path, "-map", "0:a:0", "-vn", "-c:a", "aac", "-b:a", "160k", "-ac", "2", "-ar", "48000"]);
-            a.push(out.to_string_lossy().into_owned());
-            Some(ProxyPlan { args: a, out })
-        }
-        _ => {
-            let out = out_dir.join(format!("{key}.mp4"));
-            let enc = |a: &mut Vec<String>| a.extend(proxy_venc(h264, info.fps));
-            let audio = |a: &mut Vec<String>, has: bool| {
-                if has {
-                    a.extend(s(&["-map", "0:a:0", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"]));
-                }
-            };
-            let mut a: Vec<String> = Vec::new();
-            if info.layout360 != "none" || lens.layout != "none" {
-                let layout = if lens.layout.is_empty() || lens.layout == "none" { info.layout360.clone() } else { lens.layout.clone() };
-                // An .osv with its .lrf: the .lrf (one track, lenses side by side).
-                let (src, lens2) = match (&info.lrf, layout.as_str()) {
-                    (Some(l), "dual") => (l.clone(), Lens { layout: "dfisheye".into(), ..lens.clone() }),
-                    _ => (info.path.clone(), Lens { layout, ..lens.clone() }),
-                };
-                a.extend(s(&["-i", &src]));
-                let graph = if crate::stitch::active(&lens2) {
-                    // Both lenses, seam blended (DJI-style), straight to the 2048×1024 sphere.
-                    let each = if lens2.layout == "dual" { Some(1024) } else { None };
-                    let st = crate::stitch::graph(0, &lens2, each, "", &crate::stitch::Out::Equi { w: 2048, h: 1024 }, None, "sb");
-                    format!("{st};[sb]format=yuv420p[pv]")
-                } else {
-                    let pre = lens_source(0, &lens2, if lens2.layout == "dual" { Some(1024) } else { None }, "sb");
-                    format!("{pre};[sb]{},scale=2048:1024:flags=bicubic,format=yuv420p[pv]", if lens2.layout == "equirect" { "null".to_string() } else { format!("v360={}:output=equirect:w=2048:h=1024", v360_in(&lens2)) })
-                };
-                a.extend(s(&["-filter_complex", &graph, "-map", "[pv]"]));
-                enc(&mut a);
-                let has_audio = if src == info.path { info.has_audio } else { true };
-                if has_audio {
-                    a.extend(s(&["-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"]));
-                }
-            } else {
-                a.extend(s(&["-i", &info.path, "-map", "0:v:0", "-vf", "scale=-2:'min(720,ih)':flags=bicubic,format=yuv420p"]));
-                enc(&mut a);
-                audio(&mut a, info.has_audio);
-            }
-            a.extend(s(&["-movflags", "+faststart", "-f", "mp4"]));
-            a.push(out.to_string_lossy().into_owned());
-            Some(ProxyPlan { args: a, out })
-        }
-    }
-}
-
-/// A strip of `count` small frames side by side (for timeline clips), from the proxy.
+/// A strip of `count` small frames side by side (for timeline clips).
 pub fn filmstrip(ffmpeg: &Path, path: &str, duration: f64, count: u32, out: &Path) -> Result<(), String> {
     let count = count.clamp(1, 60);
     let every = (duration / count as f64).max(0.05);
@@ -410,9 +333,12 @@ pub struct FrameReq {
     pub times: Vec<f64>,
     #[serde(default)]
     pub width: Option<u32>,
-    /// For an equirect proxy: look along this view instead of showing the whole sphere.
+    /// For a 360 file: look along this view instead of showing the raw picture.
     #[serde(default)]
     pub view: Option<View>,
+    /// How that 360 file is laid out (equirect when missing).
+    #[serde(default)]
+    pub lens: Option<Lens>,
 }
 
 pub fn jpeg_b64(bytes: &[u8]) -> String {
@@ -423,15 +349,19 @@ pub fn jpeg_b64(bytes: &[u8]) -> String {
 pub fn frames(ffmpeg: &Path, req: &FrameReq) -> Result<Vec<String>, String> {
     let w = req.width.unwrap_or(768).clamp(64, 1920);
     let mut out = Vec::new();
+    // A 360 view: the lenses put side by side (two tracks of an .osv are stacked), then v360.
+    let graph = req.view.as_ref().map(|v| {
+        let lens = req.lens.clone().filter(|l| !l.layout.is_empty() && l.layout != "none").unwrap_or(Lens { layout: "equirect".into(), swap: false, fov: 360.0, stitch: None, stab: None });
+        let h = (w as f64 * 9.0 / 16.0).round() as u32 / 2 * 2;
+        format!("{};[s]{}[o]", lens_source(0, &lens, None, "s"), v360_flat(&lens, v, w, h))
+    });
     for &t in req.times.iter().take(16) {
-        let vf = match &req.view {
-            Some(v) => {
-                let h = (w as f64 * 9.0 / 16.0).round() as u32 / 2 * 2;
-                v360_flat(&Lens { layout: "equirect".into(), swap: false, fov: 360.0, stitch: None, stab: None }, v, w, h)
-            }
-            None => format!("scale={w}:-2"),
-        };
-        let a = s(&["-hide_banner", "-nostdin", "-loglevel", "error", "-ss", &format!("{:.3}", t.max(0.0)), "-i", &req.path, "-frames:v", "1", "-vf", &vf, "-q:v", "4", "-f", "image2", "-c:v", "mjpeg", "-"]);
+        let mut a = s(&["-hide_banner", "-nostdin", "-loglevel", "error", "-ss", &format!("{:.3}", t.max(0.0)), "-i", &req.path, "-frames:v", "1"]);
+        match &graph {
+            Some(g) => a.extend(s(&["-filter_complex", g, "-map", "[o]"])),
+            None => a.extend(s(&["-vf", &format!("scale={w}:-2")])),
+        }
+        a.extend(s(&["-q:v", "4", "-f", "image2", "-c:v", "mjpeg", "-"]));
         let o = ff::command(ffmpeg).args(&a).stdin(std::process::Stdio::null()).output().map_err(|e| e.to_string())?;
         if o.stdout.is_empty() {
             return Err(format!("{t:.1}초 장면을 읽지 못했습니다: {}", String::from_utf8_lossy(&o.stderr).trim()));
