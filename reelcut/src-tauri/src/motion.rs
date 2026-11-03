@@ -547,6 +547,13 @@ fn parse_meta(b: &[u8], pts: f64) -> Meta {
         m.quats = all(att, 3).into_iter().filter_map(|f| if let Field::Bytes(q) = f { quat(q) } else { None }).collect();
         m.offset = first_f32(att, 4).unwrap_or(0.0) as f64;
     }
+    // Osmo 360 originals: one fused attitude per frame, FrameMeta(3).camera(2).attitude(22) =
+    // w, x, y, z as floats (gravity follows in 23).
+    if m.quats.is_empty() {
+        if let Some(q) = sub(b, &[3, 2, 22]).and_then(quat) {
+            m.quats = vec![q];
+        }
+    }
     m
 }
 
@@ -560,7 +567,8 @@ fn read_gyro(ffprobe: &Path, info: &MediaInfo) -> Result<(Vec<(f64, Qt)>, f64, O
         .and_then(|s| s.iter().find(|x| x["codec_tag_string"].as_str() == Some("djmd") || x["tags"]["handler_name"].as_str().map(|h| h.contains("DJI meta")).unwrap_or(false)))
         .and_then(|x| x["index"].as_u64())
         .ok_or("자이로 데이터(djmd)가 없습니다")?;
-    let a: Vec<String> = ["-v", "error", "-select_streams", &idx.to_string(), "-show_entries", "packet=pts_time,pos,size", "-of", "csv=p=0", &info.path].iter().map(|x| x.to_string()).collect();
+    // Keyed output: ffprobe prints packet fields in its own order (pts_time, size, pos), not the asked one.
+    let a: Vec<String> = ["-v", "error", "-select_streams", &idx.to_string(), "-show_entries", "packet=pts_time,pos,size", "-of", "compact=p=0", &info.path].iter().map(|x| x.to_string()).collect();
     let (_, out, _) = ff::output(ffprobe, &a)?;
     let mut file = std::fs::File::open(&info.path).map_err(|e| e.to_string())?;
     use std::io::{Read, Seek, SeekFrom};
@@ -568,11 +576,8 @@ fn read_gyro(ffprobe: &Path, info: &MediaInfo) -> Result<(Vec<(f64, Qt)>, f64, O
     let (mut readout, mut dir, mut product) = (None, None, String::new());
     let fps = info.fps.max(1.0);
     for line in out.lines() {
-        let f: Vec<&str> = line.split(',').collect();
-        if f.len() < 3 {
-            continue;
-        }
-        let (Ok(pts), Ok(pos), Ok(size)) = (f[0].parse::<f64>(), f[1].parse::<u64>(), f[2].parse::<usize>()) else { continue };
+        let field = |k: &str| line.split('|').find_map(|kv| kv.strip_prefix(k).and_then(|v| v.strip_prefix('=')));
+        let (Some(Ok(pts)), Some(Ok(pos)), Some(Ok(size))) = (field("pts_time").map(str::parse::<f64>), field("pos").map(str::parse::<u64>), field("size").map(str::parse::<usize>)) else { continue };
         if size == 0 || size > 4_000_000 {
             continue;
         }
@@ -1161,6 +1166,24 @@ mod tests {
     /// With a real ffmpeg (REELCUT_FX=<dir with SHAKE.OSV> cargo test --release itest_motion --
     /// --nocapture): a shaken dual-fisheye clip; the turns found in the picture match the shake,
     /// and the stabilised flat view moves far less from frame to frame than the raw one.
+    /// A real Osmo 360 original (REELCUT_REAL_OSV, read only): its gyro is found and lined up with
+    /// the picture, so stabilisation does not fall back to analysing every frame.
+    #[test]
+    fn real_osmo_gyro() {
+        let Ok(path) = std::env::var("REELCUT_REAL_OSV") else { return };
+        let bin = |n: &str| std::path::PathBuf::from(std::env::var("FFDIR").unwrap_or_else(|_| "/usr/bin".into())).join(n);
+        let info = crate::media::inspect(&bin("ffprobe"), &path).unwrap();
+        let t0 = std::time::Instant::now();
+        let (samples, readout, top, product) = read_gyro(&bin("ffprobe"), &info).unwrap();
+        println!("gyro: {} samples, readout {:.2} ms, top {top:?}, product {product:?}, {:.1}s", samples.len(), readout * 1000.0, t0.elapsed().as_secs_f64());
+        assert!(samples.len() as f64 > info.duration * info.fps * 0.9);
+        let t1 = std::time::Instant::now();
+        let lens = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: None, stab: None };
+        let m = analyze(&bin("ffmpeg"), &bin("ffprobe"), &Jobs::default(), "t", 0, &info, &lens, |_| {}).unwrap();
+        println!("analysis: {} ({}), {} frames, {:.1}s", m.source, m.note, m.rot.len(), t1.elapsed().as_secs_f64());
+        assert_eq!(m.source, "gyro", "{}", m.note);
+    }
+
     #[test]
     fn itest_motion() {
         let Ok(fx) = std::env::var("REELCUT_FX") else { return };

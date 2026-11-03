@@ -475,6 +475,9 @@ pub fn run(bridge: &Bridge, t: Turn, mut on_line: impl FnMut(Value)) -> Result<(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("MCP_TOOL_TIMEOUT", "10800000")
+        // A tool can stay silent for minutes (the first level panorama of a long 360 file waits
+        // for its motion analysis); Claude Code's own idle limit would abort it at 5 minutes.
+        .env("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "3600000")
         .env("MCP_TIMEOUT", "30000")
         .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
     let mut child = c.spawn().map_err(|e| format!("Claude Code를 실행하지 못했습니다: {e}"))?;

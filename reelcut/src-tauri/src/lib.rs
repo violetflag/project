@@ -352,7 +352,39 @@ async fn waveform(app: St<'_>, path: String) -> Result<Vec<u8>, String> {
 #[tauri::command]
 async fn frames(app: St<'_>, req: FrameReq) -> Result<Vec<String>, String> {
     let app = app.inner().clone();
-    blocking(move || media::frames(&app.bins.ffmpeg, &req)).await
+    blocking(move || {
+        // A view of a two-lens 360 recording goes through the engine, stabilised and levelled like
+        // the export and the level panorama, so a direction read off the panorama shows the same
+        // thing here (a tilted camera would otherwise point the raw lenses somewhere else).
+        if let (Some(v), Some(lens)) = (&req.view, &req.lens) {
+            if matches!(lens.layout.as_str(), "dual" | "dfisheye") {
+                let info = media::inspect(&app.bins.ffprobe, &req.path)?;
+                let mut lens = lens.clone();
+                if lens.fov <= 0.0 {
+                    lens.fov = 190.0;
+                }
+                if motion::engine_lens(&info, &lens) {
+                    let tag = "frames";
+                    let gen = app.jobs.generation(tag);
+                    let m = motion::motion_for(&app.dir("motion"), &app.bins.ffmpeg, &app.bins.ffprobe, &app.jobs, tag, gen, &info, &lens, &file_key(&req.path), |_| {})?;
+                    let w = req.width.unwrap_or(768).clamp(64, 1920) & !1;
+                    let h = ((w as f64 * 9.0 / 16.0).round() as u32) & !1;
+                    let v = framing::norm_view(v);
+                    let rot = stitch::matrix(stitch::ypr(v.yaw, v.pitch, v.roll));
+                    let look = move |_t: f64| (rot, Some(v.hfov));
+                    let dir = app.dir("frames").join(format!("{:x}", hash(&(&req.path, std::time::SystemTime::now()))));
+                    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                    let times: Vec<f64> = req.times.iter().copied().filter(|t| t.is_finite()).take(16).collect();
+                    let out = motion::stills(&app.bins.ffmpeg, &app.jobs, tag, gen, &info, &lens, m.as_ref(), &times, w, h, &look, &|_| "null".to_string(), &dir)
+                        .and_then(|files| files.iter().map(|f| std::fs::read(f).map(|b| media::jpeg_b64(&b)).map_err(|e| e.to_string())).collect());
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return out;
+                }
+            }
+        }
+        media::frames(&app.bins.ffmpeg, &req)
+    })
+    .await
 }
 
 #[tauri::command]
