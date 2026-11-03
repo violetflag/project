@@ -26,6 +26,8 @@ type S = {
   models: ModelInfo[];
   qwen: QwenStatus | null;
   cc: CcStatus | null;
+  /** Connecting the Claude account: download progress / waiting for the browser sign-in. */
+  ccConnect: { pct: number; state: string; message: string } | null;
   qwenSetup: { pct: number; state: string; message: string } | null;
   downloads: Record<string, { pct: number; state: string; message: string }>;
   exportJob: ExportJob | null;
@@ -38,7 +40,7 @@ type S = {
 
 export const st: S = {
   route: "home", projects: [], project: null, draftId: null, sourceId: null, folder: "", playhead: 0, selClip: null,
-  settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, qwenSetup: null, downloads: {}, exportJob: null, toast: "",
+  settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, ccConnect: null, qwenSetup: null, downloads: {}, exportJob: null, toast: "",
   agentBusy: false, agentStatus: "", rightTab: "inspect", leftTab: "media",
 };
 
@@ -298,6 +300,33 @@ export async function refreshCc() {
   try { set({ cc: await api.ccStatus() }); } catch (e) { set({ cc: { found: false, path: "", version: "", logged_in: false, method: "", account: "", plan: "", error: String(e) } }); }
   return st.cc!;
 }
+/** "Claude 계정 연결": fetch Reelcut's own Claude Code if needed, open the sign-in, wait for it. */
+export async function connectClaude() {
+  if (st.ccConnect?.state === "running") return;
+  try {
+    let cc = st.cc ?? (await refreshCc());
+    if (!cc.found) {
+      set({ ccConnect: { pct: 0, state: "running", message: "Claude Code 내려받는 중" } });
+      const w = waitJob("claude", "cc-setup");
+      await api.ccSetup();
+      const e = await w;
+      if (e.state !== "done") throw new Error(e.message || "내려받기 실패");
+      cc = await refreshCc();
+    }
+    set({ ccConnect: { pct: 100, state: "running", message: "브라우저에서 Claude 계정으로 승인해 주세요. 로그인 창이 따로 열립니다." } });
+    await api.ccLogin();
+    for (let i = 0; i < 200; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      if (st.ccConnect?.state !== "running") return;
+      cc = await refreshCc();
+      if (cc.logged_in) { set({ ccConnect: null }); toast("Claude 계정을 연결했습니다"); return; }
+    }
+    set({ ccConnect: { pct: 0, state: "error", message: "로그인을 기다리다 시간이 지났습니다. 다시 눌러 주세요." } });
+  } catch (e) {
+    set({ ccConnect: { pct: 0, state: "error", message: String((e as Error)?.message ?? e) } });
+  }
+}
+
 export async function refreshQwen(deep = false) {
   try { set({ qwen: await api.qwenStatus(deep) }); } catch { /* none */ }
 }
@@ -333,6 +362,9 @@ export async function initJobs() {
         set({ qwenSetup: { pct: e.pct, state: e.state, message: e.message } });
         if (e.state === "done") { refreshQwen(true); toast("Qwen 받아쓰기를 설치했습니다"); }
         if (e.state === "error") toast("Qwen 설치 실패: " + e.message.slice(0, 200));
+        break;
+      case "cc-setup":
+        if (e.state === "running") set({ ccConnect: { pct: e.pct, state: "running", message: e.message } });
         break;
       case "export":
         if (st.exportJob && st.exportJob.id === e.id) {

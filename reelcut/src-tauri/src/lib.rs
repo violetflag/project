@@ -491,18 +491,29 @@ async fn claude(key: String, body: Value, betas: Vec<String>) -> Result<Value, S
 
 /// Claude Code (signed in with the Claude plan): is it installed, who is signed in.
 #[tauri::command]
-async fn cc_status() -> Result<cc::Status, String> {
-    blocking(|| Ok(cc::status())).await
+async fn cc_status(app: St<'_>) -> Result<cc::Status, String> {
+    let data = app.data_dir.clone();
+    blocking(move || Ok(cc::status(&data))).await
 }
 
 #[tauri::command]
-fn cc_login() -> Result<(), String> {
-    cc::login()
+fn cc_login(app: St<'_>) -> Result<(), String> {
+    cc::login(&app.data_dir)
 }
 
+/// Downloads Reelcut's own copy of Claude Code (job kind "cc-setup", id "claude").
 #[tauri::command]
-fn cc_install() -> Result<(), String> {
-    cc::install()
+fn cc_setup(handle: tauri::AppHandle, app: St<'_>) -> Result<(), String> {
+    let data = app.data_dir.clone();
+    std::thread::spawn(move || {
+        let h = handle.clone();
+        let r = cc::download(&data, |pct, msg| emit(&h, "claude", "cc-setup", pct, "running", msg, Value::Null));
+        match r {
+            Ok(p) => emit(&handle, "claude", "cc-setup", 100.0, "done", "", json!({ "path": p })),
+            Err(e) => emit(&handle, "claude", "cc-setup", 0.0, "error", &e, Value::Null),
+        }
+    });
+    Ok(())
 }
 
 /// Starts one agent turn through Claude Code. Output lines arrive as "cc" events
@@ -514,7 +525,7 @@ fn cc_run(handle: tauri::AppHandle, app: St<'_>, model: String, effort: String, 
     let workdir = st.data_dir.join("agent");
     std::thread::spawn(move || {
         let h2 = handle.clone();
-        let r = cc::run(&st.cc, cc::Turn { model, effort, system, prompt, session, workdir }, |v| {
+        let r = cc::run(&st.cc, cc::Turn { model, effort, system, prompt, session, workdir, data: st.data_dir.clone() }, |v| {
             let _ = h2.emit("cc", json!({ "kind": "line", "data": v }));
         });
         let (ok, err) = match r {
@@ -620,7 +631,7 @@ pub fn run() {
             claude,
             cc_status,
             cc_login,
-            cc_install,
+            cc_setup,
             cc_run,
             cc_answer,
             cc_stop

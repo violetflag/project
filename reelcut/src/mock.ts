@@ -108,7 +108,12 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
     case "path_exists": return true;
     case "initial_files": return [];
     case "cc_status": return (window as any).__mockCcStatus ?? { found: true, path: "C:/Users/me/.local/bin/claude.exe", version: "2.1.0", logged_in: true, method: "claude.ai", account: "me@example.com", plan: "max", error: "" };
-    case "cc_login": case "cc_install": (window as any).__ccOpened = cmd; return;
+    case "cc_login": (window as any).__ccOpened = cmd; if ((window as any).__mockCcStatus) (window as any).__mockCcStatus = { ...(window as any).__mockCcStatus, logged_in: true, account: "me@example.com", plan: "max", method: "claude.ai" }; return;
+    case "cc_setup":
+      (window as any).__ccSetup = true;
+      [30, 70].forEach((pct, i) => setTimeout(() => subs.forEach((f) => f({ id: "claude", kind: "cc-setup", pct, state: "running", message: "Claude Code 내려받는 중", result: null })), 40 * (i + 1)));
+      setTimeout(() => { if ((window as any).__mockCcStatus) (window as any).__mockCcStatus = { ...(window as any).__mockCcStatus, found: true, version: "2.1.317" }; subs.forEach((f) => f({ id: "claude", kind: "cc-setup", pct: 100, state: "done", message: "", result: {} })); }, 150);
+      return;
     case "cc_run": mockCcRun(a); return;
     case "cc_answer": { const f = ccWait.get(a.id); ccWait.delete(a.id); f?.(a.result); return !!f; }
     case "cc_stop": ccStopped = true; ccWait.forEach((f) => f({ content: [{ type: "text", text: "멈춤" }], isError: true })); ccWait.clear(); return true;

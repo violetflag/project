@@ -462,8 +462,7 @@ function loginHint(msg: string) {
 async function askAccount(text: string) {
   const s = st.settings;
   const cc = st.cc ?? (await api.ccStatus().catch(() => null));
-  if (cc && !cc.found) throw new Error("Claude Code가 이 PC에 없습니다. 설정 > AI 편집에서 'Claude Code 설치'를 눌러 주세요.");
-  if (cc && !cc.logged_in) throw new Error("Claude 계정에 로그인되어 있지 않습니다. 설정 > AI 편집에서 'Claude 계정 연결'을 눌러 주세요.");
+  if (cc && (!cc.found || !cc.logged_in)) throw new Error("Claude 계정에 로그인되어 있지 않습니다. 설정 > AI 편집에서 'Claude 계정 연결'을 눌러 주세요.");
   stopFlag = false;
   ccRunning = true;
   set({ agentBusy: true, agentStatus: "생각하는 중…" });

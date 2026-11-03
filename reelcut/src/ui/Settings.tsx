@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { api, pickFolder } from "../api";
 import { EFFORTS, MODELS } from "../agent";
-import { refreshCc, refreshModels, refreshQwen, saveNow, saveSettings, set, st, toast, useStore } from "../store";
+import { connectClaude, refreshCc, refreshModels, refreshQwen, saveNow, saveSettings, set, st, toast, useStore } from "../store";
 
 export function SettingsView() {
   const s = useStore();
@@ -41,18 +41,24 @@ export function SettingsView() {
         </label>
         {(cfg.aiMode ?? "account") === "account" ? (
           <div class="qwen-box cc-box">
-            <p class="muted">이 PC의 Claude Code로 Claude 계정에 로그인해서 씁니다. Pro·Max 구독의 사용 한도 안에서 돌아가고, API 요금은 따로 나가지 않습니다.</p>
+            <p class="muted">Claude Pro·Max 구독의 사용 한도 안에서 돌아가고, API 요금은 따로 나가지 않습니다. 처음 한 번 'Claude 계정 연결'을 누르면 Reelcut 전용 Claude Code(약 150MB)를 Anthropic 공식 저장소에서 받아 오고, 브라우저에서 로그인합니다. 이 로그인은 Reelcut만 씁니다.</p>
             <ul class="facts">
-              <li>Claude Code: {cc == null ? "확인 중…" : cc.found ? <span class="ok">설치됨{cc.version ? ` (${cc.version})` : ""}</span> : <span class="warn">없음</span>}</li>
-              {cc?.found && <li>계정: {cc.logged_in ? <span class="ok">{cc.account || "로그인됨"}{cc.plan ? ` · ${cc.plan}` : ""}</span> : <span class="warn">로그인 안 됨</span>}
-                {cc.logged_in && cc.method && !/claude/i.test(cc.method) && <span class="warn"> (구독이 아닌 {cc.method} 방식으로 로그인되어 있어 요금이 따로 나갈 수 있습니다)</span>}</li>}
+              <li>계정: {cc == null ? "확인 중…" : cc.logged_in ? <span class="ok">{cc.account || "연결됨"}{cc.plan ? ` · ${cc.plan}` : ""}</span> : <span class="warn">연결 안 됨</span>}
+                {cc?.logged_in && /api.?key|console/i.test(cc.method) && <span class="warn"> (구독이 아닌 API 방식으로 로그인되어 요금이 따로 나갈 수 있습니다)</span>}</li>
+              {cc?.found && <li class="muted">Claude Code {cc.version}</li>}
               {cc?.error && <li class="warn">{cc.error.slice(0, 200)}</li>}
             </ul>
+            {s.ccConnect && (
+              <div>
+                {s.ccConnect.state === "running" && s.ccConnect.pct < 100 && <div class="bar"><div style={{ width: `${s.ccConnect.pct}%` }} /></div>}
+                <p class={s.ccConnect.state === "error" ? "warn" : "muted"}>{s.ccConnect.state === "running" && <span class="spin" />} {s.ccConnect.message}</p>
+              </div>
+            )}
             <div class="row">
-              {cc && !cc.found && <button class="primary" onClick={async () => { try { await api.ccInstall(); setCcMsg("설치 창이 열렸습니다. 설치가 끝나면 '다시 확인'을 누르세요."); } catch (e) { setCcMsg("실패: " + e); } }}>Claude Code 설치</button>}
-              {cc?.found && !cc.logged_in && <button class="primary" onClick={async () => { try { await api.ccLogin(); setCcMsg("로그인 창과 브라우저가 열립니다. Claude 계정으로 승인한 뒤 '다시 확인'을 누르세요."); } catch (e) { setCcMsg("실패: " + e); } }}>Claude 계정 연결</button>}
-              {cc?.found && cc.logged_in && <button onClick={async () => { try { await api.ccLogin(); setCcMsg("다른 계정으로 로그인하는 창이 열렸습니다."); } catch (e) { setCcMsg("실패: " + e); } }}>다른 계정으로 연결</button>}
-              <button onClick={async () => { setCcMsg("확인 중…"); const r = await refreshCc(); setCcMsg(r.found && r.logged_in ? "연결되어 있습니다." : ""); }}>다시 확인</button>
+              {!cc?.logged_in && <button class="primary" disabled={s.ccConnect?.state === "running"} onClick={() => connectClaude()}>Claude 계정 연결</button>}
+              {cc?.logged_in && <button disabled={s.ccConnect?.state === "running"} onClick={() => connectClaude()}>다른 계정으로 연결</button>}
+              {s.ccConnect?.state === "running" && <button onClick={() => set({ ccConnect: null })}>그만 기다리기</button>}
+              <button onClick={async () => { setCcMsg("확인 중…"); const r = await refreshCc(); setCcMsg(r.logged_in ? "연결되어 있습니다." : ""); }}>다시 확인</button>
             </div>
             {ccMsg && <p class="muted">{ccMsg}</p>}
           </div>
