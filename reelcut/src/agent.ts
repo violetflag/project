@@ -8,8 +8,9 @@ import {
   type Pacing,
 } from "./edit";
 import { exportAndWait } from "./exporter";
-import { asset, assetMap, editDraft, loadWave, mutate, saveNow, set, setDrafts, startTranscribe, st, waitJob, waves } from "./store";
-import type { Asset, ChatBlock, ChatMsg, Draft } from "./types";
+import { compactBudget, ctxLimit, estTokens, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
+import { activeChat, asset, assetMap, editDraft, loadWave, mutate, mutateChat, saveNow, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
+import type { Asset, ChatBlock, ChatMsg, ChatSession, Draft } from "./types";
 
 export const MODELS = [
   { id: "claude-opus-5-5", label: "Claude Opus 5.5" },
@@ -390,78 +391,188 @@ function stateNote(): string {
   return `<project-state>열린 편집본: ${d ? `${d.id} "${d.name}" (클립 ${d.clips.length}개, ${r3(draftDuration(d))}초)` : "없음"} | 미디어 ${st.project?.assets.length ?? 0}개 | 재생 위치 ${r3(st.playhead)}초${st.selClip ? ` | 선택한 클립 ${st.selClip}` : ""}</project-state>`;
 }
 
-function pushMsg(m: ChatMsg) {
-  mutate((p) => ({ ...p, chat: [...p.chat, m] }));
+const chatById = (sid: string) => st.project?.chats?.find((c) => c.id === sid) ?? null;
+
+/** Appends to one session: the visible history and, after a compaction, the sent context too. */
+function pushMsg(sid: string, m: ChatMsg) {
+  mutateChat((c) => ({ ...c, messages: [...c.messages, m], context: c.context ? [...c.context, m] : undefined, updated: Date.now() }), sid);
+}
+
+/** Context size from a usage record: everything the model read plus what it wrote. */
+const usageTokens = (u: any) => (u ? (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.output_tokens ?? 0) : 0);
+function setCtx(sid: string, tokens: number, model: string) {
+  if (tokens > 0) mutateChat((c) => ({ ...c, ctxTokens: tokens, model }), sid);
+}
+
+/** Tokens a fresh context holds before any conversation (system prompt and tools), per mode; measured on first turns. */
+const BASE_KEY = "reelcut-ctx-base";
+function baseTokens(mode: "account" | "api"): number {
+  try { const v = JSON.parse(localStorage.getItem(BASE_KEY) || "{}")[mode]; if (v > 0) return v; } catch { /* default */ }
+  return mode === "api" ? estTokens(SYSTEM + JSON.stringify(TOOLS)) : 22_000;
+}
+function noteBase(mode: "account" | "api", ctx: number, sent: string) {
+  const b = Math.max(1000, ctx - estTokens(sent) - 500);
+  try { const all = JSON.parse(localStorage.getItem(BASE_KEY) || "{}"); all[mode] = all[mode] ? Math.min(all[mode], b) : b; localStorage.setItem(BASE_KEY, JSON.stringify(all)); } catch { /* ignore */ }
+}
+
+/** Starts a new conversation (the old ones stay in the list). */
+export function newChat(): string {
+  const c = newSession();
+  mutate((p) => ({ ...p, chats: [...(p.chats ?? []), c], activeChat: c.id }));
+  return c.id;
 }
 
 export async function ask(text: string) {
   if (!st.project || st.agentBusy) return;
+  const mode = st.settings.aiMode ?? "account";
+  let c = activeChat() ?? chatById(newChat())!;
+  // A conversation stays on one connection; switching connection opens a new conversation.
+  if (c.messages.length && (c.chatMode ?? "api") !== mode) { c = chatById(newChat())!; toast("연결 방식이 바뀌어 새 대화를 시작합니다"); }
+  const sid = c.id;
+  if (!c.messages.length) mutateChat((x) => ({ ...x, title: titleFrom(text), chatMode: mode }), sid);
   // Remember the drafts before this request, so its changes can be listed and undone as one.
-  const run = { id: uid(), at: Date.now(), prompt: text, before: st.project.drafts, draftId: st.draftId, done: false };
-  set({ aiRuns: [...st.aiRuns, run] });
+  const run = { id: uid(), chat: sid, at: Date.now(), prompt: text, before: st.project.drafts, draftId: st.draftId, done: false };
+  set({ aiRuns: [...st.aiRuns, run], agentBusy: true, agentStatus: "생각하는 중…" });
   try {
-    await askInner(text);
+    await compactIfNeeded(sid, mode);
+    if (mode === "account") await askAccount(sid, text);
+    else await askApi(sid, text);
   } finally {
-    set({ aiRuns: st.aiRuns.map((r) => (r.id === run.id ? { ...r, done: true, after: st.project?.drafts } : r)) });
+    set({ agentBusy: false, agentStatus: "", aiRuns: st.aiRuns.map((r) => (r.id === run.id ? { ...r, done: true, after: st.project?.drafts } : r)) });
+    await saveNow();
   }
 }
 
-async function askInner(text: string) {
-  if (!st.project) return;
+async function askApi(sid: string, text: string) {
   const s = st.settings;
-  const mode = s.aiMode ?? "account";
-  // A conversation stays on one connection; switching starts a new one.
-  if (st.project.chat.length && (st.project.chatMode ?? "api") !== mode) clearChat();
-  mutate((p) => ({ ...p, chatMode: mode }));
-  if (mode === "account") return askAccount(text);
   if (!s.apiKey) throw new Error("설정에서 Anthropic API 키를 먼저 넣어 주세요.");
   stopFlag = false;
-  set({ agentBusy: true, agentStatus: "생각하는 중…" });
-  pushMsg({ role: "user", content: [{ type: "text", text: stateNote() }, { type: "text", text }] });
-  try {
-    for (let turn = 0; turn < 40; turn++) {
-      if (stopFlag) break;
-      const body: any = {
-        model: s.model, max_tokens: 16000, system: SYSTEM, tools: TOOLS, messages: st.project!.chat,
-        thinking: { type: "adaptive" }, output_config: { effort: s.effort }, cache_control: { type: "ephemeral" },
-      };
-      let res: any;
-      try {
+  pushMsg(sid, { role: "user", content: [{ type: "text", text: stateNote() }, { type: "text", text }] });
+  const sent = () => { const c = chatById(sid)!; return c.context ?? c.messages; };
+  for (let turn = 0; turn < 40; turn++) {
+    if (stopFlag) break;
+    const body: any = {
+      model: s.model, max_tokens: 16000, system: SYSTEM, tools: TOOLS, messages: sent(),
+      thinking: { type: "adaptive" }, output_config: { effort: s.effort }, cache_control: { type: "ephemeral" },
+    };
+    let res: any;
+    try {
+      res = await api.claude(s.apiKey, body);
+    } catch (e) {
+      const msg = String(e);
+      // A thinking block that no longer matches (e.g. the model was switched): drop thinking blocks once.
+      if (/thinking/i.test(msg) && /signature|bound|different/i.test(msg)) {
+        const strip = (ms?: ChatMsg[]) => ms?.map((m) => (typeof m.content === "string" ? m : { ...m, content: m.content.filter((b) => b.type !== "thinking" && b.type !== "redacted_thinking") }));
+        mutateChat((c) => ({ ...c, messages: strip(c.messages)!, context: strip(c.context) }), sid);
+        body.messages = sent();
         res = await api.claude(s.apiKey, body);
-      } catch (e) {
-        const msg = String(e);
-        // A thinking block that no longer matches (e.g. the model was switched): drop thinking blocks once.
-        if (/thinking/i.test(msg) && /signature|bound|different/i.test(msg)) {
-          mutate((p) => ({ ...p, chat: p.chat.map((m) => (typeof m.content === "string" ? m : { ...m, content: m.content.filter((b) => b.type !== "thinking" && b.type !== "redacted_thinking") })) }));
-          body.messages = st.project!.chat;
-          res = await api.claude(s.apiKey, body);
-        } else throw e;
-      }
-      const content: ChatBlock[] = res.content ?? [];
-      pushMsg({ role: "assistant", content });
-      if (res.stop_reason === "refusal") { pushMsg({ role: "user", content: [{ type: "text", text: "(요청이 거절되었습니다)" }] }); break; }
-      const uses = content.filter((b) => b.type === "tool_use") as any[];
-      if (!uses.length) break;
-      const results: ChatBlock[] = [];
-      for (const u of uses) {
-        if (stopFlag || res.stop_reason === "max_tokens") {
-          results.push({ type: "tool_result", tool_use_id: u.id, content: stopFlag ? "사용자가 멈췄습니다." : "응답이 잘려 도구 입력이 완전하지 않습니다. 더 짧게 나눠서 다시 하세요.", is_error: true });
-          continue;
-        }
-        set({ agentStatus: TOOL_LABEL[u.name] ?? u.name });
-        try {
-          const out = await run(u.name, u.input ?? {});
-          results.push({ type: "tool_result", tool_use_id: u.id, content: typeof out === "string" ? out : out });
-        } catch (e) {
-          results.push({ type: "tool_result", tool_use_id: u.id, content: String((e as Error)?.message ?? e), is_error: true });
-        }
-      }
-      pushMsg({ role: "user", content: results });
-      set({ agentStatus: "생각하는 중…" });
+      } else throw e;
     }
+    const first = !chatById(sid)?.ctxTokens;
+    setCtx(sid, usageTokens(res.usage), s.model);
+    if (first && turn === 0) noteBase("api", usageTokens(res.usage), JSON.stringify(sent()));
+    const content: ChatBlock[] = res.content ?? [];
+    pushMsg(sid, { role: "assistant", content });
+    if (res.stop_reason === "refusal") { pushMsg(sid, { role: "user", content: [{ type: "text", text: "(요청이 거절되었습니다)" }] }); break; }
+    const uses = content.filter((b) => b.type === "tool_use") as any[];
+    if (!uses.length) break;
+    const results: ChatBlock[] = [];
+    for (const u of uses) {
+      if (stopFlag || res.stop_reason === "max_tokens") {
+        results.push({ type: "tool_result", tool_use_id: u.id, content: stopFlag ? "사용자가 멈췄습니다." : "응답이 잘려 도구 입력이 완전하지 않습니다. 더 짧게 나눠서 다시 하세요.", is_error: true });
+        continue;
+      }
+      set({ agentStatus: TOOL_LABEL[u.name] ?? u.name });
+      try {
+        const out = await run(u.name, u.input ?? {});
+        results.push({ type: "tool_result", tool_use_id: u.id, content: typeof out === "string" ? out : out });
+      } catch (e) {
+        results.push({ type: "tool_result", tool_use_id: u.id, content: String((e as Error)?.message ?? e), is_error: true });
+      }
+    }
+    pushMsg(sid, { role: "user", content: results });
+    set({ agentStatus: "생각하는 중…" });
+  }
+}
+
+// ---------------------------------------------------------------- automatic compaction
+
+/**
+ * When a session has reached the compaction point (90% of its model's limit by default), asks
+ * the model for a faithful summary and continues in a fresh context made of that summary and
+ * the latest turns, sized to the target (50%). The panel keeps showing the whole history.
+ */
+export async function compactIfNeeded(sid: string, mode: "account" | "api", force = false) {
+  const c = chatById(sid);
+  if (!c) return;
+  const s = st.settings;
+  const limit = ctxLimit(c.model ?? s.model, s);
+  if (!force && !needsCompaction(c.ctxTokens, limit, s)) return;
+  const since = c.marks?.length ? c.marks[c.marks.length - 1].at : 0;
+  if (c.messages.length - since < 2) return;
+  set({ agentStatus: "대화가 길어 요약하는 중…" });
+  let summary = "";
+  try {
+    summary = mode === "account" ? await summariseAccount(c) : await summariseApi(c);
+  } catch (e) {
+    toast(`대화 요약에 실패해서 그대로 이어 갑니다: ${String((e as Error)?.message ?? e).slice(0, 120)}`);
+    return;
+  }
+  if (!summary.trim()) return;
+  const base = baseTokens(mode);
+  const budget = Math.max(2000, compactBudget(limit, s) - base);
+  const seed = seedText(summary, c.messages.slice(since), budget);
+  const to = base + estTokens(seed);
+  const mark = { at: c.messages.length, from: c.ctxTokens ?? 0, to, time: Date.now() };
+  if (mode === "api") {
+    mutateChat((x) => ({
+      ...x, ctxTokens: to, marks: [...(x.marks ?? []), mark],
+      context: [{ role: "user", content: [{ type: "text", text: seed }] }, { role: "assistant", content: [{ type: "text", text: "요약과 최근 대화를 이어받았습니다. 계속하겠습니다." }] }],
+    }), sid);
+  } else {
+    mutateChat((x) => ({ ...x, ctxTokens: to, marks: [...(x.marks ?? []), mark], ccSession: undefined, seed }), sid);
+  }
+  set({ agentStatus: "생각하는 중…" });
+}
+
+async function summariseApi(c: ChatSession): Promise<string> {
+  const s = st.settings;
+  const msgs = (c.context ?? c.messages).slice();
+  // Messages must alternate and end with the assistant before our request.
+  while (msgs.length && msgs[msgs.length - 1].role === "user") msgs.pop();
+  const body: any = {
+    model: s.model, max_tokens: 8000, system: SYSTEM, tools: TOOLS, tool_choice: { type: "none" },
+    messages: [...msgs, { role: "user", content: [{ type: "text", text: SUMMARY_REQUEST }] }],
+  };
+  const res = await api.claude(s.apiKey, body);
+  return (res.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+}
+
+/** One Claude Code turn whose reply is collected (not shown): the summary request. */
+async function summariseAccount(c: ChatSession): Promise<string> {
+  const s = st.settings;
+  const offs: (() => void)[] = [];
+  let text = "";
+  let resolve!: (v: { ok: boolean; err: string }) => void;
+  const done = new Promise<{ ok: boolean; err: string }>((r) => { resolve = r; });
+  ccRunning = true;
+  try {
+    offs.push(await onEvent("cc", (e) => {
+      if (e.kind === "exit") { resolve({ ok: e.ok, err: e.err }); return; }
+      const v = e.data ?? {};
+      if (v.parent_tool_use_id) return;
+      if (v.type === "assistant") text += (v.message?.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+    }));
+    offs.push(await onEvent("cc-tool", async (e) => { await api.ccAnswer(e.id, { content: [{ type: "text", text: "요약 중에는 도구를 쓸 수 없습니다. 요약만 답하세요." }], isError: true }); }));
+    // Without a Claude Code conversation to resume (e.g. right after another compaction), summarise the visible history.
+    const prompt = c.ccSession ? SUMMARY_REQUEST : `${SUMMARY_REQUEST}\n\n<conversation>\n${(c.seed ? c.seed + "\n\n" : "") + recentWithin(c.messages, 60_000)}\n</conversation>`;
+    await api.ccRun({ model: c.model ?? s.model, effort: "low", system: SYSTEM_CC, prompt, session: c.ccSession ?? null, tools: TOOLS });
+    const end = await done;
+    if (!text.trim() && !end.ok) throw new Error(end.err.slice(-200) || "요약을 받지 못했습니다");
+    return text;
   } finally {
-    set({ agentBusy: false, agentStatus: "" });
-    await saveNow();
+    ccRunning = false;
+    offs.forEach((f) => f());
   }
 }
 
@@ -471,10 +582,6 @@ export const TOOL_LABEL: Record<string, string> = {
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
-
-export function clearChat() {
-  mutate((p) => ({ ...p, chat: [], ccSession: undefined }));
-}
 
 // ---------------------------------------------------------------- "Claude 계정" mode (Claude Code)
 
@@ -509,32 +616,41 @@ function loginHint(msg: string) {
     : "";
 }
 
-async function askAccount(text: string) {
+async function askAccount(sid: string, text: string) {
   const s = st.settings;
   const cc = st.cc ?? (await api.ccStatus().catch(() => null));
   if (cc && (!cc.found || !cc.logged_in)) throw new Error("Claude 계정에 로그인되어 있지 않습니다. 설정 > AI 편집에서 'Claude 계정 연결'을 눌러 주세요.");
   stopFlag = false;
   ccRunning = true;
-  set({ agentBusy: true, agentStatus: "생각하는 중…" });
-  pushMsg({ role: "user", content: [{ type: "text", text: stateNote() }, { type: "text", text }] });
+  pushMsg(sid, { role: "user", content: [{ type: "text", text: stateNote() }, { type: "text", text }] });
+  const c0 = chatById(sid)!;
+  // A fresh Claude Code conversation after a compaction starts from the summary and the latest turns.
+  const fresh = !c0.ccSession;
+  const prompt = `${fresh && c0.seed ? c0.seed + "\n\n" : ""}${stateNote()}\n\n${text}`;
   const offs: (() => void)[] = [];
   let resultErr = "";
   let gotResult = false;
+  let lastCtx = 0;
   try {
     let resolve!: (v: { ok: boolean; err: string }) => void;
     const done = new Promise<{ ok: boolean; err: string }>((r) => { resolve = r; });
     offs.push(await onEvent("cc", (e) => {
         if (e.kind === "exit") { resolve({ ok: e.ok, err: e.err }); return; }
         const v = e.data ?? {};
-        if (v.session_id && st.project && st.project.ccSession !== v.session_id) mutate((p) => ({ ...p, ccSession: v.session_id }));
+        if (v.session_id && chatById(sid)?.ccSession !== v.session_id) mutateChat((x) => ({ ...x, ccSession: v.session_id, seed: undefined }), sid);
         if (v.parent_tool_use_id) return;
         if (v.type === "assistant") {
+          const n = usageTokens(v.message?.usage);
+          if (n) { lastCtx = n; setCtx(sid, n, s.model); }
           const c = shown(v.message?.content);
-          if (c.length) pushMsg({ role: "assistant", content: c });
+          if (c.length) pushMsg(sid, { role: "assistant", content: c });
           if (c.some((b) => b.type === "text")) set({ agentStatus: "생각하는 중…" });
         } else if (v.type === "user") {
           const c = shown(Array.isArray(v.message?.content) ? v.message.content : []);
-          if (c.length) pushMsg({ role: "user", content: c });
+          if (c.length) pushMsg(sid, { role: "user", content: c });
+        } else if (v.type === "system" && v.subtype === "compact_boundary") {
+          // Claude Code compacted on its own: the next usage shows the new size.
+          set({ agentStatus: "Claude Code가 대화를 줄이는 중…" });
         } else if (v.type === "result") {
           gotResult = true;
           if (v.is_error || (v.subtype && v.subtype !== "success")) resultErr = String(v.result || (v.errors ?? []).join(" ") || v.subtype || "실패");
@@ -552,23 +668,18 @@ async function askAccount(text: string) {
         await api.ccAnswer(e.id, result);
         if (ccRunning) set({ agentStatus: "생각하는 중…" });
     }));
-    await api.ccRun({
-      model: s.model, effort: s.effort, system: SYSTEM_CC, prompt: `${stateNote()}\n\n${text}`,
-      session: st.project!.ccSession ?? null, tools: TOOLS,
-    });
+    await api.ccRun({ model: s.model, effort: s.effort, system: SYSTEM_CC, prompt, session: c0.ccSession ?? null, tools: TOOLS });
     const end = await done;
+    if (fresh && !c0.seed && lastCtx) noteBase("account", lastCtx, prompt);
     if (stopFlag) return;
     if (resultErr) throw new Error(loginHint(resultErr) || `Claude 오류: ${resultErr.slice(0, 300)}`);
     if (!end.ok && !gotResult) {
       // A conversation that can no longer be resumed: start fresh next time.
-      if (/No conversation found|session/i.test(end.err)) mutate((p) => ({ ...p, ccSession: undefined }));
+      if (/No conversation found|session/i.test(end.err)) mutateChat((x) => ({ ...x, ccSession: undefined }), sid);
       throw new Error(loginHint(end.err) || `Claude Code가 멈췄습니다: ${end.err.slice(-300) || "알 수 없는 오류"}`);
     }
   } finally {
     ccRunning = false;
     offs.forEach((f) => f());
-    set({ agentBusy: false, agentStatus: "" });
-    await saveNow();
   }
 }
-

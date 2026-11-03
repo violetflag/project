@@ -1,8 +1,9 @@
 // App state: one module-level store, components re-render through useStore().
 import { useEffect, useReducer } from "preact/hooks";
 import { api, onJob, type AppInfo, type CcStatus, type ModelInfo, type QwenStatus } from "./api";
+import { CTX_DEFAULTS, migrateChats, newSession } from "./chats";
 import { draftDuration, newDraft, refineWords, rippleConnected, uid } from "./edit";
-import type { Asset, Draft, JobEvent, Lens, Project, Settings, Word } from "./types";
+import type { Asset, ChatSession, Draft, JobEvent, Lens, Project, Settings, Word } from "./types";
 
 export type Meta = { id: string; name: string; updated: number; created: number; assets: number; drafts: number; duration: number; poster?: string; clips: number };
 export type ExportJob = { id: string; draft: string; pct: number; state: string; message: string; out: string; result?: any; left?: number; name?: string };
@@ -11,10 +12,11 @@ export type Tool = "select" | "blade" | "roll" | "slip";
 /** Panel arrangement: the editing page, the transcript page, the 360 page. */
 export type Workspace = "edit" | "transcript" | "r360";
 /** One AI request: the drafts before it, so its changes can be listed and undone as one. */
-export type AiRun = { id: string; at: number; prompt: string; before: Draft[]; after?: Draft[]; draftId: string | null; done: boolean; undone?: boolean };
+export type AiRun = { id: string; chat: string; at: number; prompt: string; before: Draft[]; after?: Draft[]; draftId: string | null; done: boolean; undone?: boolean };
 
 export const DEFAULT_SETTINGS: Settings = {
   aiMode: "account", apiKey: "", model: "claude-opus-5-5", effort: "high", engine: "whisper", whisperModel: "turbo", lang: "ko", exportDir: "", autoProxy: true, autoTranscribe: true,
+  ...CTX_DEFAULTS,
 };
 
 type S = {
@@ -141,7 +143,8 @@ export async function loadProjects() {
 export async function createProject(name: string, aspect = "16:9", fps = 30): Promise<Project> {
   const now = Date.now();
   const d = newDraft("첫 편집본", aspect, fps);
-  const p: Project = { id: uid(), name: name || "새 프로젝트", created: now, updated: now, assets: [], folders: [], drafts: [d], chat: [] };
+  const c = newSession();
+  const p: Project = { id: uid(), name: name || "새 프로젝트", created: now, updated: now, assets: [], folders: [], drafts: [d], chats: [c], activeChat: c.id };
   set({ project: p, draftId: d.id, route: "project", sourceId: null, playhead: 0, selClip: null, selItem: null, folder: "", aiRuns: [] });
   undoStack.length = 0; redoStack.length = 0;
   await saveNow();
@@ -151,8 +154,8 @@ export async function createProject(name: string, aspect = "16:9", fps = 30): Pr
 export async function openProject(id: string) {
   const raw = await api.storeGet("project-" + id);
   if (!raw) return toast("프로젝트를 찾을 수 없습니다");
-  const p: Project = JSON.parse(raw);
-  p.chat ??= []; p.folders ??= [];
+  const p: Project = migrateChats(JSON.parse(raw));
+  p.folders ??= [];
   if (!p.drafts.length) p.drafts.push(newDraft("첫 편집본"));
   undoStack.length = 0; redoStack.length = 0;
   set({ project: p, draftId: p.drafts[0].id, route: "project", sourceId: null, playhead: 0, selClip: null, selItem: null, folder: "", aiRuns: [] });
@@ -176,6 +179,15 @@ export async function renameProject(id: string, name: string) {
   const p: Project = { ...JSON.parse(raw), name, updated: Date.now() };
   await api.storeSet("project-" + id, JSON.stringify(p));
   await loadProjects();
+}
+
+/** The AI conversation open in the panel. */
+export const activeChat = (): ChatSession | null => st.project?.chats?.find((c) => c.id === st.project?.activeChat) ?? st.project?.chats?.[0] ?? null;
+
+/** Changes one conversation (the open one by default). */
+export function mutateChat(fn: (c: ChatSession) => ChatSession, id = activeChat()?.id) {
+  if (!id) return;
+  mutate((p) => ({ ...p, chats: (p.chats ?? []).map((c) => (c.id === id ? fn(c) : c)) }));
 }
 
 /** Changes the open project (no undo entry). */

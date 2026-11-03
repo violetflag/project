@@ -1,9 +1,10 @@
-import { LoaderCircle, Sparkles, Undo2 } from "lucide-preact";
+import { LoaderCircle, Pencil, Plus, Sparkles, Trash2, Undo2 } from "lucide-preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { ask, clearChat, EFFORTS, MODELS, stopAgent, TOOL_LABEL } from "../agent";
+import { ask, EFFORTS, MODELS, newChat, stopAgent, TOOL_LABEL } from "../agent";
+import { ctxLimit, fmtK, newSession, sessionsNewestFirst } from "../chats";
 import { draftDuration, fmtTC, overlays, starts } from "../edit";
-import { set, setDrafts, st, toast, useStore, type AiRun } from "../store";
-import type { ChatBlock, Draft } from "../types";
+import { activeChat, mutate, mutateChat, set, setDrafts, st, toast, useStore, type AiRun } from "../store";
+import type { ChatBlock, ChatSession, Draft } from "../types";
 import { player } from "./Viewer";
 
 const SUGGEST = [
@@ -95,23 +96,81 @@ function RunCard({ r, last }: { r: AiRun; last: boolean }) {
   );
 }
 
+/** The unsent prompt, kept per project and conversation so it survives tab switches and restarts. */
+const promptKey = (projectId: string, chatId: string) => `reelcut-ai-prompt-${projectId}-${chatId}`;
+function loadPrompt(projectId: string, chatId: string): string {
+  try { return localStorage.getItem(promptKey(projectId, chatId)) ?? localStorage.getItem(`reelcut-ai-prompt-${projectId}`) ?? ""; } catch { return ""; }
+}
+function savePrompt(projectId: string, chatId: string, text: string) {
+  try {
+    localStorage.removeItem(`reelcut-ai-prompt-${projectId}`); // the per-project key of 2.1.2
+    if (text) localStorage.setItem(promptKey(projectId, chatId), text);
+    else localStorage.removeItem(promptKey(projectId, chatId));
+  } catch { /* storage unavailable: the text just isn't kept */ }
+}
+
+const when = (ms: number) => {
+  const d = new Date(ms), p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
+/** Context used by this conversation against its model's limit, with the compaction point. */
+function Meter({ c }: { c: ChatSession }) {
+  const s = st.settings;
+  const limit = ctxLimit(c.model ?? s.model, s);
+  const used = c.ctxTokens ?? 0;
+  const pct = Math.min(100, (used / limit) * 100);
+  const at = s.compactAt || 90;
+  const cls = pct >= at ? "hot" : pct >= at - 15 ? "warm" : "";
+  return (
+    <div class={`ctx-meter ${cls}`} title={`이 대화의 컨텍스트: ${used.toLocaleString()} / ${limit.toLocaleString()} 토큰. ${at}%가 되면 자동으로 요약해 ${s.compactTo || 50}% 이하로 줄입니다.`}>
+      <span class="ctx-num">{fmtK(used)} / {fmtK(limit)}</span>
+      <span class="ctx-bar" role="meter" aria-label="컨텍스트 사용량" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100}>
+        <span class="ctx-fill" style={{ width: `${pct}%` }} />
+        <span class="ctx-at" style={{ left: `${at}%` }} />
+      </span>
+    </div>
+  );
+}
+
 export function AgentPanel() {
   const s = useStore();
-  const chat = s.project!.chat;
-  const [text, setText] = useState("");
+  const p = s.project!;
+  const c = activeChat();
+  const chat = c?.messages ?? [];
+  const projectId = p.id, chatId = c?.id ?? "";
+  const [text, setTextState] = useState(() => loadPrompt(projectId, chatId));
+  const setText = (t: string) => { setTextState(t); savePrompt(projectId, chatId, t); };
   const [err, setErr] = useState("");
+  const [renaming, setRenaming] = useState(false);
   const list = useRef<HTMLDivElement>(null);
-  useEffect(() => { list.current?.scrollTo(0, list.current.scrollHeight); }, [chat.length, s.agentStatus, s.aiRuns.length]);
+  useEffect(() => { list.current?.scrollTo(0, list.current.scrollHeight); }, [chat.length, s.agentStatus, s.aiRuns.length, chatId]);
+  // Another project or conversation: show its own unsent prompt.
+  useEffect(() => { setTextState(loadPrompt(projectId, chatId)); setErr(""); }, [projectId, chatId]);
 
   const send = async (t = text) => {
     if (!t.trim() || s.agentBusy) return;
     if (s.settings.aiMode === "api" && !s.settings.apiKey) { setErr("설정에서 Anthropic API 키를 먼저 넣어 주세요."); return; }
     setText(""); setErr("");
-    try { await ask(t.trim()); } catch (e) { setErr(String((e as Error)?.message ?? e)); }
+    // A request that fails gives the text back, so nothing typed is lost.
+    try { await ask(t.trim()); } catch (e) { setErr(String((e as Error)?.message ?? e)); if (!loadPrompt(projectId, chatId)) setText(t); }
+  };
+  const open = (id: string) => { if (!s.agentBusy) mutate((x) => ({ ...x, activeChat: id })); };
+  const remove = () => {
+    if (!c || !confirm(`대화 "${c.title}"를 지울까요? 되돌릴 수 없습니다.`)) return;
+    savePrompt(projectId, c.id, "");
+    const rest = (p.chats ?? []).filter((x) => x.id !== c.id);
+    if (!rest.length) rest.push(newSession());
+    mutate((x) => ({ ...x, chats: rest, activeChat: rest.slice().sort((a, b) => b.updated - a.updated)[0].id }));
+    set({ aiRuns: s.aiRuns.filter((r) => r.chat !== c.id) });
   };
 
-  const items: { kind: "user" | "ai" | "tool" | "err"; text: string }[] = [];
-  for (const m of chat) {
+  // Shown items, with a divider where earlier turns were compacted.
+  type Item = { kind: "user" | "ai" | "tool" | "err" | "mark"; text: string };
+  const items: Item[] = [];
+  const marks = c?.marks ?? [];
+  chat.forEach((m, i) => {
+    for (const mk of marks) if (mk.at === i) items.push({ kind: "mark", text: `여기까지 요약됨 (${fmtK(mk.from)} → ${fmtK(mk.to)})` });
     if (m.role === "user") {
       const t = textOf(m.content);
       if (t) items.push({ kind: "user", text: t });
@@ -122,18 +181,36 @@ export function AgentPanel() {
         if (b.type === "tool_use") items.push({ kind: "tool", text: TOOL_LABEL[String(b.name)] ?? String(b.name) });
       }
     }
-  }
+  });
+  for (const mk of marks) if (mk.at >= chat.length) items.push({ kind: "mark", text: `여기까지 요약됨 (${fmtK(mk.from)} → ${fmtK(mk.to)})` });
   const model = MODELS.find((m) => m.id === s.settings.model)?.label ?? s.settings.model;
   const effort = EFFORTS.find((e) => e.id === s.settings.effort)?.label ?? "";
-  const runs = s.aiRuns.filter((r) => r.done);
+  const runs = s.aiRuns.filter((r) => r.done && r.chat === chatId);
+  const all = sessionsNewestFirst(p);
 
   return (
     <div class="agent">
       <div class="agent-head">
+        {renaming && c ? (
+          <input class="chat-name" autoFocus defaultValue={c.title} aria-label="대화 이름"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { const v = (e.target as HTMLInputElement).value.trim(); if (v) mutateChat((x) => ({ ...x, title: v })); setRenaming(false); }
+              if (e.key === "Escape") setRenaming(false);
+            }} onBlur={() => setRenaming(false)} />
+        ) : (
+          <select class="chat-pick" value={chatId} disabled={s.agentBusy} onChange={(e) => open((e.target as HTMLSelectElement).value)} aria-label="대화 기록" title="이 프로젝트의 대화 (최근 순)">
+            {all.map((x) => <option value={x.id}>{x.title} · {when(x.updated)}{x.messages.length ? "" : " (비어 있음)"}</option>)}
+          </select>
+        )}
+        <button class="icon-btn" disabled={!c || s.agentBusy} onClick={() => setRenaming(true)} aria-label="대화 이름 바꾸기" title="대화 이름 바꾸기"><Pencil size={14} /></button>
+        <button class="icon-btn" disabled={!c || s.agentBusy} onClick={remove} aria-label="대화 지우기" title="대화 지우기"><Trash2 size={14} /></button>
+        <button class="small" disabled={s.agentBusy || !chat.length} onClick={() => { newChat(); toast("새 대화를 시작합니다. 이전 대화는 목록에 남아 있습니다"); }} title="새 대화 (이전 대화는 목록에 남음)"><Plus size={13} aria-hidden="true" /> 새 대화</button>
+      </div>
+      <div class="agent-sub">
         <button class="chip" onClick={() => set({ route: "settings" })} title="모델과 생각 깊이는 설정에서 바꿉니다">{model} · 생각 {effort}</button>
         <span class="muted conn">{s.settings.aiMode === "api" ? "API 키" : "Claude 계정"}</span>
         <span class="spacer" />
-        <button class="small" disabled={s.agentBusy || !chat.length} onClick={() => { clearChat(); set({ aiRuns: [] }); toast("새 대화를 시작합니다"); }}>새 대화</button>
+        {c && <Meter c={c} />}
       </div>
       <div class="chat" ref={list} aria-live="polite">
         {!items.length && (
@@ -142,7 +219,7 @@ export function AgentPanel() {
             {SUGGEST.map((t) => <button class="chip" onClick={() => send(t)}>{t}</button>)}
           </div>
         )}
-        {items.map((it) => <div class={`msg ${it.kind}`}>{it.kind === "ai" ? <Md text={it.text} /> : it.text}</div>)}
+        {items.map((it) => it.kind === "mark" ? <div class="compact-mark" role="separator"><span>{it.text}</span></div> : <div class={`msg ${it.kind}`}>{it.kind === "ai" ? <Md text={it.text} /> : it.text}</div>)}
         {runs.length > 0 && <RunCard r={runs[runs.length - 1]} last={st.aiRuns[st.aiRuns.length - 1]?.id === runs[runs.length - 1].id} />}
         {s.agentBusy && <div class="msg status"><LoaderCircle size={13} class="spin-i" aria-hidden="true" /> {s.agentStatus}</div>}
         {err && <div class="msg err">{err} <a onClick={() => set({ route: "settings" })}>설정 열기</a></div>}

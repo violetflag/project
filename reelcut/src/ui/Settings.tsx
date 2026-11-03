@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { api, pickFolder } from "../api";
 import { EFFORTS, MODELS } from "../agent";
+import { CTX_DEFAULTS } from "../chats";
 import { connectClaude, refreshCc, refreshModels, refreshQwen, saveNow, saveSettings, set, st, toast, useStore } from "../store";
 
 export function SettingsView() {
@@ -86,6 +87,23 @@ export function SettingsView() {
               {EFFORTS.map((m) => <option value={m.id}>{m.label}</option>)}
             </select>
           </label>
+        </div>
+        <h3 class="sub">컨텍스트와 자동 요약</h3>
+        <p class="muted">대화가 길어지면 한도의 {cfg.compactAt || 90}%에서 자동으로 요약해 {cfg.compactTo || 50}% 이하로 줄입니다. 지난 대화는 패널에 그대로 남습니다.</p>
+        <div class="row">
+          <label>Haiku 한도 (토큰)
+            <input type="number" min={8000} max={2000000} step={1000} value={cfg.ctxHaiku || CTX_DEFAULTS.ctxHaiku} onChange={(e) => saveSettings({ ctxHaiku: Math.max(8000, Number((e.target as HTMLInputElement).value) || CTX_DEFAULTS.ctxHaiku) })} />
+          </label>
+          <label>다른 모델 한도 (토큰)
+            <input type="number" min={8000} max={2000000} step={1000} value={cfg.ctxOther || CTX_DEFAULTS.ctxOther} onChange={(e) => saveSettings({ ctxOther: Math.max(8000, Number((e.target as HTMLInputElement).value) || CTX_DEFAULTS.ctxOther) })} />
+          </label>
+          <label>요약 시작 (%)
+            <input type="number" min={50} max={99} step={1} value={cfg.compactAt || CTX_DEFAULTS.compactAt} onChange={(e) => saveSettings({ compactAt: Math.min(99, Math.max(50, Number((e.target as HTMLInputElement).value) || 90)) })} />
+          </label>
+          <label>요약 후 목표 (%)
+            <input type="number" min={10} max={80} step={1} value={cfg.compactTo || CTX_DEFAULTS.compactTo} onChange={(e) => saveSettings({ compactTo: Math.min(80, Math.max(10, Number((e.target as HTMLInputElement).value) || 50)) })} />
+          </label>
+          <button class="small" onClick={() => saveSettings({ ...CTX_DEFAULTS })}>기본값 (90k · 950k · 90% → 50%)</button>
         </div>
       </section>
 

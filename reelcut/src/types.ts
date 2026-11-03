@@ -135,6 +135,32 @@ export type Draft = {
 export type ChatBlock = Record<string, unknown> & { type: string };
 export type ChatMsg = { role: "user" | "assistant"; content: ChatBlock[] | string };
 
+/** Where the visible history was compacted: messages before `at` were summarised. */
+export type CompactMark = { at: number; from: number; to: number; time: number };
+
+/** One AI conversation (a session) of a project. */
+export type ChatSession = {
+  id: string;
+  title: string;
+  created: number;
+  updated: number;
+  /** Everything shown in the panel (API message format). */
+  messages: ChatMsg[];
+  /** API mode after a compaction: what is actually sent (summary + recent turns). Absent = `messages`. */
+  context?: ChatMsg[];
+  /** Claude Code conversation id ("Claude 계정" mode), resumed on the next message. */
+  ccSession?: string;
+  /** Summary + recent turns to open a fresh Claude Code conversation with (after a compaction). */
+  seed?: string;
+  /** Which connection this conversation uses. */
+  chatMode?: "account" | "api";
+  /** Model of the last request (sets the context limit). */
+  model?: string;
+  /** Context size after the last turn, in tokens. */
+  ctxTokens?: number;
+  marks?: CompactMark[];
+};
+
 export type Project = {
   id: string;
   name: string;
@@ -143,11 +169,12 @@ export type Project = {
   assets: Asset[];
   folders: string[];
   drafts: Draft[];
-  /** Agent conversation (API message format). */
-  chat: ChatMsg[];
-  /** Claude Code conversation id ("Claude 계정" mode), resumed on the next message. */
+  /** AI conversations, one per session. */
+  chats?: ChatSession[];
+  activeChat?: string;
+  /** Before 2.3: the single conversation (moved into `chats` when the project opens). */
+  chat?: ChatMsg[];
   ccSession?: string;
-  /** Which connection the current conversation uses. */
   chatMode?: "account" | "api";
 };
 
@@ -166,6 +193,11 @@ export type Settings = {
   autoTranscribe: boolean;
   /** Export presets saved by the user. */
   exportPresets?: SavedExport[];
+  /** Context limits in tokens (Haiku models / all others) and the compaction rule in percent. */
+  ctxHaiku?: number;
+  ctxOther?: number;
+  compactAt?: number;
+  compactTo?: number;
 };
 
 export type SavedExport = { id: string; label: string; choice: Record<string, unknown> };
