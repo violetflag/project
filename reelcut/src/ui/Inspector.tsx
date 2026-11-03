@@ -12,6 +12,7 @@ import {
 import { asset, draft, editDraft, patchAsset, st, startProxy, toast, useStore } from "../store";
 import type { Clip, ColorAdj, Draft, MusicClip, Overlay, Transform, View } from "../types";
 import { player } from "./Viewer";
+import { Stitch360 } from "./Stitch360";
 
 const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 8];
 const OPEN_KEY = "reelcut-inspector-open";
@@ -223,6 +224,7 @@ function ClipView({ d, c }: { d: Draft; c: Clip }) {
                     {[180, 185, 190, 195, 200].map((x) => <option value={String(x)}>{x}°</option>)}
                   </select>
                 </label>
+                <Stitch360 a={a} />
                 <p class="muted tip">바꾸면 미리보기 파일을 다시 만듭니다. 이음매가 겹치거나 벌어지면 화각을 조정하세요.</p>
               </>
             ) : <p class="muted">이미 펼친 360 영상입니다.</p>}

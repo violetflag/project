@@ -6,6 +6,7 @@ mod media;
 mod probe;
 mod qwen;
 mod render;
+mod stitch;
 mod transcribe;
 #[cfg(test)]
 mod itest;
@@ -197,11 +198,24 @@ async fn inspect(app: St<'_>, path: String) -> Result<MediaInfo, String> {
     blocking(move || media::inspect(&app.bins.ffprobe, &path)).await
 }
 
+/// Lines the two lenses of a 360 recording up from where they overlap and matches their
+/// brightness (DJI Studio-style self-calibration); the result goes on the asset's lens.
+#[tauri::command]
+async fn calibrate_360(app: St<'_>, info: MediaInfo, lens: Lens) -> Result<stitch::Stitch, String> {
+    let app = app.inner().clone();
+    blocking(move || stitch::calibrate(&app.bins.ffmpeg, &app.bins.ffprobe, &info, &lens)).await
+}
+
 /// Starts making the proxy in the background; progress and the result path come as "job" events.
 #[tauri::command]
 fn make_proxy(handle: tauri::AppHandle, app: St<'_>, id: String, info: MediaInfo, lens: Lens) -> Result<Option<String>, String> {
     let app = app.inner().clone();
-    let key = format!("{}-{:x}", file_key(&info.path), hash(&(&lens.layout, lens.swap, (lens.fov * 10.0) as i64, 3u8)));
+    let key = if stitch::active(&lens) {
+        // Seam-blended proxies (and every new calibration) get their own file.
+        format!("{}-{:x}", file_key(&info.path), hash(&(&lens.layout, lens.swap, (lens.fov * 10.0) as i64, serde_json::to_string(&lens.stitch).unwrap_or_default(), 4u8)))
+    } else {
+        format!("{}-{:x}", file_key(&info.path), hash(&(&lens.layout, lens.swap, (lens.fov * 10.0) as i64, 3u8)))
+    };
     let out_dir = app.dir("proxies");
     let h264 = app.hw().h264.unwrap_or_else(|| "libx264".into());
     let Some(plan) = media::proxy_plan(&info, &lens, &h264, &out_dir, &key) else { return Ok(None) };
@@ -616,6 +630,7 @@ pub fn run() {
             expand_paths,
             inspect,
             make_proxy,
+            calibrate_360,
             filmstrip,
             poster,
             waveform,

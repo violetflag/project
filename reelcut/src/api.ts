@@ -1,6 +1,6 @@
 // Bridge to the Rust side. Outside Tauri (plain browser, for UI tests) a small mock answers instead.
 
-import type { Hw, JobEvent, Lens, MediaInfo, Plan, View, Word } from "./types";
+import type { Hw, JobEvent, Lens, MediaInfo, Plan, Stitch, View, Word } from "./types";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -51,6 +51,7 @@ export const api = {
   expandPaths: (paths: string[]) => invoke<[string, string][]>("expand_paths", { paths }),
   inspect: (path: string) => invoke<MediaInfo>("inspect", { path }),
   makeProxy: (id: string, info: MediaInfo, lens: Lens) => invoke<string | null>("make_proxy", { id, info, lens }),
+  calibrate360: (info: MediaInfo, lens: Lens) => invoke<Stitch>("calibrate_360", { info, lens }),
   filmstrip: (path: string, duration: number, count: number) => invoke<string>("filmstrip", { path, duration, count }),
   poster: (path: string, at: number) => invoke<string>("poster", { path, at }),
   waveform: (path: string) => invoke<number[]>("waveform", { path }),
