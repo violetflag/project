@@ -19,6 +19,26 @@ function textOf(c: ChatBlock[] | string): string {
   return c.filter((b) => b.type === "text" && !String(b.text).startsWith("<project-state>")).map((b) => String(b.text)).join("\n");
 }
 
+/** Inline **bold** and `code` (the model writes Markdown; shown as styled text, never as HTML). */
+function inline(t: string) {
+  return t.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part) =>
+    part.startsWith("**") && part.endsWith("**") && part.length > 4 ? <strong>{part.slice(2, -2)}</strong>
+      : part.startsWith("`") && part.endsWith("`") && part.length > 2 ? <code>{part.slice(1, -1)}</code>
+      : part);
+}
+/** Light Markdown for AI replies: headings, bullet and numbered lines, bold, code. */
+export function Md({ text }: { text: string }) {
+  return <>{text.split("\n").map((line) => {
+    const h = /^#{1,4}\s+(.*)$/.exec(line);
+    if (h) return <div class="md-h">{inline(h[1])}</div>;
+    const b = /^\s*[-*•]\s+(.*)$/.exec(line);
+    if (b) return <div class="md-li">{inline(b[1])}</div>;
+    const n = /^\s*(\d+)[.)]\s+(.*)$/.exec(line);
+    if (n) return <div class="md-li md-num" data-n={n[1] + "."}>{inline(n[2])}</div>;
+    return line.trim() ? <div>{inline(line)}</div> : <div class="md-gap" />;
+  })}</>;
+}
+
 type Change = { draft: Draft; created: boolean; dur0: number; dur1: number; clips0: number; clips1: number; spots: number[]; notes: string[] };
 
 /** What one AI request changed, draft by draft. */
@@ -122,7 +142,7 @@ export function AgentPanel() {
             {SUGGEST.map((t) => <button class="chip" onClick={() => send(t)}>{t}</button>)}
           </div>
         )}
-        {items.map((it) => <div class={`msg ${it.kind}`}>{it.text}</div>)}
+        {items.map((it) => <div class={`msg ${it.kind}`}>{it.kind === "ai" ? <Md text={it.text} /> : it.text}</div>)}
         {runs.length > 0 && <RunCard r={runs[runs.length - 1]} last={st.aiRuns[st.aiRuns.length - 1]?.id === runs[runs.length - 1].id} />}
         {s.agentBusy && <div class="msg status"><LoaderCircle size={13} class="spin-i" aria-hidden="true" /> {s.agentStatus}</div>}
         {err && <div class="msg err">{err} <a onClick={() => set({ route: "settings" })}>설정 열기</a></div>}
