@@ -1,18 +1,350 @@
-import { ASPECTS, DEFAULT_VIEW, clipDur, fmtTC, is360, r3, updateClip } from "../edit";
-import { asset, draft, editDraft, patchAsset, startProxy, useStore } from "../store";
-import type { Clip, View } from "../types";
+// Properties of the selection (Inspector): a main-track clip, a V2/V3 picture, a sound item,
+// or — with nothing selected — the draft itself. Sections fold; every number can be dragged on
+// its label, typed, or reset.
+import { ChevronDown, ChevronRight, Diamond, RotateCcw, Trash2 } from "lucide-preact";
+import type { ComponentChildren } from "preact";
+import { useState } from "preact/hooks";
+import { pickLut } from "../api";
+import {
+  ASPECTS, audioTrack, clipAt, clipDur, DEFAULT_COLOR, DEFAULT_TRANSFORM, DEFAULT_VIEW, detachAudio, fmtTCF, is360, isGap, overlays, parseTC, r3, setTransition, setViewKey, starts,
+  timedDur, updateAudio, updateClip, updateOverlay, viewAt,
+} from "../edit";
+import { asset, draft, editDraft, patchAsset, st, startProxy, toast, useStore } from "../store";
+import type { Clip, ColorAdj, Draft, MusicClip, Overlay, Transform, View } from "../types";
 import { player } from "./Viewer";
 
 const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 8];
+const OPEN_KEY = "reelcut-inspector-open";
+let openState: Record<string, boolean> = (() => { try { return JSON.parse(localStorage.getItem(OPEN_KEY) || "{}"); } catch { return {}; } })();
 
-function Num({ label, value, min, max, step, onChange, unit }: { label: string; value: number; min: number; max: number; step: number; unit?: string; onChange: (v: number) => void }) {
+function Section({ id, title, term, children, defaultOpen = true, extra }: { id: string; title: string; term?: string; children: ComponentChildren; defaultOpen?: boolean; extra?: ComponentChildren }) {
+  const [open, setOpen] = useState(openState[id] ?? defaultOpen);
+  const toggle = () => { const v = !open; setOpen(v); openState = { ...openState, [id]: v }; try { localStorage.setItem(OPEN_KEY, JSON.stringify(openState)); } catch { /* ignore */ } };
   return (
-    <label class="num">
+    <section class="isec">
+      <div class="isec-head">
+        <button class="isec-toggle" aria-expanded={open} onClick={toggle} title={term ? `${title} · ${term}` : title}>
+          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />} {title}
+        </button>
+        {extra}
+      </div>
+      {open && <div class="isec-body">{children}</div>}
+    </section>
+  );
+}
+
+/** Number field: drag the label left/right, type a value, or reset to the default. */
+function Num({ label, value, min, max, step, def, unit, onChange, onKey, keyed }: {
+  label: string; value: number; min: number; max: number; step: number; def?: number; unit?: string; onChange: (v: number) => void; onKey?: () => void; keyed?: boolean;
+}) {
+  const round = (v: number) => Math.round(Math.max(min, Math.min(max, v)) / step) * step;
+  const down = (e: PointerEvent) => {
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+    const x0 = e.clientX, v0 = value;
+    let last = value;
+    const move = (ev: PointerEvent) => { const v = r3(round(v0 + (ev.clientX - x0) * step * (ev.shiftKey ? 10 : 1))); if (v !== last) { last = v; onChange(v); } };
+    const up = () => { el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+  };
+  const changed = def != null && Math.abs(value - def) > step / 2;
+  return (
+    <div class="num">
+      <span class="num-label" onPointerDown={down as any} title={`${label}: 좌우로 끌어서 조절 (Shift: 10배)`}>{label}</span>
+      <input type="range" min={min} max={max} step={step} value={value} aria-label={label} onInput={(e) => onChange(Number((e.target as HTMLInputElement).value))} />
+      <input type="number" min={min} max={max} step={step} value={r3(value)} aria-label={`${label} 값`} onChange={(e) => onChange(round(Number((e.target as HTMLInputElement).value)))} />
+      <span class="num-unit muted">{unit}</span>
+      {onKey && <button class={`tb ${keyed ? "on" : ""}`} onClick={onKey} title="재생 위치에 키프레임" aria-label={`${label} 키프레임`}><Diamond size={11} /></button>}
+      {def != null && <button class="tb" disabled={!changed} onClick={() => onChange(def)} title="기본값으로" aria-label={`${label} 초기화`}><RotateCcw size={11} /></button>}
+    </div>
+  );
+}
+
+/** Timecode field (HH:MM:SS:FF or seconds). */
+function TCField({ label, value, fps, onChange }: { label: string; value: number; fps: number; onChange: (v: number) => void }) {
+  return (
+    <label class="tcf">
       <span>{label}</span>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number((e.target as HTMLInputElement).value))} />
-      <input type="number" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number((e.target as HTMLInputElement).value))} />
-      {unit && <span class="muted">{unit}</span>}
+      <input key={value} defaultValue={fmtTCF(value, fps)} aria-label={label}
+        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+        onBlur={(e) => { const t = parseTC((e.target as HTMLInputElement).value, fps); if (t != null && Math.abs(t - value) > 1e-4) onChange(t); else (e.target as HTMLInputElement).value = fmtTCF(value, fps); }} />
     </label>
+  );
+}
+
+const dB = (v: number) => (v <= 0 ? "−∞ dB" : `${(20 * Math.log10(v)).toFixed(1)} dB`);
+
+function TransformSec({ t, onChange }: { t: Transform; onChange: (p: Partial<Transform>) => void }) {
+  return (
+    <Section id="transform" title="변형" term="Transform / Motion">
+      <Num label="위치 X" value={t.x * 100} min={-100} max={100} step={0.5} def={0} unit="%" onChange={(v) => onChange({ x: v / 100 })} />
+      <Num label="위치 Y" value={t.y * 100} min={-100} max={100} step={0.5} def={0} unit="%" onChange={(v) => onChange({ y: v / 100 })} />
+      <Num label="크기" value={t.scale * 100} min={5} max={400} step={1} def={100} unit="%" onChange={(v) => onChange({ scale: v / 100 })} />
+      <Num label="회전" value={t.rotation} min={-180} max={180} step={0.5} def={0} unit="°" onChange={(v) => onChange({ rotation: v })} />
+      <Num label="불투명도" value={t.opacity * 100} min={0} max={100} step={1} def={100} unit="%" onChange={(v) => onChange({ opacity: v / 100 })} />
+      <div class="crop-grid">
+        <Num label="자르기 왼쪽" value={t.crop_l * 100} min={0} max={45} step={0.5} def={0} unit="%" onChange={(v) => onChange({ crop_l: v / 100 })} />
+        <Num label="자르기 오른쪽" value={t.crop_r * 100} min={0} max={45} step={0.5} def={0} unit="%" onChange={(v) => onChange({ crop_r: v / 100 })} />
+        <Num label="자르기 위" value={t.crop_t * 100} min={0} max={45} step={0.5} def={0} unit="%" onChange={(v) => onChange({ crop_t: v / 100 })} />
+        <Num label="자르기 아래" value={t.crop_b * 100} min={0} max={45} step={0.5} def={0} unit="%" onChange={(v) => onChange({ crop_b: v / 100 })} />
+      </div>
+    </Section>
+  );
+}
+
+function ColorSec({ c, onChange }: { c: ColorAdj; onChange: (p: Partial<ColorAdj>) => void }) {
+  return (
+    <Section id="color" title="색" term="Color / Lumetri">
+      <div class="row lut-row">
+        <span class="muted">LUT</span>
+        <span class="lut-name" title={c.lut}>{c.lut ? c.lut.split(/[\\/]/).pop() : "없음"}</span>
+        <button class="small" onClick={async () => { const f = await pickLut(); if (f) onChange({ lut: f }); }} title="카메라 로그(D-Log M 등)를 일반 색으로 바꾸는 .cube 파일">불러오기</button>
+        {c.lut && <button class="tb" onClick={() => onChange({ lut: "" })} aria-label="LUT 빼기" title="LUT 빼기"><Trash2 size={12} /></button>}
+      </div>
+      <Num label="노출" value={c.exposure} min={-2} max={2} step={0.05} def={0} unit="스톱" onChange={(v) => onChange({ exposure: v })} />
+      <Num label="대비" value={c.contrast * 100} min={50} max={200} step={1} def={100} unit="%" onChange={(v) => onChange({ contrast: v / 100 })} />
+      <Num label="채도" value={c.saturation * 100} min={0} max={300} step={1} def={100} unit="%" onChange={(v) => onChange({ saturation: v / 100 })} />
+      <Num label="색온도" value={c.temperature} min={2500} max={12000} step={50} def={6500} unit="K" onChange={(v) => onChange({ temperature: v })} />
+      <p class="muted tip">미리보기는 근사입니다. LUT와 색온도는 내보낸 파일에 정확히 반영됩니다.</p>
+    </Section>
+  );
+}
+
+function ViewSec({ view, keys, src, onView, onKeys }: { view?: View; keys?: { t: number; view: View }[]; src: number | null; onView: (v: View) => void; onKeys: (k: { t: number; view: View }[] | undefined) => void }) {
+  const cur = src != null ? viewAt(view, keys, src) : view ?? DEFAULT_VIEW;
+  const animated = !!keys?.length;
+  const setVal = (p: Partial<View>) => {
+    const v = { ...cur, ...p };
+    if (animated && src != null) onKeys(setViewKey(keys, src, v));
+    else onView(v);
+  };
+  const keyHere = src != null && keys?.some((k) => Math.abs(k.t - src) < 0.05);
+  const addKey = () => { if (src == null) return toast("재생 위치를 이 클립 위에 두세요"); onKeys(setViewKey(keys ?? (view ? [] : []), src, cur)); };
+  return (
+    <Section id="view360" title="360 시점" term="Reframe / Keyframes"
+      extra={<button class={`tb ${keyHere ? "on" : ""}`} onClick={addKey} title="재생 위치에 시점 키프레임 (시점이 시간에 따라 움직임)" aria-label="키프레임 넣기"><Diamond size={12} /></button>}>
+      <p class="muted tip">화면을 끌어서 바꿀 수도 있습니다.{animated ? " 키프레임이 있으면 재생 위치의 키프레임을 고칩니다." : " ◆로 키프레임을 넣으면 시점이 움직입니다."}</p>
+      <Num label="좌우" value={cur.yaw} min={-180} max={180} step={1} def={0} unit="°" onChange={(v) => setVal({ yaw: v })} />
+      <Num label="위아래" value={cur.pitch} min={-90} max={90} step={1} def={0} unit="°" onChange={(v) => setVal({ pitch: v })} />
+      <Num label="기울기" value={cur.roll} min={-180} max={180} step={1} def={0} unit="°" onChange={(v) => setVal({ roll: v })} />
+      <Num label="화각" value={cur.hfov} min={20} max={160} step={1} def={100} unit="°" onChange={(v) => setVal({ hfov: v })} />
+      {animated && (
+        <div class="keys-list">
+          {keys!.map((k) => (
+            <div class="row">
+              <Diamond size={10} aria-hidden="true" />
+              <a onClick={() => { const d = draft(); const hit = d ? clipAt(d, st.playhead) : null; if (d && hit) player.seek(hit.at + (k.t - hit.clip.start) / hit.clip.speed); }}>원본 {k.t.toFixed(2)}초</a>
+              <span class="muted">좌우 {Math.round(k.view.yaw)}° · 화각 {Math.round(k.view.hfov)}°</span>
+              <button class="tb" aria-label="키프레임 지우기" onClick={() => { const rest = keys!.filter((x) => x !== k); onKeys(rest.length ? rest : undefined); }}><Trash2 size={11} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function ClipView({ d, c }: { d: Draft; c: Clip }) {
+  const a = isGap(c) ? null : asset(c.asset);
+  const fps = d.fps || 30;
+  const i = d.clips.findIndex((x) => x.id === c.id);
+  const set1 = (label: string, patch: Partial<Clip>) => { editDraft(label, (x) => updateClip(x, c.id, patch)); player.refresh(); };
+  if (isGap(c)) return (
+    <div class="inspector">
+      <h3>빈칸</h3>
+      <TCField label="길이" value={c.end} fps={fps} onChange={(v) => set1("빈칸 길이", { end: r3(Math.max(0.1, v)) })} />
+      <p class="muted tip">검은 화면과 무음입니다. 길이를 바꾸면 뒤 클립이 따라 움직입니다.</p>
+    </div>
+  );
+  const hit = clipAt(d, st.playhead);
+  const src = hit?.clip.id === c.id ? hit.src : null;
+  const t = c.transform ?? DEFAULT_TRANSFORM, col = c.color ?? DEFAULT_COLOR;
+  return (
+    <div class="inspector">
+      <Section id="clip" title="클립" term="Clip">
+        <p class="muted">{a?.info.name} · {a?.info.width ? `${a.info.width}×${a.info.height} · ` : ""}타임라인 {fmtTCF(starts(d)[i], fps)}부터</p>
+        <div class="row">
+          <TCField label="원본 시작" value={c.start} fps={fps} onChange={(v) => set1("다듬기", { start: r3(Math.max(0, Math.min(c.end - 0.1, v))) })} />
+          <TCField label="원본 끝" value={c.end} fps={fps} onChange={(v) => set1("다듬기", { end: r3(Math.min(a?.info.duration || 1e9, Math.max(c.start + 0.1, v))) })} />
+        </div>
+        <p class="muted">길이 {fmtTCF(clipDur(c), fps)}</p>
+        {a && a.info.kind !== "audio" && !is360(a) && (
+          <label>화면 맞춤
+            <select value={c.fit ?? "fit"} onChange={(e) => set1("화면 맞춤", { fit: (e.target as HTMLSelectElement).value as any })}>
+              <option value="fit">전체 보이기 (여백)</option>
+              <option value="fill">꽉 채우기 (잘림)</option>
+            </select>
+          </label>
+        )}
+      </Section>
+      <Section id="speed" title="속도" term="Speed / Duration" defaultOpen={false}>
+        <div class="row">
+          <select value={SPEEDS.includes(c.speed) ? String(c.speed) : "custom"} onChange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v !== "custom") set1("속도", { speed: Number(v) }); }} aria-label="속도 고르기">
+            {SPEEDS.map((x) => <option value={String(x)}>{x}x</option>)}
+            {!SPEEDS.includes(c.speed) && <option value="custom">{c.speed}x</option>}
+          </select>
+          <input type="number" min={0.1} max={16} step={0.05} value={c.speed} aria-label="속도 직접 입력" onChange={(e) => { const v = Number((e.target as HTMLInputElement).value); if (v >= 0.1 && v <= 16) set1("속도", { speed: r3(v) }); }} />
+          <span class="muted">배</span>
+        </div>
+      </Section>
+      {a && a.info.kind !== "audio" && !is360(a) && <TransformSec t={t} onChange={(p) => set1("변형", { transform: { ...t, ...p } })} />}
+      {a && a.info.kind !== "audio" && <ColorSec c={col} onChange={(p) => set1("색", { color: { ...col, ...p } })} />}
+      {a?.info.has_audio && (
+        <Section id="audio" title="소리" term="Audio">
+          {c.detached ? <p class="muted">소리를 A1 트랙으로 분리했습니다. A1의 소리 클립에서 조절하세요.</p> : (
+            <>
+              <Num label="음량" value={Math.round(c.volume * 100)} min={0} max={200} step={5} def={100} unit={dB(c.volume)} onChange={(x) => set1("음량", { volume: x / 100 })} />
+              <label class="check"><input type="checkbox" checked={!!c.denoise} onChange={(e) => set1("잡음 줄이기", { denoise: (e.target as HTMLInputElement).checked })} /> 잡음 줄이기 (바람·웅웅거림) · Denoise</label>
+              <button class="small" disabled={c.speed !== 1} onClick={() => editDraft("소리 분리", (x) => detachAudio(x, c.id))} title="소리를 A1 트랙으로 떼어 따로 늘이거나 줄임 (J·L컷) · Unlink">소리 분리 (J·L컷)</button>
+            </>
+          )}
+          <div class="row">
+            <Num label="페이드 인" value={c.fadeIn ?? 0} min={0} max={5} step={0.1} def={0} unit="초" onChange={(v) => set1("페이드", { fadeIn: v })} />
+          </div>
+          <Num label="페이드 아웃" value={c.fadeOut ?? 0} min={0} max={5} step={0.1} def={0} unit="초" onChange={(v) => set1("페이드", { fadeOut: v })} />
+        </Section>
+      )}
+      {i > 0 && (
+        <Section id="transition" title="전환 (앞 클립과)" term="Transition" defaultOpen={!!c.xin}>
+          <Num label="디졸브" value={c.xin ?? 0} min={0} max={3} step={0.1} def={0} unit="초" onChange={(v) => editDraft("디졸브", (x) => setTransition(x, c.id, v))} />
+          <p class="muted tip">0이면 바로 넘어갑니다. 미리보기는 컷으로 보이고, 내보낸 파일에서 겹쳐집니다.</p>
+        </Section>
+      )}
+      {a && is360(a) && (
+        <>
+          <ViewSec view={c.view} keys={c.viewKeys} src={src} onView={(v) => set1("시점 바꾸기", { view: v })} onKeys={(k) => set1("360 키프레임", { viewKeys: k })} />
+          <Section id="lens" title={`렌즈 (${a.info.layout360 === "dual" ? "OSV 두 렌즈" : a.info.layout360 === "dfisheye" ? "두 어안 나란히" : "펼친 360"})`} defaultOpen={false}>
+            {a.info.layout360 !== "equirect" ? (
+              <>
+                <label class="check"><input type="checkbox" checked={a.lens?.swap ?? false} onChange={(e) => { patchAsset(a.id, { lens: { layout: a.info.layout360, fov: a.lens?.fov ?? 190, swap: (e.target as HTMLInputElement).checked }, proxy: null, strip: undefined }); startProxy(a.id); }} /> 앞뒤 렌즈 바꾸기 (정면이 뒤로 보이면)</label>
+                <label>렌즈 화각
+                  <select value={String(a.lens?.fov ?? 190)} onChange={(e) => { patchAsset(a.id, { lens: { layout: a.info.layout360, swap: a.lens?.swap ?? false, fov: Number((e.target as HTMLSelectElement).value) }, proxy: null, strip: undefined }); startProxy(a.id); }}>
+                    {[180, 185, 190, 195, 200].map((x) => <option value={String(x)}>{x}°</option>)}
+                  </select>
+                </label>
+                <p class="muted tip">바꾸면 미리보기 파일을 다시 만듭니다. 이음매가 겹치거나 벌어지면 화각을 조정하세요.</p>
+              </>
+            ) : <p class="muted">이미 펼친 360 영상입니다.</p>}
+          </Section>
+        </>
+      )}
+    </div>
+  );
+}
+
+function OverlayView({ d, o }: { d: Draft; o: Overlay }) {
+  const a = asset(o.asset);
+  const fps = d.fps || 30;
+  const up = (label: string, p: Partial<Overlay>) => { editDraft(label, (x) => updateOverlay(x, o.id, p), st.draftId, false); player.refresh(); };
+  const t = o.transform ?? DEFAULT_TRANSFORM, col = o.color ?? DEFAULT_COLOR;
+  const src = st.playhead >= o.at && st.playhead < o.at + timedDur(o) ? o.start + (st.playhead - o.at) * (o.speed || 1) : null;
+  return (
+    <div class="inspector">
+      <Section id="ov" title={`V${o.track} 트랙 클립`} term="Overlay / Picture-in-Picture">
+        <p class="muted">{a?.info.name}</p>
+        <TCField label="타임라인 시작" value={o.at} fps={fps} onChange={(v) => up("트랙 클립 옮기기", { at: r3(Math.max(0, v)) })} />
+        {a?.info.kind !== "image" ? (
+          <div class="row">
+            <TCField label="원본 시작" value={o.start} fps={fps} onChange={(v) => up("다듬기", { start: r3(Math.max(0, Math.min(o.end - 0.1, v))) })} />
+            <TCField label="원본 끝" value={o.end} fps={fps} onChange={(v) => up("다듬기", { end: r3(Math.min(a?.info.duration || 1e9, Math.max(o.start + 0.1, v))) })} />
+          </div>
+        ) : <TCField label="길이" value={o.end - o.start} fps={fps} onChange={(v) => up("길이", { end: r3(o.start + Math.max(0.1, v)) })} />}
+        <label>트랙
+          <select value={String(o.track)} onChange={(e) => up("트랙 바꾸기", { track: Number((e.target as HTMLSelectElement).value) as 2 | 3 })}>
+            <option value="2">V2</option><option value="3">V3 (맨 위)</option>
+          </select>
+        </label>
+        <Num label="페이드 인" value={o.fadeIn ?? 0} min={0} max={5} step={0.1} def={0} unit="초" onChange={(v) => up("페이드", { fadeIn: v })} />
+        <Num label="페이드 아웃" value={o.fadeOut ?? 0} min={0} max={5} step={0.1} def={0} unit="초" onChange={(v) => up("페이드", { fadeOut: v })} />
+      </Section>
+      {a && !is360(a) && <TransformSec t={t} onChange={(p) => up("변형", { transform: { ...t, ...p } })} />}
+      {a && <ColorSec c={col} onChange={(p) => up("색", { color: { ...col, ...p } })} />}
+      {a?.info.has_audio && (
+        <Section id="ovaudio" title="소리" term="Audio" defaultOpen={false}>
+          <Num label="음량" value={Math.round((o.volume ?? 0) * 100)} min={0} max={200} step={5} def={0} unit={dB(o.volume ?? 0)} onChange={(x) => up("음량", { volume: x / 100 })} />
+          <p class="muted tip">V2·V3 클립의 소리는 기본으로 꺼져 있습니다.</p>
+        </Section>
+      )}
+      {a && is360(a) && <ViewSec view={o.view} keys={o.viewKeys} src={src} onView={(v) => up("시점 바꾸기", { view: v })} onKeys={(k) => up("360 키프레임", { viewKeys: k })} />}
+    </div>
+  );
+}
+
+function AudioView({ d, m }: { d: Draft; m: MusicClip }) {
+  const a = asset(m.asset);
+  const fps = d.fps || 30;
+  const up = (label: string, p: Partial<MusicClip>) => editDraft(label, (x) => updateAudio(x, m.id, p), st.draftId, false);
+  const tr = audioTrack(m);
+  return (
+    <div class="inspector">
+      <Section id="snd" title={`A${tr} ${tr === 1 ? "소리" : tr === 2 ? "음악" : "효과음"}`} term="Audio Clip">
+        <p class="muted">{a?.info.name}</p>
+        <TCField label="타임라인 시작" value={m.at} fps={fps} onChange={(v) => up("옮기기", { at: r3(Math.max(0, v)) })} />
+        <div class="row">
+          <TCField label="원본 시작" value={m.start} fps={fps} onChange={(v) => up("다듬기", { start: r3(Math.max(0, Math.min(m.end - 0.1, v))) })} />
+          <TCField label="원본 끝" value={m.end} fps={fps} onChange={(v) => up("다듬기", { end: r3(Math.min(a?.info.duration || 1e9, Math.max(m.start + 0.1, v))) })} />
+        </div>
+        <Num label="음량" value={Math.round(m.volume * 100)} min={0} max={200} step={5} def={tr === 2 ? 25 : 100} unit={dB(m.volume)} onChange={(x) => up("음량", { volume: x / 100 })} />
+        <Num label="페이드 인" value={m.fadeIn} min={0} max={10} step={0.1} def={0} unit="초" onChange={(v) => up("페이드", { fadeIn: v })} />
+        <Num label="페이드 아웃" value={m.fadeOut} min={0} max={10} step={0.1} def={0} unit="초" onChange={(v) => up("페이드", { fadeOut: v })} />
+        <label class="check"><input type="checkbox" checked={!!m.denoise} onChange={(e) => up("잡음 줄이기", { denoise: (e.target as HTMLInputElement).checked })} /> 잡음 줄이기 · Denoise</label>
+        <label>트랙
+          <select value={String(tr)} onChange={(e) => up("트랙 바꾸기", { track: Number((e.target as HTMLSelectElement).value) as 1 | 2 | 3 })}>
+            <option value="1">A1 소리</option><option value="2">A2 음악 (본편이 바뀌어도 그 자리)</option><option value="3">A3 효과음</option>
+          </select>
+        </label>
+      </Section>
+    </div>
+  );
+}
+
+function DraftView({ d }: { d: Draft }) {
+  return (
+    <div class="inspector">
+      <Section id="draft" title="편집본" term="Sequence Settings">
+        <label>화면 비율
+          <select value={d.aspect} onChange={(e) => editDraft("화면 비율", (x) => ({ ...x, aspect: (e.target as HTMLSelectElement).value }), st.draftId, false)}>
+            {ASPECTS.map((x) => <option value={x}>{x}{x === "9:16" ? " (쇼츠·릴스)" : x === "16:9" ? " (유튜브)" : x === "4:5" ? " (인스타 피드)" : ""}</option>)}
+          </select>
+        </label>
+        <label>프레임 레이트
+          <select value={String(d.fps)} onChange={(e) => editDraft("프레임 레이트", (x) => ({ ...x, fps: Number((e.target as HTMLSelectElement).value) }), st.draftId, false)}>
+            {[23.976, 24, 25, 29.97, 30, 50, 59.94, 60].map((x) => <option value={String(x)}>{x}fps</option>)}
+          </select>
+        </label>
+      </Section>
+      <Section id="captions" title="자막" term="Captions">
+        <label class="check"><input type="checkbox" checked={d.captions} onChange={(e) => editDraft("자막", (x) => ({ ...x, captions: (e.target as HTMLInputElement).checked }), st.draftId, false)} /> 받아쓰기로 자막 넣기</label>
+        {d.captions && (
+          <>
+            <Num label="크기" value={d.captionStyle.size} min={2} max={14} step={0.5} def={6} unit="%" onChange={(v) => editDraft("자막 크기", (x) => ({ ...x, captionStyle: { ...x.captionStyle, size: v } }), st.draftId, false)} />
+            <Num label="한 줄 글자" value={d.captionStyle.maxChars} min={6} max={40} step={1} def={18} onChange={(v) => editDraft("자막 줄 길이", (x) => ({ ...x, captionStyle: { ...x.captionStyle, maxChars: v } }), st.draftId, false)} />
+            <div class="row">
+              <label>위치
+                <select value={d.captionStyle.position} onChange={(e) => editDraft("자막 위치", (x) => ({ ...x, captionStyle: { ...x.captionStyle, position: (e.target as HTMLSelectElement).value as any } }), st.draftId, false)}>
+                  <option value="bottom">아래</option><option value="middle">가운데</option><option value="top">위</option>
+                </select>
+              </label>
+              <label>글자색<input type="color" value={d.captionStyle.color} onChange={(e) => editDraft("자막 색", (x) => ({ ...x, captionStyle: { ...x.captionStyle, color: (e.target as HTMLInputElement).value } }), st.draftId, false)} /></label>
+              <label>테두리<input type="color" value={d.captionStyle.outline} onChange={(e) => editDraft("자막 테두리", (x) => ({ ...x, captionStyle: { ...x.captionStyle, outline: (e.target as HTMLInputElement).value } }), st.draftId, false)} /></label>
+            </div>
+          </>
+        )}
+      </Section>
+      <Section id="markers" title={`마커 ${d.markers.length ? `(${d.markers.length})` : ""}`} term="Markers">
+        {!d.markers.length && <p class="muted">M 키로 재생 위치에 마커를 답니다.</p>}
+        {d.markers.slice().sort((a, b) => a.t - b.t).map((m) => (
+          <div class="row marker-row" key={m.id}>
+            <input type="color" value={m.color} aria-label="마커 색" onChange={(e) => editDraft("마커 색", (x) => ({ ...x, markers: x.markers.map((y) => (y.id === m.id ? { ...y, color: (e.target as HTMLInputElement).value } : y)) }), st.draftId, false)} />
+            <a onClick={() => player.seek(m.t)}>{fmtTCF(m.t, d.fps || 30)}</a>
+            <input value={m.label} aria-label="마커 이름" onChange={(e) => editDraft("마커 이름", (x) => ({ ...x, markers: x.markers.map((y) => (y.id === m.id ? { ...y, label: (e.target as HTMLInputElement).value } : y)) }), st.draftId, false)} />
+            <button class="tb" aria-label="마커 지우기" onClick={() => editDraft("마커 지우기", (x) => ({ ...x, markers: x.markers.filter((y) => y.id !== m.id) }), st.draftId, false)}><Trash2 size={12} /></button>
+          </div>
+        ))}
+      </Section>
+      <p class="muted tip">타임라인에서 클립을 누르면 변형·색·소리·360 시점을 바꿀 수 있습니다. 모든 단축키: Ctrl+/</p>
+    </div>
   );
 }
 
@@ -20,115 +352,12 @@ export function Inspector() {
   const s = useStore();
   const d = draft();
   if (!d) return <div class="inspector" />;
-  const c = d.clips.find((x) => x.id === s.selClip);
-  const set = (label: string, patch: Partial<Clip>) => { editDraft(label, (x) => updateClip(x, c!.id, patch)); player.refresh(); };
-
-  if (c) {
-    const a = asset(c.asset);
-    const v: View = c.view ?? DEFAULT_VIEW;
-    const setView = (p: Partial<View>) => set("시점 바꾸기", { view: { ...v, ...p } });
-    return (
-      <div class="inspector">
-        <h3>클립</h3>
-        <p class="muted">{a?.info.name} · 원본 {fmtTC(c.start, true)}–{fmtTC(c.end, true)} · 길이 {fmtTC(clipDur(c), true)}</p>
-        <div class="row">
-          <label>시작(초)<input type="number" step={0.1} value={r3(c.start)} onChange={(e) => set("다듬기", { start: Math.max(0, Math.min(c.end - 0.1, Number((e.target as HTMLInputElement).value))) })} /></label>
-          <label>끝(초)<input type="number" step={0.1} value={r3(c.end)} onChange={(e) => set("다듬기", { end: Math.min(a?.info.duration || 1e9, Math.max(c.start + 0.1, Number((e.target as HTMLInputElement).value))) })} /></label>
-        </div>
-        <label>속도
-          <select value={String(c.speed)} onChange={(e) => set("속도", { speed: Number((e.target as HTMLSelectElement).value) })}>
-            {SPEEDS.map((x) => <option value={String(x)}>{x}x</option>)}
-          </select>
-        </label>
-        <Num label="음량" value={Math.round(c.volume * 100)} min={0} max={200} step={5} unit="%" onChange={(x) => set("음량", { volume: x / 100 })} />
-        <div class="row">
-          <label>페이드 인<input type="number" min={0} max={5} step={0.1} value={c.fadeIn ?? 0} onChange={(e) => set("페이드", { fadeIn: Number((e.target as HTMLInputElement).value) })} /></label>
-          <label>페이드 아웃<input type="number" min={0} max={5} step={0.1} value={c.fadeOut ?? 0} onChange={(e) => set("페이드", { fadeOut: Number((e.target as HTMLInputElement).value) })} /></label>
-        </div>
-        {a && a.info.kind !== "audio" && !is360(a) && (
-          <label>화면 맞춤
-            <select value={c.fit ?? "fit"} onChange={(e) => set("화면 맞춤", { fit: (e.target as HTMLSelectElement).value as any })}>
-              <option value="fit">전체 보이기 (여백)</option>
-              <option value="fill">꽉 채우기 (잘림)</option>
-            </select>
-          </label>
-        )}
-        {a && is360(a) && (
-          <>
-            <h3>360 시점</h3>
-            <p class="muted">화면을 끌어서 바꿀 수도 있습니다.</p>
-            <Num label="좌우(yaw)" value={v.yaw} min={-180} max={180} step={1} unit="°" onChange={(x) => setView({ yaw: x })} />
-            <Num label="위아래(pitch)" value={v.pitch} min={-90} max={90} step={1} unit="°" onChange={(x) => setView({ pitch: x })} />
-            <Num label="기울기(roll)" value={v.roll} min={-180} max={180} step={1} unit="°" onChange={(x) => setView({ roll: x })} />
-            <Num label="화각" value={v.hfov} min={20} max={160} step={1} unit="°" onChange={(x) => setView({ hfov: x })} />
-            <button class="small" onClick={() => set("시점 초기화", { view: { ...DEFAULT_VIEW } })}>정면으로</button>
-            <h3>렌즈 ({a.info.layout360 === "dual" ? "OSV 두 렌즈" : a.info.layout360 === "dfisheye" ? "두 어안 나란히" : "펼친 360"})</h3>
-            {a.info.layout360 !== "equirect" && (
-              <>
-                <label class="check"><input type="checkbox" checked={a.lens?.swap ?? false} onChange={(e) => { patchAsset(a.id, { lens: { layout: a.info.layout360, fov: a.lens?.fov ?? 190, swap: (e.target as HTMLInputElement).checked }, proxy: null }); startProxy(a.id); }} /> 앞뒤 렌즈 바꾸기 (정면이 뒤로 보이면)</label>
-                <label>렌즈 화각
-                  <select value={String(a.lens?.fov ?? 190)} onChange={(e) => { patchAsset(a.id, { lens: { layout: a.info.layout360, swap: a.lens?.swap ?? false, fov: Number((e.target as HTMLSelectElement).value) }, proxy: null }); startProxy(a.id); }}>
-                    {[180, 185, 190, 195, 200].map((x) => <option value={String(x)}>{x}°</option>)}
-                  </select>
-                </label>
-                <p class="muted">바꾸면 미리보기 파일을 다시 만듭니다. 이음매가 겹치거나 벌어지면 화각을 조정하세요.</p>
-              </>
-            )}
-          </>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div class="inspector">
-      <h3>편집본</h3>
-      <label>화면 비율
-        <select value={d.aspect} onChange={(e) => editDraft("화면 비율", (x) => ({ ...x, aspect: (e.target as HTMLSelectElement).value }))}>
-          {ASPECTS.map((x) => <option value={x}>{x}{x === "9:16" ? " (쇼츠·릴스)" : x === "16:9" ? " (유튜브)" : ""}</option>)}
-        </select>
-      </label>
-      <label>프레임 레이트
-        <select value={String(d.fps)} onChange={(e) => editDraft("프레임 레이트", (x) => ({ ...x, fps: Number((e.target as HTMLSelectElement).value) }))}>
-          {[23.976, 24, 25, 29.97, 30, 50, 59.94, 60].map((x) => <option value={String(x)}>{x}fps</option>)}
-        </select>
-      </label>
-      <h3>자막</h3>
-      <label class="check"><input type="checkbox" checked={d.captions} onChange={(e) => editDraft("자막", (x) => ({ ...x, captions: (e.target as HTMLInputElement).checked }))} /> 받아쓰기로 자막 넣기</label>
-      {d.captions && (
-        <>
-          <Num label="크기" value={d.captionStyle.size} min={2} max={14} step={0.5} unit="%" onChange={(v) => editDraft("자막 크기", (x) => ({ ...x, captionStyle: { ...x.captionStyle, size: v } }))} />
-          <Num label="한 줄 글자" value={d.captionStyle.maxChars} min={6} max={40} step={1} onChange={(v) => editDraft("자막 줄 길이", (x) => ({ ...x, captionStyle: { ...x.captionStyle, maxChars: v } }))} />
-          <div class="row">
-            <label>위치
-              <select value={d.captionStyle.position} onChange={(e) => editDraft("자막 위치", (x) => ({ ...x, captionStyle: { ...x.captionStyle, position: (e.target as HTMLSelectElement).value as any } }))}>
-                <option value="bottom">아래</option><option value="middle">가운데</option><option value="top">위</option>
-              </select>
-            </label>
-            <label>글자색<input type="color" value={d.captionStyle.color} onChange={(e) => editDraft("자막 색", (x) => ({ ...x, captionStyle: { ...x.captionStyle, color: (e.target as HTMLInputElement).value } }))} /></label>
-            <label>테두리<input type="color" value={d.captionStyle.outline} onChange={(e) => editDraft("자막 테두리", (x) => ({ ...x, captionStyle: { ...x.captionStyle, outline: (e.target as HTMLInputElement).value } }))} /></label>
-          </div>
-        </>
-      )}
-      <h3>배경음악</h3>
-      {!d.music.length && <p class="muted">소리 파일을 타임라인 아래 줄에 끌어다 놓으세요.</p>}
-      {d.music.map((m) => (
-        <div class="music-row" key={m.id}>
-          <span>♪ {asset(m.asset)?.info.name}</span>
-          <Num label="음량" value={Math.round(m.volume * 100)} min={0} max={150} step={5} unit="%" onChange={(v) => editDraft("음악 음량", (x) => ({ ...x, music: x.music.map((y) => (y.id === m.id ? { ...y, volume: v / 100 } : y)) }))} />
-          <button class="small" onClick={() => editDraft("음악 빼기", (x) => ({ ...x, music: x.music.filter((y) => y.id !== m.id) }))}>빼기</button>
-        </div>
-      ))}
-      <h3>마커</h3>
-      {!d.markers.length && <p class="muted">M 키로 재생 위치에 마커를 답니다.</p>}
-      {d.markers.slice().sort((a, b) => a.t - b.t).map((m) => (
-        <div class="row marker-row" key={m.id}>
-          <a onClick={() => player.seek(m.t)}>{fmtTC(m.t, true)}</a>
-          <input value={m.label} onChange={(e) => editDraft("마커 이름", (x) => ({ ...x, markers: x.markers.map((y) => (y.id === m.id ? { ...y, label: (e.target as HTMLInputElement).value } : y)) }))} />
-          <button class="small" onClick={() => editDraft("마커 지우기", (x) => ({ ...x, markers: x.markers.filter((y) => y.id !== m.id) }))}>✕</button>
-        </div>
-      ))}
-      <p class="muted tip">클립을 누르면 속도·음량·360 시점을 바꿀 수 있습니다.<br />단축키: Space 재생 · S 자르기 · Delete 지우기 · M 마커 · Ctrl+Z 되돌리기 · Ctrl+E 내보내기</p>
-    </div>
-  );
+  const c = s.selClip ? d.clips.find((x) => x.id === s.selClip) : null;
+  if (c) return <ClipView d={d} c={c} key={c.id} />;
+  const o = s.selItem ? overlays(d).find((x) => x.id === s.selItem) : null;
+  if (o) return <OverlayView d={d} o={o} key={o.id} />;
+  const m = s.selItem ? d.music.find((x) => x.id === s.selItem) : null;
+  if (m) return <AudioView d={d} m={m} key={m.id} />;
+  return <DraftView d={d} />;
 }
+

@@ -1,0 +1,220 @@
+// Every editor command in one list: the menu bar, the keyboard shortcuts and the shortcut list
+// (Ctrl+/) all come from here, so a command is never reachable one way and missing another.
+import { pickFiles } from "./api";
+import {
+  clipAt, deleteClip, detachAudio, draftDuration, liftClip, nudgeClip, removeFillers, removeItem, removeSilences, setTransition, splitAt, splitItem, starts, uid, type Pacing,
+} from "./edit";
+import { asset, assetMap, canRedo, canUndo, draft, editDraft, importPaths, loadWave, redo, saveNow, set, st, toast, undo, waves, type Tool, type Workspace } from "./store";
+import { player } from "./ui/Viewer";
+import { applyWorkspace, togglePanel } from "./ui/layout";
+
+export type Cmd = {
+  id: string;
+  label: string;
+  menu: "파일" | "편집" | "클립" | "타임라인" | "재생" | "보기" | "도움말";
+  /** Shown and matched, e.g. "Ctrl+Shift+Z". Several bindings: "Ctrl+Y|Ctrl+Shift+Z". */
+  keys?: string;
+  /** Industry term shown in the tooltip next to the plain name. */
+  term?: string;
+  run: () => void;
+  enabled?: () => boolean;
+  checked?: () => boolean;
+  /** Works outside a project (home, settings). */
+  global?: boolean;
+  sep?: boolean;
+};
+
+const inProject = () => st.route === "project" && !!st.project;
+const hasDraft = () => inProject() && !!draft();
+const hasClips = () => !!draft()?.clips.length;
+const draftMode = () => hasDraft() && !st.sourceId;
+const selClip = () => (st.selClip ? draft()?.clips.find((c) => c.id === st.selClip) ?? null : null);
+
+let pacing: Pacing = "normal";
+export const setPacing = (p: Pacing) => { pacing = p; };
+export const getPacing = () => pacing;
+
+export async function doSilence() {
+  const d = draft();
+  if (!d) return;
+  for (const c of d.clips) { const a = asset(c.asset); if (a && !a.words && a.info.has_audio && !waves.has(a.id)) await loadWave(a); }
+  const r = removeSilences(d, assetMap(), waves, pacing);
+  if (!r.removed) return toast("잘라 낼 무음이 없습니다");
+  editDraft("무음 정리", () => r.draft);
+  toast(`무음 ${r.removed.toFixed(1)}초를 잘라 냈습니다`);
+  player.refresh();
+}
+export function doFillers() {
+  const d = draft();
+  if (!d) return;
+  const r = removeFillers(d, assetMap());
+  if (!r.count) return toast(d.clips.some((c) => asset(c.asset)?.words) ? "군더더기 말이 없습니다" : "먼저 받아쓰기가 필요합니다");
+  editDraft("군더더기 말 정리", () => r.draft);
+  toast(`군더더기 말 ${r.count}개를 잘라 냈습니다`);
+  player.refresh();
+}
+
+export function deleteSelection(ripple: boolean) {
+  if (st.selItem) {
+    const id = st.selItem;
+    set({ selItem: null });
+    editDraft("트랙 클립 삭제", (d) => removeItem(d, id), st.draftId, false);
+    return;
+  }
+  if (!st.selClip) return;
+  const id = st.selClip;
+  set({ selClip: null });
+  editDraft(ripple ? "클립 삭제" : "빈칸 남기고 삭제", (d) => (ripple ? deleteClip(d, id) : liftClip(d, id)));
+  player.refresh();
+}
+
+export function splitHere() {
+  if (st.selItem) { const id = st.selItem; editDraft("트랙 클립 자르기", (d) => splitItem(d, id, st.playhead), st.draftId, false); return; }
+  editDraft("자르기", (d) => splitAt(d, st.playhead));
+}
+
+/** Next / previous edit point (clip boundaries and connected item edges). */
+export function jumpEdit(dir: 1 | -1) {
+  const d = draft();
+  if (!d) return;
+  const pts = new Set<number>([0, draftDuration(d)]);
+  const ss = starts(d);
+  d.clips.forEach((c, i) => { pts.add(ss[i]); pts.add(ss[i] + (c.end - c.start) / c.speed); });
+  for (const o of d.overlays ?? []) { pts.add(o.at); pts.add(o.at + (o.end - o.start) / (o.speed || 1)); }
+  for (const m of d.music) { pts.add(m.at); pts.add(m.at + (m.end - m.start)); }
+  const list = [...pts].sort((a, b) => a - b);
+  const t = st.playhead;
+  const hit = dir > 0 ? list.find((x) => x > t + 0.01) : [...list].reverse().find((x) => x < t - 0.01);
+  if (hit != null) { player.pause(); player.seek(hit); }
+}
+
+export function setMark(which: "in" | "out") {
+  if (st.sourceId) {
+    const a = asset(st.sourceId);
+    if (!a) return;
+    if (which === "in") { player.markIn = player.srcT; if (player.markOut <= player.markIn) player.markOut = a.info.duration; }
+    else player.markOut = Math.max(player.srcT, player.markIn + 0.1);
+    set({});
+    return;
+  }
+  const d = draft();
+  if (!d) return;
+  const t = st.playhead;
+  editDraft(which === "in" ? "인 점" : "아웃 점", (x) => {
+    let i = which === "in" ? t : x.inPoint ?? null, o = which === "out" ? t : x.outPoint ?? null;
+    if (i != null && o != null && o <= i) { if (which === "in") o = null; else i = null; }
+    return { ...x, inPoint: i, outPoint: o };
+  }, st.draftId, false);
+}
+
+const fit = () => window.dispatchEvent(new CustomEvent("reelcut:zoom", { detail: "fit" }));
+const zoom = (k: number) => window.dispatchEvent(new CustomEvent("reelcut:zoom", { detail: k }));
+const setTool = (t: Tool) => set({ tool: t });
+const ws = (w: Workspace) => applyWorkspace(w);
+
+export const COMMANDS: Cmd[] = [
+  // 파일
+  { id: "new", label: "새 프로젝트…", menu: "파일", keys: "Ctrl+N", global: true, run: () => set({ dialog: "newProject" }) },
+  { id: "import", label: "미디어 가져오기…", menu: "파일", keys: "Ctrl+I", enabled: inProject, run: async () => importPaths(await pickFiles()) },
+  { id: "importFolder", label: "폴더 가져오기…", menu: "파일", enabled: inProject, run: async () => importPaths(await pickFiles(true)) },
+  { id: "save", label: "저장", menu: "파일", keys: "Ctrl+S", sep: true, enabled: inProject, run: async () => { await saveNow(); toast("저장했습니다"); } },
+  { id: "export", label: "내보내기…", menu: "파일", keys: "Ctrl+E", term: "Export / Render", enabled: hasClips, run: () => set({ dialog: "export" }) },
+  { id: "home", label: "홈으로", menu: "파일", sep: true, global: true, run: () => { saveNow(); set({ route: "home" }); } },
+
+  // 편집
+  { id: "undo", label: "되돌리기", menu: "편집", keys: "Ctrl+Z", enabled: () => inProject() && canUndo(), run: undo },
+  { id: "redo", label: "다시 실행", menu: "편집", keys: "Ctrl+Y|Ctrl+Shift+Z", enabled: () => inProject() && canRedo(), run: redo },
+  { id: "delete", label: "삭제 (뒤 클립 당기기)", menu: "편집", keys: "Delete|Backspace", term: "Ripple Delete", sep: true, enabled: () => draftMode() && !!(st.selClip || st.selItem), run: () => deleteSelection(true) },
+  { id: "lift", label: "빈칸 남기고 삭제", menu: "편집", keys: "Shift+Delete", term: "Lift", enabled: () => draftMode() && !!st.selClip, run: () => deleteSelection(false) },
+  { id: "deselect", label: "선택 해제", menu: "편집", keys: "Escape", enabled: inProject, run: () => set({ selClip: null, selItem: null, trRanges: [] }) },
+
+  // 클립
+  { id: "split", label: "재생 위치에서 자르기", menu: "클립", keys: "S|Ctrl+K", term: "Split / Razor", enabled: draftMode, run: splitHere },
+  { id: "detach", label: "소리 분리 (J·L컷)", menu: "클립", keys: "Ctrl+L", term: "Unlink / Detach Audio", enabled: () => draftMode() && !!selClip() && !selClip()!.detached,
+    run: () => { const c = selClip(); if (!c) return; if (c.speed !== 1) return toast("소리 분리는 1x 속도 클립에서만 됩니다"); editDraft("소리 분리", (d) => detachAudio(d, c.id)); toast("소리를 A1 트랙으로 분리했습니다. 따로 늘이거나 줄여 J·L컷을 만드세요"); } },
+  { id: "dissolve", label: "디졸브 넣기 (앞 클립과)", menu: "클립", keys: "Ctrl+D", term: "Cross Dissolve", enabled: () => draftMode() && !!selClip(),
+    run: () => { const d = draft(), c = selClip(); if (!d || !c) return; const i = d.clips.findIndex((x) => x.id === c.id); if (i <= 0) return toast("첫 클립에는 앞 클립이 없습니다"); editDraft("디졸브", (x) => setTransition(x, c.id, c.xin ? 0 : 0.5)); } },
+  { id: "left", label: "클립을 왼쪽으로", menu: "클립", keys: "Alt+ArrowLeft", sep: true, enabled: () => draftMode() && !!st.selClip, run: () => editDraft("클립 옮기기", (d) => nudgeClip(d, st.selClip!, -1)) },
+  { id: "right", label: "클립을 오른쪽으로", menu: "클립", keys: "Alt+ArrowRight", enabled: () => draftMode() && !!st.selClip, run: () => editDraft("클립 옮기기", (d) => nudgeClip(d, st.selClip!, 1)) },
+  { id: "marker", label: "마커 달기", menu: "클립", keys: "M", sep: true, enabled: draftMode,
+    run: () => editDraft("마커", (d) => ({ ...d, markers: [...d.markers, { id: uid(), t: st.playhead, label: `마커 ${d.markers.length + 1}`, color: "#FFB020" }] }), st.draftId, false) },
+
+  // 타임라인
+  { id: "toolSelect", label: "선택 도구", menu: "타임라인", keys: "V", term: "Selection Tool", checked: () => st.tool === "select", enabled: inProject, run: () => setTool("select") },
+  { id: "toolBlade", label: "자르기 도구", menu: "타임라인", keys: "C", term: "Razor / Blade", checked: () => st.tool === "blade", enabled: inProject, run: () => setTool("blade") },
+  { id: "toolRoll", label: "편집점 굴리기 도구", menu: "타임라인", keys: "N", term: "Rolling Edit", checked: () => st.tool === "roll", enabled: inProject, run: () => setTool("roll") },
+  { id: "toolSlip", label: "내용 밀기 도구", menu: "타임라인", keys: "Y", term: "Slip", checked: () => st.tool === "slip", enabled: inProject, run: () => setTool("slip") },
+  { id: "snap", label: "자석 붙이기", menu: "타임라인", keys: "Shift+S", term: "Snapping", sep: true, checked: () => st.snap, enabled: inProject, run: () => set({ snap: !st.snap }) },
+  { id: "markIn", label: "인 점", menu: "타임라인", keys: "I", term: "Mark In", sep: true, enabled: hasDraft, run: () => setMark("in") },
+  { id: "markOut", label: "아웃 점", menu: "타임라인", keys: "O", term: "Mark Out", enabled: hasDraft, run: () => setMark("out") },
+  { id: "clearIO", label: "인·아웃 지우기", menu: "타임라인", keys: "Alt+X", enabled: draftMode, run: () => editDraft("인·아웃 지우기", (d) => ({ ...d, inPoint: null, outPoint: null }), st.draftId, false) },
+  { id: "silence", label: "무음 정리", menu: "타임라인", sep: true, enabled: () => draftMode() && hasClips(), run: doSilence },
+  { id: "fillers", label: "군더더기 말 정리", menu: "타임라인", enabled: () => draftMode() && hasClips(), run: doFillers },
+  { id: "showSilence", label: "잘릴 무음 미리 보기", menu: "타임라인", checked: () => st.showSilence, enabled: hasDraft, run: () => set({ showSilence: !st.showSilence }) },
+  { id: "captions", label: "받아쓰기 자막", menu: "타임라인", checked: () => !!draft()?.captions, enabled: hasDraft, run: () => editDraft("자막", (d) => ({ ...d, captions: !d.captions }), st.draftId, false) },
+  { id: "zoomIn", label: "확대", menu: "타임라인", keys: "=|+", sep: true, enabled: inProject, run: () => zoom(1.5) },
+  { id: "zoomOut", label: "축소", menu: "타임라인", keys: "-", enabled: inProject, run: () => zoom(1 / 1.5) },
+  { id: "zoomFit", label: "전체 맞춤", menu: "타임라인", keys: "Shift+Z", enabled: inProject, run: fit },
+
+  // 재생
+  { id: "play", label: "재생 / 멈춤", menu: "재생", keys: "Space", enabled: inProject, run: () => player.toggle() },
+  { id: "shuttleBack", label: "뒤로 재생 (누를수록 빠르게)", menu: "재생", keys: "J", term: "Shuttle", enabled: inProject, run: () => player.shuttle(-1) },
+  { id: "shuttleStop", label: "멈춤", menu: "재생", keys: "K", enabled: inProject, run: () => player.shuttle(0) },
+  { id: "shuttleFwd", label: "앞으로 재생 (누를수록 빠르게)", menu: "재생", keys: "L", enabled: inProject, run: () => player.shuttle(1) },
+  { id: "frameBack", label: "한 프레임 뒤로", menu: "재생", keys: "ArrowLeft", sep: true, enabled: inProject, run: () => player.step(-1) },
+  { id: "frameFwd", label: "한 프레임 앞으로", menu: "재생", keys: "ArrowRight", enabled: inProject, run: () => player.step(1) },
+  { id: "secBack", label: "1초 뒤로", menu: "재생", keys: "Shift+ArrowLeft", enabled: inProject, run: () => player.nudge(-1) },
+  { id: "secFwd", label: "1초 앞으로", menu: "재생", keys: "Shift+ArrowRight", enabled: inProject, run: () => player.nudge(1) },
+  { id: "prevEdit", label: "이전 편집점", menu: "재생", keys: "ArrowUp", sep: true, enabled: draftMode, run: () => jumpEdit(-1) },
+  { id: "nextEdit", label: "다음 편집점", menu: "재생", keys: "ArrowDown", enabled: draftMode, run: () => jumpEdit(1) },
+  { id: "toStart", label: "처음으로", menu: "재생", keys: "Home", enabled: inProject, run: () => player.seek(0) },
+  { id: "toEnd", label: "끝으로", menu: "재생", keys: "End", enabled: hasDraft, run: () => { const d = draft(); if (d) player.seek(draftDuration(d)); } },
+
+  // 보기
+  { id: "wsEdit", label: "편집 화면", menu: "보기", keys: "Alt+1", term: "Edit Workspace", checked: () => st.workspace === "edit", enabled: inProject, run: () => ws("edit") },
+  { id: "wsTranscript", label: "대본 화면", menu: "보기", keys: "Alt+2", checked: () => st.workspace === "transcript", enabled: inProject, run: () => ws("transcript") },
+  { id: "ws360", label: "360 화면", menu: "보기", keys: "Alt+3", checked: () => st.workspace === "r360", enabled: inProject, run: () => ws("r360") },
+  { id: "panelLeft", label: "왼쪽 패널 보이기", menu: "보기", keys: "Ctrl+Alt+ArrowLeft", sep: true, enabled: inProject, run: () => togglePanel("left") },
+  { id: "panelRight", label: "오른쪽 패널 보이기", menu: "보기", keys: "Ctrl+Alt+ArrowRight", enabled: inProject, run: () => togglePanel("right") },
+  { id: "fullscreen", label: "미리보기 전체 화면", menu: "보기", keys: "F", enabled: inProject, run: () => window.dispatchEvent(new Event("reelcut:fullscreen")) },
+  { id: "safe", label: "안전 영역·격자", menu: "보기", term: "Safe Margins", checked: () => st.showSafe, enabled: inProject, run: () => set({ showSafe: !st.showSafe }) },
+  { id: "resetLayout", label: "패널 배치 초기화", menu: "보기", enabled: inProject, run: () => applyWorkspace(st.workspace, true) },
+  { id: "settings", label: "설정", menu: "보기", keys: "Ctrl+,", sep: true, global: true, run: () => set({ route: "settings" }) },
+
+  // 도움말
+  { id: "shortcuts", label: "단축키 목록", menu: "도움말", keys: "Ctrl+/", global: true, run: () => set({ dialog: "shortcuts" }) },
+];
+
+// ---------------------------------------------------------------- key matching
+
+const KEY_NAME: Record<string, string> = { " ": "Space", Esc: "Escape", Del: "Delete" };
+export const keyLabel = (k: string) => k.replace("ArrowLeft", "←").replace("ArrowRight", "→").replace("ArrowUp", "↑").replace("ArrowDown", "↓").replace("Escape", "Esc").replace("Delete", "Del");
+export const firstKey = (c: Cmd) => (c.keys ? keyLabel(c.keys.split("|")[0]) : "");
+
+function eventKey(e: KeyboardEvent): string {
+  let k = KEY_NAME[e.key] ?? e.key;
+  // Letters and digits by physical key, so shortcuts also work while the Korean IME is on (S → ㄴ).
+  if (/^Key[A-Z]$/.test(e.code)) k = e.code.slice(3);
+  else if (/^Digit\d$/.test(e.code) && (e.altKey || e.ctrlKey)) k = e.code.slice(5);
+  if (k.length === 1) k = k.toUpperCase();
+  const mods = [e.ctrlKey || e.metaKey ? "Ctrl" : "", e.altKey ? "Alt" : "", e.shiftKey && k.length > 1 ? "Shift" : e.shiftKey && /[A-Z]/.test(k) ? "Shift" : ""].filter(Boolean);
+  return [...mods, k].join("+");
+}
+
+/** Runs the command bound to this key press; returns true when one ran. */
+export function handleKey(e: KeyboardEvent): boolean {
+  const t = e.target as HTMLElement;
+  const typing = !!t.closest?.("input, textarea, select, [contenteditable]");
+  const k = eventKey(e);
+  const c = COMMANDS.find((x) => x.keys?.split("|").some((b) => b === k));
+  if (!c) return false;
+  // While typing only Ctrl shortcuts work (and Escape leaves the field alone).
+  if (typing && !k.startsWith("Ctrl+")) return false;
+  if (!c.global && !inProject()) return false;
+  if (c.enabled && !c.enabled()) return false;
+  e.preventDefault();
+  c.run();
+  return true;
+}
+
+export const clipUnderPlayhead = () => { const d = draft(); return d && d.clips.length ? clipAt(d, st.playhead) : null; };

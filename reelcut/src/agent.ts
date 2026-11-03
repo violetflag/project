@@ -3,8 +3,8 @@
 // project state goes into each user turn, and every response's content is kept as returned.
 import { api, onEvent } from "./api";
 import {
-  clipDur, cutSource, deleteClip, draftDuration, draftWords, fmtTC, insertClips, is360, isFiller, moveClip,
-  newClip, newDraft, r3, removeFillers, removeRange, removeSilences, splitAt, starts, transcriptText, uid, updateClip,
+  clipDur, cutSource, DEFAULT_COLOR, DEFAULT_TRANSFORM, deleteClip, detachAudio, draftDuration, draftWords, fmtTC, insertClips, is360, isDefaultColor, isDefaultTransform, isFiller, isGap, moveClip,
+  newClip, newDraft, newGap, newOverlay, r3, removeFillers, removeItem, removeRange, removeSilences, setTransition, splitAt, starts, transcriptText, uid, updateClip, updateOverlay,
   type Pacing,
 } from "./edit";
 import { exportAndWait } from "./exporter";
@@ -25,8 +25,10 @@ const SYSTEM = `당신은 Reelcut의 영상 편집 에이전트입니다. Reelcu
 
 ## 앱의 구조
 - 프로젝트 안에 미디어(영상·소리·사진)와 편집본(draft)이 있습니다.
-- 편집본은 메인 트랙 한 줄에 클립을 순서대로 이어 붙인 것입니다. 클립은 미디어의 [start, end) 구간(원본 초)이고, 속도·음량·360 시점(yaw/pitch/roll/hfov)을 가집니다.
-- 배경음악 트랙(music), 마커, 받아쓰기 자막(captions)이 있습니다.
+- 편집본의 본편 트랙(V1)은 클립을 순서대로 이어 붙인 것입니다. 클립은 미디어의 [start, end) 구간(원본 초)이고, 속도·음량·360 시점(yaw/pitch/roll/hfov)·변형(위치/크기/회전/자르기/불투명도)·색(노출/대비/채도/색온도/LUT)·앞 클립과의 디졸브(xin 초)를 가집니다. 빈칸(gap) 클립도 있습니다.
+- V2/V3 트랙에는 본편 위에 겹치는 영상·사진(화면 속 화면, 로고)이 타임라인 시간(at)에 놓입니다.
+- 소리 트랙: A1(클립에서 분리한 소리, J·L컷), A2(배경음악), A3(효과음). 마커, 받아쓰기 자막(captions)이 있습니다.
+- 본편이 바뀌면 V2/V3·A1·A3는 그 위의 그림을 따라 움직이고, A2 음악은 그 자리에 남습니다.
 - DJI Osmo 360 파일(.osv, .lrf/.lrv)은 360 영상입니다. 360 클립은 view로 어느 방향을 볼지 정합니다 (yaw: 좌우 -180~180, pitch: 위아래 -90~90, hfov: 화각 20~160, 기본 100).
 - 시간 단위는 모두 초입니다. 원본 시간(source)과 편집본 타임라인 시간(timeline)을 구분하세요.
 
@@ -84,10 +86,17 @@ export const TOOLS = [
 - {op:"split", time}: 타임라인 시간에서 자르기
 - {op:"remove_range", from, to}: 타임라인 구간 지우기
 - {op:"cut_source", clip_id, ranges:[[s,e],…]}: 클립 안의 원본 구간들 지우기
-- {op:"set", clip_id, speed?, volume?, view?, fit?("fit"|"fill"), fade_in?, fade_out?}
+- {op:"set", clip_id, speed?, volume?, view?, fit?("fit"|"fill"), fade_in?, fade_out?, denoise?, transform?:{x,y,scale,rotation,crop_l,crop_r,crop_t,crop_b,opacity}, color?:{exposure,contrast,saturation,temperature}}
+  (x/y: 화면 대비 중심 이동 -1~1, scale 1=원래, exposure 스톱 -2~2, contrast/saturation 1=그대로, temperature 6500=그대로)
+- {op:"transition", clip_id, seconds}: 이 클립과 앞 클립 사이 디졸브 (0이면 컷)
+- {op:"gap", index, seconds}: 빈칸(검은 화면·무음) 넣기
+- {op:"detach_audio", clip_id}: 클립 소리를 A1으로 분리
 - {op:"rename", name} / {op:"aspect", aspect}
-- {op:"add_music", asset_id, start?, end?, at?, volume?}: 배경음악 (volume 0~1, 기본 0.25)
-- {op:"clear_music"}`,
+- {op:"add_music", asset_id, start?, end?, at?, volume?, track?}: 소리 넣기. track 2=배경음악(기본, volume 기본 0.25), 3=효과음, 1=대사
+- {op:"clear_music"}
+- {op:"add_overlay", asset_id, at, start?, end?, track?(2|3), transform?, volume?}: 본편 위에 겹치기 (기본: 오른쪽 위 40% 크기)
+- {op:"set_overlay", overlay_id, at?, start?, end?, transform?, volume?}
+- {op:"remove_item", id}: V2/V3 또는 소리 클립 지우기`,
     input_schema: { type: "object", properties: { draft_id: draftId, ops: { type: "array", items: { type: "object" } } }, required: ["ops"] },
   },
   {
@@ -143,10 +152,14 @@ function draftInfo(d: Draft): string {
   const stt = starts(d);
   const lines = [`편집본 ${d.id} "${d.name}" | 비율 ${d.aspect} | 길이 ${r3(draftDuration(d))}초 | 자막 ${d.captions ? "켬" : "끔"}`, "클립 (순서 | id | 미디어 | 원본 구간 | 타임라인 구간 | 속도 | 음량 | 시점):"];
   d.clips.forEach((c, i) => {
+    if (isGap(c)) { lines.push(`${i} | ${c.id} | (빈칸) | - | ${r3(stt[i])}–${r3(stt[i] + clipDur(c))} | - | - | -`); return; }
     const a = am.get(c.asset);
-    lines.push(`${i} | ${c.id} | ${a?.info.name ?? "?"}(${c.asset}) | ${r3(c.start)}–${r3(c.end)} | ${r3(stt[i])}–${r3(stt[i] + clipDur(c))} | ${c.speed}x | ${c.volume} | ${c.view ? `yaw ${c.view.yaw} pitch ${c.view.pitch} hfov ${c.view.hfov}` : "-"}`);
+    const extra = [c.xin ? `디졸브 ${c.xin}초` : "", c.transform && !isDefaultTransform(c.transform) ? `변형 ${JSON.stringify(c.transform)}` : "", c.color && !isDefaultColor(c.color) ? `색 ${JSON.stringify(c.color)}` : "", c.detached ? "소리 분리됨" : "", c.viewKeys?.length ? `시점 키프레임 ${c.viewKeys.length}개` : ""].filter(Boolean).join(", ");
+    lines.push(`${i} | ${c.id} | ${a?.info.name ?? "?"}(${c.asset}) | ${r3(c.start)}–${r3(c.end)} | ${r3(stt[i])}–${r3(stt[i] + clipDur(c))} | ${c.speed}x | ${c.volume} | ${c.view ? `yaw ${c.view.yaw} pitch ${c.view.pitch} hfov ${c.view.hfov}` : "-"}${extra ? ` | ${extra}` : ""}`);
   });
-  if (d.music.length) lines.push("음악:", ...d.music.map((m) => `- ${m.id} | ${am.get(m.asset)?.info.name} | 원본 ${m.start}–${m.end} | 타임라인 ${m.at}부터 | 음량 ${m.volume}`));
+  const ov = d.overlays ?? [];
+  if (ov.length) lines.push("V2/V3:", ...ov.map((o) => `- ${o.id} | V${o.track} | ${am.get(o.asset)?.info.name} | 원본 ${o.start}–${o.end} | 타임라인 ${o.at}부터 | 변형 ${JSON.stringify(o.transform ?? {})}`));
+  if (d.music.length) lines.push("소리 (A1 대사 / A2 음악 / A3 효과음):", ...d.music.map((m) => `- ${m.id} | A${m.track ?? 2} | ${am.get(m.asset)?.info.name} | 원본 ${m.start}–${m.end} | 타임라인 ${m.at}부터 | 음량 ${m.volume}`));
   if (d.markers.length) lines.push("마커:", ...d.markers.map((m) => `- ${r3(m.t)}초 ${m.label}`));
   return lines.join("\n");
 }
@@ -188,20 +201,45 @@ function applyOps(d: Draft, ops: any[]): Draft {
           ...(o.fit ? { fit: o.fit } : {}),
           ...(o.fade_in != null ? { fadeIn: Number(o.fade_in) } : {}),
           ...(o.fade_out != null ? { fadeOut: Number(o.fade_out) } : {}),
+          ...(o.denoise != null ? { denoise: !!o.denoise } : {}),
+          ...(o.transform ? { transform: { ...DEFAULT_TRANSFORM, ...(c.transform ?? {}), ...o.transform } } : {}),
+          ...(o.color ? { color: { ...DEFAULT_COLOR, ...(c.color ?? {}), ...o.color } } : {}),
         });
         break;
       }
+      case "transition": d = setTransition(d, o.clip_id, Number(o.seconds ?? 0.5)); break;
+      case "gap": d = insertClips(d, [newGap(Number(o.seconds ?? 1))], o.index ?? d.clips.length); break;
+      case "detach_audio": d = detachAudio(d, o.clip_id); break;
       case "rename": d = { ...d, name: String(o.name) }; break;
       case "aspect": d = { ...d, aspect: String(o.aspect) }; break;
       case "add_music": {
         const a = getAsset(o.asset_id);
         const total = draftDuration(d);
+        const track = ([1, 2, 3].includes(Number(o.track)) ? Number(o.track) : 2) as 1 | 2 | 3;
         const start = Number(o.start ?? 0), at = Number(o.at ?? 0);
-        const end = Number(o.end ?? Math.min(a.info.duration, start + Math.max(1, total - at)));
-        d = { ...d, music: [...d.music, { id: uid(), asset: a.id, start, end, at, volume: Number(o.volume ?? 0.25), fadeIn: 1, fadeOut: 2 }] };
+        const end = Number(o.end ?? (track === 2 ? Math.min(a.info.duration, start + Math.max(1, total - at)) : a.info.duration));
+        d = { ...d, music: [...d.music, { id: uid(), asset: a.id, start, end, at, volume: Number(o.volume ?? (track === 2 ? 0.25 : 1)), fadeIn: track === 2 ? 1 : 0, fadeOut: track === 2 ? 2 : 0, track }] };
         break;
       }
-      case "clear_music": d = { ...d, music: [] }; break;
+      case "clear_music": d = { ...d, music: d.music.filter((m) => (m.track ?? 2) !== 2) }; break;
+      case "add_overlay": {
+        const a = getAsset(o.asset_id);
+        const ov = newOverlay(a, Number(o.at ?? 0), o.track === 3 ? 3 : 2, Number(o.start ?? 0), Number(o.end ?? (a.info.kind === "image" ? 4 : a.info.duration)));
+        if (o.transform) ov.transform = { ...DEFAULT_TRANSFORM, ...o.transform };
+        if (o.volume != null) ov.volume = Number(o.volume);
+        d = { ...d, overlays: [...(d.overlays ?? []), ov] };
+        break;
+      }
+      case "set_overlay": {
+        const x = (d.overlays ?? []).find((y) => y.id === o.overlay_id);
+        if (!x) throw new Error(`V2/V3 클립 없음: ${o.overlay_id}`);
+        d = updateOverlay(d, x.id, {
+          ...(o.at != null ? { at: Number(o.at) } : {}), ...(o.start != null ? { start: Number(o.start) } : {}), ...(o.end != null ? { end: Number(o.end) } : {}),
+          ...(o.volume != null ? { volume: Number(o.volume) } : {}), ...(o.transform ? { transform: { ...DEFAULT_TRANSFORM, ...(x.transform ?? {}), ...o.transform } } : {}),
+        });
+        break;
+      }
+      case "remove_item": d = removeItem(d, o.id); break;
       default: throw new Error(`알 수 없는 op: ${o.op}`);
     }
   }
@@ -358,6 +396,18 @@ function pushMsg(m: ChatMsg) {
 
 export async function ask(text: string) {
   if (!st.project || st.agentBusy) return;
+  // Remember the drafts before this request, so its changes can be listed and undone as one.
+  const run = { id: uid(), at: Date.now(), prompt: text, before: st.project.drafts, draftId: st.draftId, done: false };
+  set({ aiRuns: [...st.aiRuns, run] });
+  try {
+    await askInner(text);
+  } finally {
+    set({ aiRuns: st.aiRuns.map((r) => (r.id === run.id ? { ...r, done: true, after: st.project?.drafts } : r)) });
+  }
+}
+
+async function askInner(text: string) {
+  if (!st.project) return;
   const s = st.settings;
   const mode = s.aiMode ?? "account";
   // A conversation stays on one connection; switching starts a new one.

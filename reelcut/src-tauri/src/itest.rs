@@ -63,16 +63,16 @@ fn itest_real_ffmpeg() {
         path: info.path.clone(), kind: info.kind.clone(), start, dur: d, speed, volume: 1.0, has_audio: info.has_audio,
         lens: if r360 { Some(Lens { layout: info.layout360.clone(), swap: false, fov: 190.0 }) } else { None },
         view: if r360 { Some(View { yaw: 45.0, pitch: -10.0, roll: 0.0, hfov: 100.0 }) } else { None },
-        fit: "fit".into(), fade_in: 0.3, fade_out: 0.3,
+        fit: "fit".into(), fade_in: 0.3, fade_out: 0.3, ..Default::default()
     };
     let ass = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,80,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,4,1,2,60,60,120,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:00.50,0:00:02.00,Default,,0,0,0,,안녕하세요 자막\n";
     let hw = Hw { threads: 4, ..Default::default() };
     let shrink = Settings { codec: "hevc".into(), crf: 28, speed: 8, fps: "src".into(), res: "src".into(), denoise: 0, acodec: "opus".into(), abr: 96, container: "mkv".into(), screen: false, vfr: true };
     let cases: Vec<(&str, Plan)> = vec![
-        ("standard.mp4", Plan { segs: vec![seg(&walk, 1.0, 3.0, 1.0, false), seg(&osv, 0.5, 4.0, 2.0, true)], music: vec![Music { path: song.path.clone(), start: 0.0, dur: 30.0, at: 0.5, volume: 0.3, fade_in: 1.0, fade_out: 1.0 }], width: 1080, height: 1920, fps: 30.0, ass: ass.into(), mode: "standard".into(), vbitrate: 8000, settings: None, out: String::new() }),
-        ("shrink.mkv", Plan { segs: vec![seg(&osv, 0.0, 3.0, 1.0, true), seg(&walk, 2.0, 2.0, 0.5, false)], music: vec![], width: 1280, height: 720, fps: 30.0, ass: String::new(), mode: "shrink".into(), vbitrate: 8000, settings: Some(shrink.clone()), out: String::new() }),
-        ("shrink.mp4", Plan { segs: vec![seg(&walk, 0.0, 3.0, 1.0, false)], music: vec![], width: 854, height: 480, fps: 30.0, ass: String::new(), mode: "shrink".into(), vbitrate: 8000, settings: Some(Settings { codec: "h264".into(), acodec: "aac".into(), abr: 144, container: "mp4".into(), ..shrink.clone() }), out: String::new() }),
-        ("audio.wav", Plan { segs: vec![seg(&walk, 0.0, 2.0, 1.0, false), seg(&osv, 0.0, 2.0, 1.0, true)], music: vec![], width: 854, height: 480, fps: 30.0, ass: String::new(), mode: "audio".into(), vbitrate: 8000, settings: None, out: String::new() }),
+        ("standard.mp4", Plan { segs: vec![seg(&walk, 1.0, 3.0, 1.0, false), seg(&osv, 0.5, 4.0, 2.0, true)], music: vec![Music { path: song.path.clone(), start: 0.0, dur: 30.0, at: 0.5, volume: 0.3, fade_in: 1.0, fade_out: 1.0, ..Default::default() }], width: 1080, height: 1920, fps: 30.0, ass: ass.into(), mode: "standard".into(), vbitrate: 8000, settings: None, out: String::new(), ..Default::default() }),
+        ("shrink.mkv", Plan { segs: vec![seg(&osv, 0.0, 3.0, 1.0, true), seg(&walk, 2.0, 2.0, 0.5, false)], music: vec![], width: 1280, height: 720, fps: 30.0, ass: String::new(), mode: "shrink".into(), vbitrate: 8000, settings: Some(shrink.clone()), out: String::new(), ..Default::default() }),
+        ("shrink.mp4", Plan { segs: vec![seg(&walk, 0.0, 3.0, 1.0, false)], music: vec![], width: 854, height: 480, fps: 30.0, ass: String::new(), mode: "shrink".into(), vbitrate: 8000, settings: Some(Settings { codec: "h264".into(), acodec: "aac".into(), abr: 144, container: "mp4".into(), ..shrink.clone() }), out: String::new(), ..Default::default() }),
+        ("audio.wav", Plan { segs: vec![seg(&walk, 0.0, 2.0, 1.0, false), seg(&osv, 0.0, 2.0, 1.0, true)], music: vec![], width: 854, height: 480, fps: 30.0, ass: String::new(), mode: "audio".into(), vbitrate: 8000, settings: None, out: String::new(), ..Default::default() }),
     ];
     for (name, p) in cases {
         let out = work.join(name);

@@ -39,12 +39,28 @@ export type Asset = {
   tError?: string;
   strip?: string;
   poster?: string;
+  /** 0–5 stars. */
   rating?: number;
+  /** pick = good take, reject = not used. */
+  flag?: "pick" | "reject";
+  tags?: string[];
   note?: string;
+  /** When it was added to the project (ms). */
+  added?: number;
+  /** Word times were checked against the waveform. */
+  refined?: boolean;
 };
+
+/** Picture placement. x/y: offset of the centre as a fraction of the frame; crops are fractions of the source. */
+export type Transform = { x: number; y: number; scale: number; rotation: number; crop_l: number; crop_r: number; crop_t: number; crop_b: number; opacity: number };
+/** Colour: exposure in stops, contrast/saturation as factors, temperature in Kelvin (6500 = none), LUT = .cube path. */
+export type ColorAdj = { exposure: number; contrast: number; saturation: number; temperature: number; lut: string };
+/** 360 view keyframe; t = source seconds in the media (so splits and trims keep them in place). In a Plan, t is seconds from the segment start in output time. */
+export type ViewKey = { t: number; view: View };
 
 export type Clip = {
   id: string;
+  /** Asset id, or GAP for an empty stretch (black and silence). */
   asset: string;
   /** Source in/out in seconds. */
   start: number;
@@ -53,21 +69,47 @@ export type Clip = {
   volume: number;
   /** Reframe for 360 sources. */
   view?: View;
+  viewKeys?: ViewKey[];
   fit?: "fit" | "fill";
   fadeIn?: number;
   fadeOut?: number;
   label?: string;
+  transform?: Transform;
+  color?: ColorAdj;
+  /** Noise reduction on the clip's sound. */
+  denoise?: boolean;
+  /** Cross-dissolve with the previous clip (seconds, 0 = cut). */
+  xin?: number;
+  /** The sound was split off to track A1 (the clip itself stays silent). */
+  detached?: boolean;
 };
 
-export type MusicClip = { id: string; asset: string; start: number; end: number; at: number; volume: number; fadeIn: number; fadeOut: number };
+/** A clip on track V2/V3, placed at a timeline time over the main track. */
+export type Overlay = {
+  id: string; asset: string; track: 2 | 3; at: number; start: number; end: number; speed: number; volume: number;
+  view?: View; viewKeys?: ViewKey[]; transform?: Transform; color?: ColorAdj; fadeIn?: number; fadeOut?: number;
+};
+
+/** Sound on track A1 (sound split from a clip), A2 (music) or A3 (effects). */
+export type MusicClip = {
+  id: string; asset: string; start: number; end: number; at: number; volume: number; fadeIn: number; fadeOut: number;
+  track?: 1 | 2 | 3; denoise?: boolean;
+};
 export type Marker = { id: string; t: number; label: string; color: string };
 
 export type CaptionStyle = { size: number; color: string; outline: string; position: "bottom" | "middle" | "top"; maxChars: number; font: string };
 
+export type TrackId = "V1" | "V2" | "V3" | "A1" | "A2" | "A3" | "C1";
+export type TrackState = { mute?: boolean; hide?: boolean; lock?: boolean; solo?: boolean };
+
 export type Draft = {
   id: string;
   name: string;
+  /** Main track V1 (magnetic: clips follow each other). */
   clips: Clip[];
+  /** Tracks V2/V3. */
+  overlays?: Overlay[];
+  /** Tracks A1/A2/A3. */
   music: MusicClip[];
   markers: Marker[];
   captions: boolean;
@@ -75,7 +117,10 @@ export type Draft = {
   /** Output aspect: 16:9 | 9:16 | 1:1 | 4:5 */
   aspect: string;
   fps: number;
-  /** Words edited by hand: assetId → replacements by index (text only). */
+  tracks?: Partial<Record<TrackId, TrackState>>;
+  /** In/out range on the timeline (I/O keys), used to export a part. */
+  inPoint?: number | null;
+  outPoint?: number | null;
   created: number;
   updated: number;
 };
@@ -112,18 +157,28 @@ export type Settings = {
   exportDir: string;
   autoProxy: boolean;
   autoTranscribe: boolean;
+  /** Export presets saved by the user. */
+  exportPresets?: SavedExport[];
 };
+
+export type SavedExport = { id: string; label: string; choice: Record<string, unknown> };
 
 export type ShrinkSettings = { codec: string; crf: number; speed: number; fps: string; res: string; denoise: number; acodec: string; abr: number; container: string; screen: boolean; vfr: boolean };
 
 export type Seg = {
   path: string; kind: string; start: number; dur: number; speed: number; volume: number; has_audio: boolean;
   lens: Lens | null; view: View | null; fit: string; fade_in: number; fade_out: number;
+  transform?: Transform | null; color?: ColorAdj | null; denoise?: boolean; view_keys?: ViewKey[]; xin?: number;
 };
-export type PlanMusic = { path: string; start: number; dur: number; at: number; volume: number; fade_in: number; fade_out: number };
+export type PlanOverlay = {
+  path: string; kind: string; start: number; dur: number; speed: number; at: number; track: number; volume: number; has_audio: boolean;
+  lens: Lens | null; view: View | null; view_keys: ViewKey[]; transform: Transform | null; color: ColorAdj | null; fade_in: number; fade_out: number;
+};
+export type PlanMusic = { path: string; start: number; dur: number; at: number; volume: number; fade_in: number; fade_out: number; denoise?: boolean };
 export type Plan = {
-  segs: Seg[]; music: PlanMusic[]; width: number; height: number; fps: number; ass: string;
+  segs: Seg[]; music: PlanMusic[]; overlays?: PlanOverlay[]; width: number; height: number; fps: number; ass: string;
   mode: "standard" | "shrink" | "audio"; vbitrate: number; settings: ShrinkSettings | null; out: string;
+  loudnorm?: boolean; duck?: boolean; abr?: number;
 };
 
 export type JobEvent = { id: string; kind: string; pct: number; state: JobState; message: string; result: any };

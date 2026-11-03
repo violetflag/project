@@ -88,6 +88,14 @@ export async function pickFiles(folder = false): Promise<string[]> {
   return r == null ? [] : Array.isArray(r) ? r : [r];
 }
 
+/** A colour lookup table (.cube) for the colour section. */
+export async function pickLut(): Promise<string | null> {
+  if (!inTauri) return null;
+  const d = await import("@tauri-apps/plugin-dialog");
+  const r = await d.open({ multiple: false, filters: [{ name: "LUT (.cube)", extensions: ["cube"] }] });
+  return typeof r === "string" ? r : null;
+}
+
 export async function pickFolder(): Promise<string | null> {
   if (!inTauri) return null;
   const d = await import("@tauri-apps/plugin-dialog");

@@ -1,7 +1,7 @@
 // Pure edit operations on drafts (no I/O), so they can be unit-tested and shared by the
 // editor and the AI agent.
 
-import type { Asset, CaptionStyle, Clip, Draft, Lens, Plan, Seg, ShrinkSettings, View, Word } from "./types";
+import type { Asset, CaptionStyle, Clip, ColorAdj, Draft, Lens, MusicClip, Overlay, Plan, PlanOverlay, Seg, ShrinkSettings, TrackId, Transform, View, ViewKey, Word } from "./types";
 
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 export const clamp = (x: number, a: number, b: number) => Math.min(b, Math.max(a, x));
@@ -9,10 +9,24 @@ export const r3 = (x: number) => Math.round(x * 1000) / 1000;
 
 export const DEFAULT_CAPTION: CaptionStyle = { size: 6, color: "#FFFFFF", outline: "#000000", position: "bottom", maxChars: 18, font: "Malgun Gothic" };
 
-export function newDraft(name: string, aspect = "16:9"): Draft {
+/** Asset id of an empty stretch on the main track. */
+export const GAP = "__gap";
+export const isGap = (c: Clip) => c.asset === GAP;
+export const newGap = (dur: number): Clip => ({ id: uid(), asset: GAP, start: 0, end: r3(Math.max(0.1, dur)), speed: 1, volume: 0 });
+
+export const DEFAULT_TRANSFORM: Transform = { x: 0, y: 0, scale: 1, rotation: 0, crop_l: 0, crop_r: 0, crop_t: 0, crop_b: 0, opacity: 1 };
+export const DEFAULT_COLOR: ColorAdj = { exposure: 0, contrast: 1, saturation: 1, temperature: 6500, lut: "" };
+export const isDefaultTransform = (t?: Transform | null) => !t || Object.keys(DEFAULT_TRANSFORM).every((k) => Math.abs((t as any)[k] - (DEFAULT_TRANSFORM as any)[k]) < 1e-6);
+export const isDefaultColor = (c?: ColorAdj | null) => !c || (Math.abs(c.exposure) < 1e-6 && Math.abs(c.contrast - 1) < 1e-6 && Math.abs(c.saturation - 1) < 1e-6 && Math.abs(c.temperature - 6500) < 1 && !c.lut);
+
+export function newDraft(name: string, aspect = "16:9", fps = 30): Draft {
   const now = Date.now();
-  return { id: uid(), name, clips: [], music: [], markers: [], captions: false, captionStyle: { ...DEFAULT_CAPTION }, aspect, fps: 30, created: now, updated: now };
+  return { id: uid(), name, clips: [], overlays: [], music: [], markers: [], captions: false, captionStyle: { ...DEFAULT_CAPTION }, aspect, fps, tracks: {}, created: now, updated: now };
 }
+
+export const trackState = (d: Draft, t: TrackId) => d.tracks?.[t] ?? {};
+/** Music/sound items on one audio track (A2 is the default for older drafts). */
+export const audioTrack = (m: MusicClip) => m.track ?? 2;
 
 export const is360 = (a?: Asset) => !!a && a.info.layout360 !== "none" && a.info.kind === "video";
 export function defaultLens(a: Asset): Lens {
@@ -25,28 +39,42 @@ export function newClip(a: Asset, start = 0, end = a.info.duration || 5): Clip {
 }
 
 export const clipDur = (c: Clip) => Math.max(0, (c.end - c.start) / (c.speed || 1));
-export const draftDuration = (d: Draft) => d.clips.reduce((s, c) => s + clipDur(c), 0);
 
-/** Timeline start of each clip. */
+/** Dissolve length actually used between clip i-1 and i (at most half of either clip). */
+export function xinOf(d: Draft, i: number): number {
+  const c = d.clips[i];
+  if (i <= 0 || !c?.xin) return 0;
+  return Math.max(0, Math.min(c.xin, clipDur(c) / 2, clipDur(d.clips[i - 1]) / 2));
+}
+
+/** Timeline start of each clip (a dissolve makes a clip start before the previous one ends). */
 export function starts(d: Draft): number[] {
   const out: number[] = [];
   let t = 0;
-  for (const c of d.clips) { out.push(t); t += clipDur(c); }
+  d.clips.forEach((c, i) => {
+    t -= xinOf(d, i);
+    out.push(Math.max(0, t));
+    t = Math.max(0, t) + clipDur(c);
+  });
   return out;
 }
 
-/** The clip under timeline time t (the last clip at the very end). */
+export function draftDuration(d: Draft): number {
+  if (!d.clips.length) return 0;
+  const st = starts(d);
+  const i = d.clips.length - 1;
+  return st[i] + clipDur(d.clips[i]);
+}
+
+/** The clip under timeline time t (the last clip at the very end). In a dissolve the incoming clip wins. */
 export function clipAt(d: Draft, t: number): { index: number; clip: Clip; at: number; src: number } | null {
-  let acc = 0;
-  for (let i = 0; i < d.clips.length; i++) {
-    const c = d.clips[i], len = clipDur(c);
-    if (t < acc + len || i === d.clips.length - 1) {
-      const off = clamp(t - acc, 0, len);
-      return { index: i, clip: c, at: acc, src: c.start + off * c.speed };
-    }
-    acc += len;
-  }
-  return null;
+  if (!d.clips.length) return null;
+  const st = starts(d);
+  let i = 0;
+  while (i + 1 < d.clips.length && t >= st[i + 1]) i++;
+  const c = d.clips[i];
+  const off = clamp(t - st[i], 0, clipDur(c));
+  return { index: i, clip: c, at: st[i], src: c.start + off * c.speed };
 }
 
 const touch = (d: Draft, clips: Clip[]): Draft => ({ ...d, clips, updated: Date.now() });
@@ -126,6 +154,172 @@ export function insertClips(d: Draft, clips: Clip[], at = d.clips.length): Draft
   const out = d.clips.slice();
   out.splice(clamp(at, 0, out.length), 0, ...clips);
   return touch(d, out);
+}
+
+/** Removes a clip but keeps its time as an empty gap (lift instead of ripple delete). */
+export function liftClip(d: Draft, id: string): Draft {
+  const i = d.clips.findIndex((c) => c.id === id);
+  if (i < 0) return d;
+  const clips = d.clips.slice();
+  clips.splice(i, 1, newGap(clipDur(d.clips[i])));
+  return touch(d, clips);
+}
+
+/** Roll edit: moves the cut between clip i-1 and i by dt seconds of timeline (both clips change, the total stays). */
+export function rollEdit(d: Draft, i: number, dt: number, assetDur: (id: string) => number): Draft {
+  const a = d.clips[i - 1], b = d.clips[i];
+  if (!a || !b) return d;
+  const maxA = isGap(a) ? 1e9 : (assetDur(a.asset) - a.end) / a.speed;
+  const maxB = (b.start) / b.speed;
+  const dd = clamp(dt, -Math.min(clipDur(a) - 0.1, maxB), Math.min(clipDur(b) - 0.1, maxA));
+  if (Math.abs(dd) < 1e-4) return d;
+  const clips = d.clips.slice();
+  clips[i - 1] = { ...a, end: r3(a.end + dd * a.speed) };
+  clips[i] = { ...b, start: r3(b.start + dd * b.speed) };
+  return touch(d, clips);
+}
+
+/** Slip edit: shows a different part of the source in the same slot (length stays). */
+export function slipClip(d: Draft, id: string, ds: number, assetDur: number): Draft {
+  const c = d.clips.find((x) => x.id === id);
+  if (!c || isGap(c)) return d;
+  const len = c.end - c.start;
+  const s = clamp(c.start + ds, 0, Math.max(0, assetDur - len));
+  return updateClip(d, id, { start: r3(s), end: r3(s + len) });
+}
+
+export function setTransition(d: Draft, id: string, dur: number): Draft {
+  return updateClip(d, id, { xin: r3(Math.max(0, dur)) });
+}
+
+// ---------------------------------------------------------------- connected tracks (V2/V3, A1–A3)
+
+export type Timed = { id: string; at: number; start: number; end: number; speed?: number };
+export const timedDur = (x: Timed) => Math.max(0, (x.end - x.start) / (x.speed || 1));
+export const overlays = (d: Draft): Overlay[] => d.overlays ?? [];
+
+export function newOverlay(a: Asset, at: number, track: 2 | 3 = 2, start = 0, end = a.info.kind === "image" ? 4 : a.info.duration): Overlay {
+  return {
+    id: uid(), asset: a.id, track, at: r3(Math.max(0, at)), start: r3(start), end: r3(Math.max(start + 0.1, end)), speed: 1, volume: 0,
+    view: is360(a) ? { ...DEFAULT_VIEW } : undefined, transform: { ...DEFAULT_TRANSFORM, scale: 0.4, x: 0.25, y: -0.22 },
+  };
+}
+
+export function updateOverlay(d: Draft, id: string, p: Partial<Overlay>): Draft {
+  return { ...d, overlays: overlays(d).map((o) => (o.id === id ? { ...o, ...p } : o)), updated: Date.now() };
+}
+export function updateAudio(d: Draft, id: string, p: Partial<MusicClip>): Draft {
+  return { ...d, music: d.music.map((m) => (m.id === id ? { ...m, ...p } : m)), updated: Date.now() };
+}
+export function removeItem(d: Draft, id: string): Draft {
+  return { ...d, overlays: overlays(d).filter((o) => o.id !== id), music: d.music.filter((m) => m.id !== id), updated: Date.now() };
+}
+
+/** Splits an overlay or sound item at timeline time t. */
+export function splitItem(d: Draft, id: string, t: number): Draft {
+  const cut = <T extends Timed>(x: T): T[] => {
+    const sp = x.speed || 1;
+    const off = t - x.at;
+    if (off <= 0.05 || off >= timedDur(x) - 0.05) return [x];
+    const s = r3(x.start + off * sp);
+    return [{ ...x, end: s, fadeOut: 0 } as T, { ...x, id: uid(), at: r3(t), start: s, fadeIn: 0 } as T];
+  };
+  return {
+    ...d,
+    overlays: overlays(d).flatMap((o) => (o.id === id ? cut(o) : [o])),
+    music: d.music.flatMap((m) => (m.id === id ? cut(m) : [m])),
+    updated: Date.now(),
+  };
+}
+
+/** Splits the clip's sound off to track A1 so it can be trimmed separately (J/L cuts). */
+export function detachAudio(d: Draft, id: string): Draft {
+  const i = d.clips.findIndex((c) => c.id === id);
+  const c = d.clips[i];
+  // Sound split works on 1x clips only (the split sound plays at normal speed).
+  if (!c || isGap(c) || c.detached || c.speed !== 1) return d;
+  const at = starts(d)[i];
+  const m: MusicClip = { id: uid(), asset: c.asset, start: c.start, end: c.end, at: r3(at), volume: c.volume, fadeIn: c.fadeIn ?? 0, fadeOut: c.fadeOut ?? 0, track: 1 };
+  const clips = d.clips.slice();
+  clips[i] = { ...c, detached: true, volume: 0 };
+  return { ...touch(d, clips), music: [...d.music, m] };
+}
+
+/**
+ * Where timeline time t of `before` ends up in `after`: follows the source frame that was under
+ * it. Used to keep connected clips (V2/V3, A1, A3) with the picture when the main track changes.
+ */
+export function mapTime(before: Draft, after: Draft, t: number): number {
+  const hit = clipAt(before, t);
+  if (!hit) return t;
+  if (t >= draftDuration(before)) return draftDuration(after) + (t - draftDuration(before));
+  const { clip, src } = hit;
+  const st = starts(after);
+  let best: number | null = null;
+  let next: number | null = null;
+  after.clips.forEach((c, i) => {
+    if (c.asset !== clip.asset) return;
+    if (src >= c.start - 1e-6 && src < c.end + 1e-6) {
+      const tt = st[i] + (src - c.start) / c.speed;
+      if (best == null || Math.abs(tt - t) < Math.abs(best - t)) best = tt;
+    } else if (c.start > src) {
+      const tt = st[i];
+      if (next == null || Math.abs(tt - t) < Math.abs(next - t)) next = tt;
+    }
+  });
+  return r3(best ?? next ?? Math.min(t, draftDuration(after)));
+}
+
+/** After a main-track edit, moves connected items so they stay on the same picture. A2 (music) stays put. */
+export function rippleConnected(before: Draft, after: Draft): Draft {
+  if (before.clips === after.clips || !before.clips.length) return after;
+  const ov = overlays(after);
+  const moves = (m: { at: number }) => mapTime(before, after, m.at);
+  const changed = ov.some((o) => moves(o) !== o.at) || after.music.some((m) => audioTrack(m) !== 2 && moves(m) !== m.at);
+  if (!changed) return after;
+  return {
+    ...after,
+    overlays: ov.map((o) => ({ ...o, at: moves(o) })),
+    music: after.music.map((m) => (audioTrack(m) === 2 ? m : { ...m, at: moves(m) })),
+  };
+}
+
+/** Moves the V1 clip one place left (-1) or right (+1). */
+export function nudgeClip(d: Draft, id: string, dir: -1 | 1): Draft {
+  const i = d.clips.findIndex((c) => c.id === id);
+  if (i < 0 || i + dir < 0 || i + dir >= d.clips.length) return d;
+  return moveClip(d, i, i + dir);
+}
+
+// ---------------------------------------------------------------- 360 view animation
+
+/** The view of a 360 clip at `t` seconds from its timeline start (keyframes interpolate linearly). */
+export function viewAt(view: View | undefined, keys: ViewKey[] | undefined, t: number): View {
+  const base = view ?? DEFAULT_VIEW;
+  if (!keys?.length) return base;
+  const ks = keys.slice().sort((a, b) => a.t - b.t);
+  if (t <= ks[0].t) return ks[0].view;
+  if (t >= ks[ks.length - 1].t) return ks[ks.length - 1].view;
+  for (let i = 0; i + 1 < ks.length; i++) {
+    const a = ks[i], b = ks[i + 1];
+    if (t >= a.t && t <= b.t) {
+      const k = (t - a.t) / Math.max(1e-6, b.t - a.t);
+      let dy = b.view.yaw - a.view.yaw;
+      if (dy > 180) dy -= 360;
+      if (dy < -180) dy += 360;
+      const lerp = (x: number, y: number) => x + (y - x) * k;
+      let yaw = a.view.yaw + dy * k;
+      yaw = ((((yaw + 180) % 360) + 360) % 360) - 180;
+      return { yaw: r3(yaw), pitch: r3(lerp(a.view.pitch, b.view.pitch)), roll: r3(lerp(a.view.roll, b.view.roll)), hfov: r3(lerp(a.view.hfov, b.view.hfov)) };
+    }
+  }
+  return base;
+}
+
+/** Sets (or replaces, within 1/20 s) a keyframe at t. */
+export function setViewKey(keys: ViewKey[] | undefined, t: number, view: View): ViewKey[] {
+  const ks = (keys ?? []).filter((k) => Math.abs(k.t - t) > 0.05);
+  return [...ks, { t: r3(t), view }].sort((a, b) => a.t - b.t);
 }
 
 // ---------------------------------------------------------------- words
@@ -234,6 +428,72 @@ export function silenceCuts(c: Clip, speech: [number, number][], p: Pacing): [nu
   return cuts.filter(([a, b]) => b - a > 0.05);
 }
 
+/**
+ * Repairs word times from speech recognition with the waveform: words squeezed into a pause
+ * (zero length, or sitting in silence) are spread over the speech that follows, and words with
+ * no speech anywhere near them (made up in silence, e.g. a closing "감사합니다.") are dropped.
+ */
+export function refineWords(words: Word[], wave: ArrayLike<number>, duration: number): Word[] {
+  if (!words.length || !wave.length) return words;
+  const speech = speechFromWave(wave, 0, Math.min(duration, wave.length / 50));
+  if (!speech.length) return words;
+  const overlap = (s: number, e: number) => speech.reduce((acc, [a, b]) => acc + Math.max(0, Math.min(b, e) - Math.max(a, s)), 0);
+  // A word stretched over a long pause (≥ 1 s of silence inside or before it) keeps only its
+  // longest stretch of speech: the word before a pause stays before it, the word after it after.
+  const trim = (w: Word): Word => {
+    const inside = speech.filter(([a, b]) => b > w.s && a < w.e).map(([a, b]) => [Math.max(a, w.s), Math.min(b, w.e)] as [number, number]);
+    if (!inside.length || w.e - w.s < 0.06) return w;
+    const chunks: [number, number][] = [];
+    for (const [a, b] of inside) {
+      const last = chunks[chunks.length - 1];
+      if (last && a - last[1] < 1) last[1] = b;
+      else chunks.push([a, b]);
+    }
+    const lead = inside[0][0] - w.s >= 1, tail = w.e - inside[inside.length - 1][1] >= 1;
+    if (chunks.length < 2 && !lead && !tail) return w;
+    const best = chunks.reduce((x, y) => (y[1] - y[0] > x[1] - x[0] ? y : x));
+    const s = chunks.length > 1 || lead ? best[0] : w.s, e = chunks.length > 1 || tail ? best[1] : w.e;
+    return { ...w, s: r3(s), e: r3(Math.max(e, s + 0.06)) };
+  };
+  words = words.map(trim);
+  const good = (w: Word) => w.e - w.s >= 0.06 && overlap(w.s, w.e) >= 0.3 * (w.e - w.s);
+  const spread = (run: Word[], s0: number, s1: number, out: Word[]) => {
+    const chars = run.reduce((n, w) => n + Math.max(1, w.t.length), 0);
+    let t = s0;
+    for (const w of run) {
+      const len = ((s1 - s0) * Math.max(1, w.t.length)) / chars;
+      out.push({ ...w, s: r3(t), e: r3(t + len) });
+      t += len;
+    }
+  };
+  const out: Word[] = [];
+  let i = 0;
+  while (i < words.length) {
+    if (good(words[i])) { out.push(words[i]); i++; continue; }
+    // A run of words with bad times: [i, j).
+    let j = i;
+    while (j < words.length && !good(words[j])) j++;
+    const lo = out.length ? out[out.length - 1].e : 0;
+    const hi = j < words.length ? words[j].s : duration;
+    // Speech inside the free stretch between the neighbouring good words.
+    // Speech that starts in the free stretch (a tail of the previous word's sound does not count).
+    const spans = speech.filter(([a]) => a > lo + 0.02 && a < hi).map(([a, b]) => [a, Math.min(b, hi)] as [number, number]).filter(([a, b]) => b - a > 0.05);
+    const run = words.slice(i, j);
+    if (spans.length) {
+      spread(run, spans[0][0], spans[spans.length - 1][1], out);
+    } else if (j < words.length) {
+      // No speech in the gap: these words belong with the next one; share its speech.
+      spread([...run, words[j]], words[j].s, words[j].e, out);
+      j++;
+    } else if (!out.length) {
+      out.push(...run);
+    }
+    // Trailing words with no speech anywhere (made up in silence) are dropped.
+    i = j;
+  }
+  return out;
+}
+
 export function removeSilences(d: Draft, assets: Map<string, Asset>, waves: Map<string, ArrayLike<number>>, p: Pacing): { draft: Draft; removed: number } {
   const cuts: Record<string, [number, number][]> = {};
   let removed = 0;
@@ -267,15 +527,53 @@ export function outSize(aspect: string, short: number): [number, number] {
   }
 }
 
+/** The still view sent with a segment: a single keyframe counts as the view (as in the preview). */
+const planView = (view: View | undefined, keys: ViewKey[] | undefined): View => (keys?.length === 1 ? keys[0].view : view ?? DEFAULT_VIEW);
+
+/** Source-time keyframes → output seconds from the segment start (only when they animate). */
+function planKeys(keys: ViewKey[] | undefined, start: number, speed: number): ViewKey[] {
+  if (!keys || keys.length < 2) return [];
+  return keys.map((k) => ({ t: r3((k.t - start) / (speed || 1)), view: k.view }));
+}
+
 export function toSegs(d: Draft, assets: Map<string, Asset>): Seg[] {
-  return d.clips.flatMap((c) => {
+  const hideV1 = trackState(d, "V1").hide;
+  const muteA1 = trackState(d, "A1").mute;
+  return d.clips.flatMap((c, i) => {
+    const xin = xinOf(d, i);
     const a = assets.get(c.asset);
+    const gap = (dur: number): Seg => ({ path: "", kind: "gap", start: 0, dur: r3(dur), speed: 1, volume: 0, has_audio: false, lens: null, view: null, fit: "fit", fade_in: 0, fade_out: 0, xin });
+    if (isGap(c)) return [gap(c.end - c.start)];
     if (!a) return [];
+    // A hidden main track keeps its timing and sound; its pictures become black ("audio" segments render black).
+    if (hideV1 && a.info.kind === "image") return [gap(clipDur(c))];
     const r360 = is360(a);
     return [{
-      path: a.info.path, kind: a.info.kind, start: r3(c.start), dur: r3(c.end - c.start), speed: c.speed || 1, volume: c.volume ?? 1,
-      has_audio: a.info.has_audio, lens: r360 ? defaultLens(a) : null, view: r360 ? (c.view ?? DEFAULT_VIEW) : null,
+      path: a.info.path, kind: hideV1 ? "audio" : a.info.kind, start: r3(c.start), dur: r3(c.end - c.start), speed: c.speed || 1,
+      volume: muteA1 || c.detached ? 0 : c.volume ?? 1,
+      has_audio: a.info.has_audio, lens: r360 ? defaultLens(a) : null, view: r360 ? planView(c.view, c.viewKeys) : null,
       fit: c.fit ?? "fit", fade_in: c.fadeIn ?? 0, fade_out: c.fadeOut ?? 0,
+      transform: isDefaultTransform(c.transform) ? null : c.transform!, color: isDefaultColor(c.color) ? null : c.color!,
+      denoise: !!c.denoise, view_keys: r360 ? planKeys(c.viewKeys, c.start, c.speed) : [], xin,
+    }];
+  });
+}
+
+export function toOverlays(d: Draft, assets: Map<string, Asset>): PlanOverlay[] {
+  const total = draftDuration(d);
+  return overlays(d).flatMap((o) => {
+    const a = assets.get(o.asset);
+    const t = trackState(d, o.track === 3 ? "V3" : "V2");
+    if (!a || t.hide || a.info.kind === "audio") return [];
+    const sp = o.speed || 1;
+    const len = Math.min(timedDur(o), total - o.at);
+    if (len <= 0.05) return [];
+    const r360 = is360(a);
+    return [{
+      path: a.info.path, kind: a.info.kind, start: r3(o.start), dur: r3(len * sp), speed: sp, at: r3(o.at), track: o.track,
+      volume: t.mute ? 0 : o.volume ?? 0, has_audio: a.info.has_audio, lens: r360 ? defaultLens(a) : null, view: r360 ? planView(o.view, o.viewKeys) : null,
+      view_keys: r360 ? planKeys(o.viewKeys, o.start, sp) : [], transform: o.transform ?? null, color: isDefaultColor(o.color) ? null : o.color!,
+      fade_in: o.fadeIn ?? 0, fade_out: o.fadeOut ?? 0,
     }];
   });
 }
@@ -287,19 +585,41 @@ export type ExportOpts = {
   shrink: ShrinkSettings | null;
   out: string;
   ass: string;
+  loudnorm?: boolean;
+  duck?: boolean;
+  abr?: number;
+  /** Export only this timeline range. */
+  range?: [number, number] | null;
 };
 
-export function toPlan(d: Draft, assets: Map<string, Asset>, o: ExportOpts): Plan {
+/** The draft cut down to the timeline range [a, b) (connected items move with it). */
+export function rangeDraft(d: Draft, a: number, b: number): Draft {
+  const total = draftDuration(d);
+  let x = d;
+  if (b < total - 0.01) x = rippleConnected(x, removeRange(x, b, total));
+  if (a > 0.01) {
+    const y = rippleConnected(x, removeRange(x, 0, a));
+    x = { ...y, music: y.music.map((m) => (audioTrack(m) === 2 ? { ...m, at: r3(m.at - a), start: m.at < a ? r3(m.start + (a - m.at)) : m.start } : m)).map((m) => (m.at < 0 ? { ...m, at: 0 } : m)) };
+  }
+  return x;
+}
+
+export function toPlan(d0: Draft, assets: Map<string, Asset>, o: ExportOpts): Plan {
+  const d = o.range ? rangeDraft(d0, o.range[0], o.range[1]) : d0;
   const [width, height] = outSize(d.aspect, o.short);
+  const total = draftDuration(d);
+  const muted = (m: MusicClip) => { const t = trackState(d, `A${audioTrack(m)}` as TrackId); return t.mute; };
   return {
     segs: toSegs(d, assets),
-    // Music past the end of the video is cut there, so its fade-out lands on the last frame.
+    overlays: toOverlays(d, assets),
+    // Sound past the end of the video is cut there, so its fade-out lands on the last frame.
     music: d.music.flatMap((m) => {
       const a = assets.get(m.asset);
-      const dur = Math.min(m.end - m.start, draftDuration(d) - m.at);
-      return a && dur > 0.05 ? [{ path: a.info.path, start: r3(m.start), dur: r3(dur), at: r3(m.at), volume: m.volume, fade_in: m.fadeIn, fade_out: m.fadeOut }] : [];
+      const dur = Math.min(m.end - m.start, total - m.at);
+      return a && dur > 0.05 && !muted(m) ? [{ path: a.info.path, start: r3(m.start), dur: r3(dur), at: r3(m.at), volume: m.volume, fade_in: m.fadeIn, fade_out: m.fadeOut, denoise: !!m.denoise }] : [];
     }),
     width, height, fps: d.fps || 30, ass: o.ass, mode: o.mode, vbitrate: o.vbitrate, settings: o.shrink, out: o.out,
+    loudnorm: !!o.loudnorm, duck: !!o.duck, abr: o.abr ?? 256,
   };
 }
 
@@ -309,4 +629,27 @@ export function fmtTC(s: number, frac = false) {
   const p = (n: number) => String(n).padStart(2, "0");
   const base = h ? `${h}:${p(m)}:${p(x)}` : `${p(m)}:${p(x)}`;
   return frac ? base + "." + String(Math.floor((s % 1) * 10)) : base;
+}
+
+/** Timecode with frames: HH:MM:SS:FF. */
+export function fmtTCF(s: number, fps = 30) {
+  s = Math.max(0, s);
+  const f = Math.max(1, Math.round(fps));
+  const total = Math.floor(s * f + 1e-6);
+  const fr = total % f, secs = Math.floor(total / f);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(Math.floor(secs / 3600))}:${p(Math.floor((secs % 3600) / 60))}:${p(secs % 60)}:${p(fr)}`;
+}
+
+/** Parses "SS", "MM:SS", "HH:MM:SS", "HH:MM:SS:FF" or seconds with a decimal point. */
+export function parseTC(text: string, fps = 30): number | null {
+  const t = text.trim();
+  if (!t) return null;
+  if (/^\d+(\.\d+)?$/.test(t)) return Number(t);
+  const parts = t.split(/[:;]/).map(Number);
+  if (parts.some((x) => !Number.isFinite(x))) return null;
+  if (parts.length === 4) return parts[0] * 3600 + parts[1] * 60 + parts[2] + parts[3] / Math.max(1, Math.round(fps));
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return null;
 }

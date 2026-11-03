@@ -1,11 +1,17 @@
 // App state: one module-level store, components re-render through useStore().
 import { useEffect, useReducer } from "preact/hooks";
 import { api, onJob, type AppInfo, type CcStatus, type ModelInfo, type QwenStatus } from "./api";
-import { draftDuration, newDraft, uid } from "./edit";
-import type { Asset, Draft, JobEvent, Project, Settings } from "./types";
+import { draftDuration, newDraft, refineWords, rippleConnected, uid } from "./edit";
+import type { Asset, Draft, JobEvent, Project, Settings, Word } from "./types";
 
-export type Meta = { id: string; name: string; updated: number; created: number; assets: number; drafts: number; duration: number; poster?: string };
-export type ExportJob = { id: string; draft: string; pct: number; state: string; message: string; out: string; result?: any; left?: number };
+export type Meta = { id: string; name: string; updated: number; created: number; assets: number; drafts: number; duration: number; poster?: string; clips: number };
+export type ExportJob = { id: string; draft: string; pct: number; state: string; message: string; out: string; result?: any; left?: number; name?: string };
+/** Timeline tools: select (V), blade (C), roll (R), slip (Y). */
+export type Tool = "select" | "blade" | "roll" | "slip";
+/** Panel arrangement: the editing page, the transcript page, the 360 page. */
+export type Workspace = "edit" | "transcript" | "r360";
+/** One AI request: the drafts before it, so its changes can be listed and undone as one. */
+export type AiRun = { id: string; at: number; prompt: string; before: Draft[]; after?: Draft[]; draftId: string | null; done: boolean; undone?: boolean };
 
 export const DEFAULT_SETTINGS: Settings = {
   aiMode: "account", apiKey: "", model: "claude-opus-5-5", effort: "high", engine: "whisper", whisperModel: "turbo", lang: "ko", exportDir: "", autoProxy: true, autoTranscribe: true,
@@ -36,12 +42,27 @@ type S = {
   agentStatus: string;
   rightTab: "inspect" | "agent";
   leftTab: "media" | "transcript";
+  /** Selected item on V2/V3 or A1–A3. */
+  selItem: string | null;
+  tool: Tool;
+  snap: boolean;
+  workspace: Workspace;
+  /** Words selected in the transcript, as timeline ranges (shown on the timeline). */
+  trRanges: [number, number][];
+  exportQueue: { draftId: string; choice: any }[];
+  aiRuns: AiRun[];
+  savedAt: number;
+  dialog: "" | "shortcuts" | "export" | "newProject";
+  showSafe: boolean;
+  /** Timeline shows where silence removal would cut. */
+  showSilence: boolean;
 };
 
 export const st: S = {
   route: "home", projects: [], project: null, draftId: null, sourceId: null, folder: "", playhead: 0, selClip: null,
   settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, ccConnect: null, qwenSetup: null, downloads: {}, exportJob: null, toast: "",
   agentBusy: false, agentStatus: "", rightTab: "inspect", leftTab: "media",
+  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, dialog: "", showSafe: false, showSilence: false,
 };
 
 const subs = new Set<() => void>();
@@ -85,13 +106,14 @@ export async function saveNow() {
   const clean: Project = { ...p, assets: p.assets.map((a) => ({ ...a, proxyState: a.proxyState === "running" ? "idle" : a.proxyState, tState: a.tState === "running" ? "idle" : a.tState })) };
   await api.storeSet("project-" + p.id, JSON.stringify(clean));
   const meta = metaOf(p);
-  set({ projects: [meta, ...st.projects.filter((m) => m.id !== p.id)].sort((a, b) => b.updated - a.updated) });
+  set({ projects: [meta, ...st.projects.filter((m) => m.id !== p.id)].sort((a, b) => b.updated - a.updated), savedAt: Date.now() });
 }
 
 function metaOf(p: Project): Meta {
   return {
     id: p.id, name: p.name, updated: p.updated, created: p.created, assets: p.assets.length, drafts: p.drafts.length,
     duration: p.drafts[0] ? draftDuration(p.drafts[0]) : 0, poster: p.assets.find((a) => a.poster)?.poster,
+    clips: p.drafts.reduce((n, d) => n + d.clips.length, 0),
   };
 }
 
@@ -116,11 +138,11 @@ export async function loadProjects() {
   set({ projects: metas });
 }
 
-export async function createProject(name: string): Promise<Project> {
+export async function createProject(name: string, aspect = "16:9", fps = 30): Promise<Project> {
   const now = Date.now();
-  const d = newDraft("첫 편집본");
+  const d = newDraft("첫 편집본", aspect, fps);
   const p: Project = { id: uid(), name: name || "새 프로젝트", created: now, updated: now, assets: [], folders: [], drafts: [d], chat: [] };
-  set({ project: p, draftId: d.id, route: "project", sourceId: null, playhead: 0, selClip: null, folder: "" });
+  set({ project: p, draftId: d.id, route: "project", sourceId: null, playhead: 0, selClip: null, selItem: null, folder: "", aiRuns: [] });
   undoStack.length = 0; redoStack.length = 0;
   await saveNow();
   return p;
@@ -133,10 +155,12 @@ export async function openProject(id: string) {
   p.chat ??= []; p.folders ??= [];
   if (!p.drafts.length) p.drafts.push(newDraft("첫 편집본"));
   undoStack.length = 0; redoStack.length = 0;
-  set({ project: p, draftId: p.drafts[0].id, route: "project", sourceId: null, playhead: 0, selClip: null, folder: "" });
+  set({ project: p, draftId: p.drafts[0].id, route: "project", sourceId: null, playhead: 0, selClip: null, selItem: null, folder: "", aiRuns: [] });
   // Resume work that was cut off when the app closed.
   for (const a of p.assets) {
     if (st.settings.autoProxy && !a.proxy && a.info.kind !== "image") startProxy(a.id);
+    // Transcripts made before word-time repair existed.
+    if (a.words?.length && !a.refined) refineAsset(a.id);
   }
 }
 
@@ -180,13 +204,17 @@ export function checkpoint(label: string) {
   redoStack.length = 0;
 }
 
-/** Replaces the current draft and records an undo step. */
-export function editDraft(label: string, fn: (d: Draft) => Draft, id = st.draftId) {
+/**
+ * Replaces the current draft and records an undo step. When the main track changes, clips on
+ * V2/V3, A1 and A3 move with the picture they sit over (ripple).
+ */
+export function editDraft(label: string, fn: (d: Draft) => Draft, id = st.draftId, ripple = true) {
   const p = st.project;
   const d = p?.drafts.find((x) => x.id === id);
   if (!p || !d) return;
-  const nd = fn(d);
+  let nd = fn(d);
   if (nd === d) return;
+  if (ripple) nd = rippleConnected(d, nd);
   checkpoint(label);
   mutate((p) => ({ ...p, drafts: p.drafts.map((x) => (x.id === id ? { ...nd, updated: Date.now() } : x)) }));
 }
@@ -231,7 +259,7 @@ export async function importPaths(paths: string[], folder = st.folder): Promise<
     try {
       const info = await api.inspect(path);
       const f = [folder, rel].filter(Boolean).join("/");
-      const a: Asset = { id: uid(), info, folder: f, proxyState: "idle", tState: "idle" };
+      const a: Asset = { id: uid(), info, folder: f, proxyState: "idle", tState: "idle", added: Date.now() };
       added.push(a);
       mutate((p) => ({ ...p, assets: [...p.assets, a], folders: f && !p.folders.includes(f) ? [...p.folders, f] : p.folders }));
       if (info.kind !== "audio") {
@@ -349,8 +377,11 @@ export async function initJobs() {
       case "transcribe":
         if (e.state === "running") patchAsset(e.id, { tState: "running", tPct: e.pct });
         else if (e.state === "done") {
-          patchAsset(e.id, { tState: "done", tPct: 100, words: e.result.words, lang: e.result.lang });
-          toast(`받아쓰기 완료: ${asset(e.id)?.info.name ?? ""}`);
+          const a = asset(e.id);
+          const words: Word[] = e.result.words ?? [];
+          patchAsset(e.id, { tState: "done", tPct: 100, words, lang: e.result.lang });
+          toast(`받아쓰기 완료: ${a?.info.name ?? ""}`);
+          if (a) refineAsset(a.id);
         } else patchAsset(e.id, { tState: e.state, tError: e.message });
         break;
       case "download":
@@ -369,10 +400,34 @@ export async function initJobs() {
       case "export":
         if (st.exportJob && st.exportJob.id === e.id) {
           set({ exportJob: { ...st.exportJob, pct: e.pct, state: e.state, message: e.message, result: e.result, left: e.state === "running" ? Number(e.message) : undefined } });
+          if (e.state !== "running") import("./exporter").then((m) => m.onExportEnd(e.state, st.exportJob?.name ?? "", e.result?.path ?? "", e.message));
         }
         break;
     }
   });
+}
+
+const stripBusy = new Set<string>();
+/** A row of 30 frames across the whole media (timeline thumbnails), made once per file. */
+export async function ensureStrip(a: Asset) {
+  if (a.strip || a.info.kind !== "video" || stripBusy.has(a.id)) return;
+  // 360 originals are two fisheye circles; their equirect proxy reads better as thumbnails.
+  const path = a.info.layout360 !== "none" ? a.proxy : a.info.path;
+  if (!path) return;
+  stripBusy.add(a.id);
+  try { patchAsset(a.id, { strip: await api.filmstrip(path, a.info.duration, 30) }); } catch { /* keep the poster */ }
+  finally { stripBusy.delete(a.id); }
+}
+
+/** Fixes word times that recognition squeezed into pauses, and drops words made up in silence. */
+export async function refineAsset(id: string) {
+  const a = asset(id);
+  if (!a?.words?.length || !a.info.has_audio) return;
+  const w = await loadWave(a);
+  const now = asset(id);
+  if (!w || !now?.words) return;
+  const fixed = refineWords(now.words, w, now.info.duration);
+  patchAsset(id, { words: fixed, refined: true });
 }
 
 export async function loadWave(a: Asset): Promise<Uint8Array | null> {

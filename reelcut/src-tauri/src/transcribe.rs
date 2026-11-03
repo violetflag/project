@@ -30,6 +30,29 @@ pub fn models(dir: &Path) -> Vec<ModelInfo> {
         .collect()
 }
 
+/// Silero voice-activity model for whisper's `--vad`: only speech goes to the recogniser, which
+/// stops made-up words in silence and keeps word times right after long pauses.
+pub const VAD_FILE: &str = "ggml-silero-v5.1.2.bin";
+const VAD_URL: &str = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin";
+
+/// The VAD model in `dir`, fetched (under 1 MB) when missing. None if it cannot be had.
+pub fn ensure_vad(dir: &Path) -> Option<PathBuf> {
+    let dest = dir.join(VAD_FILE);
+    if dest.is_file() {
+        return Some(dest);
+    }
+    let resp = ureq::get(VAD_URL).call().ok()?;
+    let mut bytes = Vec::new();
+    resp.into_reader().take(16 << 20).read_to_end(&mut bytes).ok()?;
+    if bytes.len() < 100_000 {
+        return None;
+    }
+    let part = dest.with_extension("part");
+    std::fs::write(&part, &bytes).ok()?;
+    std::fs::rename(&part, &dest).ok()?;
+    Some(dest)
+}
+
 pub fn model_path(dir: &Path, id: &str) -> Result<PathBuf, String> {
     let (_, _, file, _) = MODELS.iter().find(|m| m.0 == id).ok_or_else(|| format!("알 수 없는 모델: {id}"))?;
     Ok(dir.join(file))
@@ -167,6 +190,9 @@ pub fn run(r: &Run, jobs: &Jobs, tag: &str, gen: u64, mut on: impl FnMut(f64)) -
     if r.lang == "ko" {
         // Keeps whisper writing Korean (not romanised or translated) and with punctuation.
         args.extend(["--prompt".into(), "안녕하세요. 오늘은 영상을 찍었습니다.".into()]);
+    }
+    if let Some(vad) = r.model.parent().and_then(ensure_vad) {
+        args.extend(["--vad".into(), "-vm".into(), vad.to_string_lossy().into_owned()]);
     }
     ff::run_tracked(jobs, tag, gen, r.whisper, &args, |line| {
         if let Some(i) = line.find("progress =") {
