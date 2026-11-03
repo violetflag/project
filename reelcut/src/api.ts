@@ -60,6 +60,7 @@ export const api = {
   poster: (path: string, at: number) => invoke<string>("poster", { path, at }),
   waveform: (path: string) => invoke<number[]>("waveform", { path }),
   frames: (path: string, times: number[], width?: number, view?: View, lens?: Lens) => invoke<string[]>("frames", { req: { path, times, width: width ?? null, view: view ?? null, lens: lens ?? null } }),
+  eqSheet: (path: string, lens: Lens, times: number[], width: number) => invoke<string[]>("eq_sheet", { req: { path, lens, times, width, grid: true } }),
   contactSheet: (path: string, start: number, every: number, cols: number, rows: number, tileW: number) =>
     invoke<string>("contact_sheet", { path, start, every, cols, rows, tileW }),
   whisperModels: () => invoke<ModelInfo[]>("whisper_models"),

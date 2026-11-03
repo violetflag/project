@@ -99,6 +99,7 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
     case "filmstrip": case "poster": return "/mock/poster.jpg";
     case "waveform": return Array.from({ length: Math.round(20 * 50) }, (_, i) => (Math.floor(i / 50) % 5 === 3 ? 10 : 150 + ((i * 37) % 80)));
     case "frames": return a.req.times.map(() => "");
+    case "eq_sheet": return a.req.times.map(() => "");
     case "contact_sheet": return "";
     case "whisper_models": return [{ id: "turbo", label: "large-v3-turbo", file: "x", size_mb: 574, downloaded: true }, { id: "base", label: "base", file: "y", size_mb: 148, downloaded: false }];
     case "download_model": emit({ id: a.id, kind: "download", pct: 100, state: "done", message: "", result: "" }); return;

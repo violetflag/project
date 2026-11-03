@@ -1,6 +1,7 @@
 // Pure edit operations on drafts (no I/O), so they can be unit-tested and shared by the
 // editor and the AI agent.
 
+import { normView, smoothViewAt } from "./framing";
 import type { Asset, CaptionStyle, Clip, ColorAdj, Draft, Lens, MediaInfo, MusicClip, Overlay, Plan, PlanOverlay, Seg, ShrinkSettings, TrackId, Transform, View, ViewKey, Word } from "./types";
 
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
@@ -323,27 +324,10 @@ export function nudgeClip(d: Draft, id: string, dir: -1 | 1): Draft {
 
 // ---------------------------------------------------------------- 360 view animation
 
-/** The view of a 360 clip at `t` seconds from its timeline start (keyframes interpolate linearly). */
+/** The view of a 360 clip at source time `t`: keyframes interpolate smoothly (monotone cubic, no overshoot). */
 export function viewAt(view: View | undefined, keys: ViewKey[] | undefined, t: number): View {
-  const base = view ?? DEFAULT_VIEW;
-  if (!keys?.length) return base;
-  const ks = keys.slice().sort((a, b) => a.t - b.t);
-  if (t <= ks[0].t) return ks[0].view;
-  if (t >= ks[ks.length - 1].t) return ks[ks.length - 1].view;
-  for (let i = 0; i + 1 < ks.length; i++) {
-    const a = ks[i], b = ks[i + 1];
-    if (t >= a.t && t <= b.t) {
-      const k = (t - a.t) / Math.max(1e-6, b.t - a.t);
-      let dy = b.view.yaw - a.view.yaw;
-      if (dy > 180) dy -= 360;
-      if (dy < -180) dy += 360;
-      const lerp = (x: number, y: number) => x + (y - x) * k;
-      let yaw = a.view.yaw + dy * k;
-      yaw = ((((yaw + 180) % 360) + 360) % 360) - 180;
-      return { yaw: r3(yaw), pitch: r3(lerp(a.view.pitch, b.view.pitch)), roll: r3(lerp(a.view.roll, b.view.roll)), hfov: r3(lerp(a.view.hfov, b.view.hfov)) };
-    }
-  }
-  return base;
+  if (!keys?.length) return normView(view ?? DEFAULT_VIEW);
+  return smoothViewAt(keys, t);
 }
 
 /** Sets (or replaces, within 1/20 s) a keyframe at t. */

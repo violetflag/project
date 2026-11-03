@@ -4,13 +4,15 @@
 import { api, onEvent } from "./api";
 import {
   clipDur, cutSource, DEFAULT_COLOR, DEFAULT_TRANSFORM, deleteClip, detachAudio, draftDuration, draftWords, fmtTC, insertClips, is360, isDefaultColor, isDefaultTransform, isFiller, isGap, moveClip,
-  newClip, newDraft, newGap, newOverlay, r3, removeFillers, removeItem, removeRange, removeSilences, setTransition, splitAt, starts, transcriptText, uid, updateClip, updateOverlay,
+  newClip, newDraft, newGap, newOverlay, r3, removeFillers, removeItem, removeRange, removeSilences, setTransition, splitAt, speechFromWave, speechFromWords, starts, transcriptText, uid, updateClip, updateOverlay, viewAt,
   type Pacing,
 } from "./edit";
 import { exportAndWait } from "./exporter";
+import { cleanKeys, frameSubject, normView, sampleKeys, snapRanges, type Mark } from "./framing";
+import { PLAYBOOK_360 } from "./playbook";
 import { compactBudget, ctxLimit, estTokens, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
 import { activeChat, asset, assetMap, editDraft, loadWave, mutate, mutateChat, saveNow, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
-import type { Asset, ChatBlock, ChatMsg, ChatSession, Draft } from "./types";
+import type { Asset, ChatBlock, ChatMsg, ChatSession, Draft, View, ViewKey } from "./types";
 
 export const MODELS = [
   { id: "claude-opus-5-5", label: "Claude Opus 5.5" },
@@ -31,6 +33,8 @@ const SYSTEM = `당신은 Reelcut의 영상 편집 에이전트입니다. Reelcu
 - 소리 트랙: A1(클립에서 분리한 소리, J·L컷), A2(배경음악), A3(효과음). 마커, 받아쓰기 자막(captions)이 있습니다.
 - 본편이 바뀌면 V2/V3·A1·A3는 그 위의 그림을 따라 움직이고, A2 음악은 그 자리에 남습니다.
 - DJI Osmo 360 파일(.osv, .lrf/.lrv)은 360 영상입니다. 360 클립은 view로 어느 방향을 볼지 정합니다 (yaw: 좌우 -180~180, pitch: 위아래 -90~90, hfov: 화각 20~160, 기본 100).
+- 360 클립은 시점을 한 개(view)만 두지 않고 시점 키프레임(view_keys: 원본 시간 t마다 yaw/pitch/roll/hfov)으로 움직일 수 있습니다. 키 사이는 부드럽게 이어집니다(과하게 튀지 않는 곡선). 사람을 따라가는 화면은 frame_subject로 0.1초 간격 키프레임을 만드세요. yaw·roll은 범위를 벗어나도 앱이 -180~180으로 맞춥니다.
+- 360 영상을 자동 편집해 달라는 요청이면 먼저 get_playbook으로 작업 순서(360 자동편집)를 읽고 따르세요.
 - 시간 단위는 모두 초입니다. 원본 시간(source)과 편집본 타임라인 시간(timeline)을 구분하세요.
 
 ## 일하는 방법
@@ -45,6 +49,7 @@ const SYSTEM = `당신은 Reelcut의 영상 편집 에이전트입니다. Reelcu
 const num = { type: "number" };
 const str = { type: "string" };
 const viewSchema = { type: "object", properties: { yaw: num, pitch: num, roll: num, hfov: num }, description: "360 시점 (도)" };
+const viewKeysSchema = { type: "array", items: { type: "object", properties: { t: { ...num, description: "원본 시간(초)" }, yaw: num, pitch: num, roll: num, hfov: num }, required: ["t"] }, description: "시점 키프레임 (키 사이는 부드럽게 이어짐)" };
 const draftId = { ...str, description: "편집본 id. 비우면 지금 열린 편집본" };
 
 export const TOOLS = [
@@ -71,7 +76,7 @@ export const TOOLS = [
       type: "object",
       properties: {
         name: str, aspect: { type: "string", enum: ["16:9", "9:16", "1:1", "4:5"] },
-        clips: { type: "array", items: { type: "object", properties: { asset_id: str, start: num, end: num, speed: num, view: viewSchema }, required: ["asset_id", "start", "end"] } },
+        clips: { type: "array", items: { type: "object", properties: { asset_id: str, start: num, end: num, speed: num, view: viewSchema, view_keys: viewKeysSchema }, required: ["asset_id", "start", "end"] } },
       },
       required: ["name", "clips"],
     },
@@ -80,7 +85,7 @@ export const TOOLS = [
   {
     name: "edit_draft",
     description: `편집본을 고칩니다. ops를 순서대로 적용합니다. op 종류:
-- {op:"insert", asset_id, start, end, index?, speed?, view?}: 클립 넣기 (index 없으면 맨 뒤)
+- {op:"insert", asset_id, start, end, index?, speed?, view?, view_keys?}: 클립 넣기 (index 없으면 맨 뒤)
 - {op:"delete", clip_id}
 - {op:"trim", clip_id, start?, end?}: 원본 구간 바꾸기
 - {op:"move", clip_id, index}
@@ -89,6 +94,8 @@ export const TOOLS = [
 - {op:"cut_source", clip_id, ranges:[[s,e],…]}: 클립 안의 원본 구간들 지우기
 - {op:"set", clip_id, speed?, volume?, view?, fit?("fit"|"fill"), fade_in?, fade_out?, denoise?, transform?:{x,y,scale,rotation,crop_l,crop_r,crop_t,crop_b,opacity}, color?:{exposure,contrast,saturation,temperature}}
   (x/y: 화면 대비 중심 이동 -1~1, scale 1=원래, exposure 스톱 -2~2, contrast/saturation 1=그대로, temperature 6500=그대로)
+- {op:"set_view_keys", clip_id, keys:[{t,yaw,pitch,roll,hfov},…], merge?}: 360 클립의 시점 키프레임 (t=원본 초, 키 사이는 부드럽게). merge=true면 기존 키에 더하고 같은 시각은 바꿈. 사람 따라가기는 frame_subject가 더 쉽습니다
+- {op:"clear_view_keys", clip_id}: 시점 키프레임 지우기
 - {op:"transition", clip_id, seconds}: 이 클립과 앞 클립 사이 디졸브 (0이면 컷)
 - {op:"gap", index, seconds}: 빈칸(검은 화면·무음) 넣기
 - {op:"detach_audio", clip_id}: 클립 소리를 A1으로 분리
@@ -114,6 +121,41 @@ export const TOOLS = [
     input_schema: { type: "object", properties: { draft_id: draftId, enabled: { type: "boolean" }, size: { ...num, description: "화면 높이 대비 % (기본 6)" }, position: { type: "string", enum: ["bottom", "middle", "top"] }, max_chars: num }, required: ["enabled"] },
   },
   { name: "transcribe", description: "미디어를 받아쓰기합니다 (끝날 때까지 기다림).", input_schema: { type: "object", properties: { asset_ids: { type: "array", items: str } }, required: ["asset_ids"] } },
+  {
+    name: "get_playbook", description: "작업별 단계별 지침을 읽습니다. name=360_auto_edit: 360 영상을 사람 따라가며 자동 편집하는 순서.",
+    input_schema: { type: "object", properties: { name: { type: "string", enum: ["360_auto_edit"] } }, required: ["name"] },
+  },
+  {
+    name: "equirect_sheet", description: "360 영상의 특정 원본 시간을 '수평으로 펴 놓은 파노라마'(가로 0~960 = 방위 -180~180°, 480 = 정면, 세로 240 = 수평선)로 봅니다. 좌표 격자가 그려져 있어 사람 머리의 [x,y]를 읽을 때 씁니다 (최대 6장).",
+    input_schema: { type: "object", properties: { asset_id: str, times: { type: "array", items: num }, width: { ...num, description: "그림 가로 픽셀(기본 960)" } }, required: ["asset_id", "times"] },
+  },
+  {
+    name: "frame_subject", description: "사람(머리) 위치 표시를 따라가는 시점 키프레임을 만듭니다. marks는 equirect_sheet에서 읽은 [원본 초, x, y] 목록(빠르면 1초, 보통 2.5초 간격). 0.1초 간격 키프레임으로 부드럽게 이어서 클립에 넣고, 머리가 화면 위에서 1/3 지점에 오게 합니다.",
+    input_schema: {
+      type: "object",
+      properties: {
+        draft_id: draftId, clip_id: str,
+        marks: { type: "array", items: { type: "array", items: num }, description: "[[t,x,y], …] 또는 [t,x,y,hfov]. t=원본 초, x 0~960, y 0~480(수평선 240), 머리 위치" },
+        hfov: { ...num, description: "화각(기본 90)" }, headroom: { ...num, description: "머리 위 여백 비율(기본 0.33)" },
+        step: { ...num, description: "키 간격 초(기본 0.1)" }, smooth: { ...num, description: "부드럽게 하는 정도 초(기본 0.4, 0이면 끔)" },
+        from: num, to: num,
+      },
+      required: ["clip_id", "marks"],
+    },
+  },
+  {
+    name: "get_view_keys", description: "클립의 시점 키프레임을 봅니다 (많으면 고르게 줄여서 최대 max개, 기본 60).",
+    input_schema: { type: "object", properties: { draft_id: draftId, clip_id: str, max: num }, required: ["clip_id"] },
+  },
+  {
+    name: "check_framing", description: "클립의 시점 키프레임으로 실제 잡히는 화면을 원본 시간 times에서 확인합니다(없으면 클립 안 고르게 6곳). 머리가 위 1/3 선 근처인지, 잘리지 않았는지 보세요.",
+    input_schema: { type: "object", properties: { draft_id: draftId, clip_id: str, times: { type: "array", items: num } }, required: ["clip_id"] },
+  },
+  {
+    name: "snap_cuts", description: "편집본 클립의 시작·끝을 가까운 말 없는 틈(±1.5초 안)으로 옮겨 말 중간에서 끊기지 않게 합니다. 받아쓰기가 있으면 단어 사이, 없으면 소리 크기 기준입니다.",
+    input_schema: { type: "object", properties: { draft_id: draftId, clip_ids: { type: "array", items: str }, reach: { ...num, description: "옮길 수 있는 최대 거리 초(기본 1.5)" } } },
+  },
+  { name: "delete_draft", description: "편집본을 지웁니다 (마지막 하나는 지울 수 없고, Ctrl+Z로 되돌릴 수 있습니다).", input_schema: { type: "object", properties: { draft_id: str }, required: ["draft_id"] } },
   {
     name: "export_draft", description: "편집본을 파일로 내보냅니다 (끝날 때까지 기다림). preset: fhd/4k/hd/sd는 일반 H.264 MP4, shrink_balanced/shrink_small/shrink_archive/shrink_lecture는 크기를 많이 줄이는 고압축(AV1/HEVC), audio는 WAV 소리만.",
     input_schema: { type: "object", properties: { draft_id: draftId, preset: { type: "string", enum: ["4k", "fhd", "hd", "sd", "shrink_archive", "shrink_balanced", "shrink_small", "shrink_lecture", "audio"] }, file_name: str }, required: ["preset"] },
@@ -155,7 +197,7 @@ function draftInfo(d: Draft): string {
   d.clips.forEach((c, i) => {
     if (isGap(c)) { lines.push(`${i} | ${c.id} | (빈칸) | - | ${r3(stt[i])}–${r3(stt[i] + clipDur(c))} | - | - | -`); return; }
     const a = am.get(c.asset);
-    const extra = [c.xin ? `디졸브 ${c.xin}초` : "", c.transform && !isDefaultTransform(c.transform) ? `변형 ${JSON.stringify(c.transform)}` : "", c.color && !isDefaultColor(c.color) ? `색 ${JSON.stringify(c.color)}` : "", c.detached ? "소리 분리됨" : "", c.viewKeys?.length ? `시점 키프레임 ${c.viewKeys.length}개` : ""].filter(Boolean).join(", ");
+    const extra = [c.xin ? `디졸브 ${c.xin}초` : "", c.transform && !isDefaultTransform(c.transform) ? `변형 ${JSON.stringify(c.transform)}` : "", c.color && !isDefaultColor(c.color) ? `색 ${JSON.stringify(c.color)}` : "", c.detached ? "소리 분리됨" : "", c.viewKeys?.length ? `시점 키프레임 ${c.viewKeys.length}개(원본 ${c.viewKeys[0].t}–${c.viewKeys[c.viewKeys.length - 1].t}초)` : ""].filter(Boolean).join(", ");
     lines.push(`${i} | ${c.id} | ${a?.info.name ?? "?"}(${c.asset}) | ${r3(c.start)}–${r3(c.end)} | ${r3(stt[i])}–${r3(stt[i] + clipDur(c))} | ${c.speed}x | ${c.volume} | ${c.view ? `yaw ${c.view.yaw} pitch ${c.view.pitch} hfov ${c.view.hfov}` : "-"}${extra ? ` | ${extra}` : ""}`);
   });
   const ov = d.overlays ?? [];
@@ -167,6 +209,18 @@ function draftInfo(d: Draft): string {
 
 const img = (b64: string): ChatBlock => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: b64 } });
 
+/** Keys from the AI: {t,yaw,…} or {t,view:{…}}; missing angles inherit `base`; always normalised. */
+function parseKeys(raw: any, base?: View): ViewKey[] {
+  if (!Array.isArray(raw)) throw new Error("keys는 배열이어야 합니다");
+  return cleanKeys(raw.map((k: any) => ({ t: Number(k?.t), view: normView(k?.view ?? k, base) })));
+}
+
+/** Speech runs (source seconds) of an asset between s0 and s1, from its words or else its waveform. */
+function speechRuns(words: Asset["words"], wave: ArrayLike<number> | undefined, s0: number, s1: number): [number, number][] | null {
+  if (words?.length) return speechFromWords(words, s0, s1);
+  return wave ? speechFromWave(wave, s0, s1) : null;
+}
+
 function applyOps(d: Draft, ops: any[]): Draft {
   for (const o of ops) {
     switch (o.op) {
@@ -174,7 +228,8 @@ function applyOps(d: Draft, ops: any[]): Draft {
         const a = getAsset(o.asset_id);
         const c = newClip(a, Number(o.start ?? 0), Number(o.end ?? a.info.duration));
         if (o.speed) c.speed = Number(o.speed);
-        if (o.view && is360(a)) c.view = { ...c.view!, ...o.view };
+        if (o.view && is360(a)) c.view = normView(o.view, c.view);
+        if (o.view_keys?.length && is360(a)) c.viewKeys = parseKeys(o.view_keys, c.view);
         d = insertClips(d, [c], o.index ?? d.clips.length);
         break;
       }
@@ -198,7 +253,7 @@ function applyOps(d: Draft, ops: any[]): Draft {
         d = updateClip(d, c.id, {
           ...(o.speed != null ? { speed: Math.min(16, Math.max(0.1, Number(o.speed))) } : {}),
           ...(o.volume != null ? { volume: Math.min(4, Math.max(0, Number(o.volume))) } : {}),
-          ...(o.view ? { view: { ...(c.view ?? { yaw: 0, pitch: 0, roll: 0, hfov: 100 }), ...o.view } } : {}),
+          ...(o.view ? { view: normView(o.view, c.view) } : {}),
           ...(o.fit ? { fit: o.fit } : {}),
           ...(o.fade_in != null ? { fadeIn: Number(o.fade_in) } : {}),
           ...(o.fade_out != null ? { fadeOut: Number(o.fade_out) } : {}),
@@ -208,6 +263,15 @@ function applyOps(d: Draft, ops: any[]): Draft {
         });
         break;
       }
+      case "set_view_keys": {
+        const c = d.clips.find((x) => x.id === o.clip_id);
+        if (!c) throw new Error(`클립 없음: ${o.clip_id}`);
+        if (!is360(getAsset(c.asset))) throw new Error("360 영상 클립이 아닙니다");
+        const ks = parseKeys(o.keys, c.view);
+        d = updateClip(d, c.id, { viewKeys: cleanKeys(o.merge ? [...(c.viewKeys ?? []).filter((k) => !ks.some((n) => Math.abs(n.t - k.t) < 0.001)), ...ks] : ks) });
+        break;
+      }
+      case "clear_view_keys": d = updateClip(d, o.clip_id, { viewKeys: undefined }); break;
       case "transition": d = setTransition(d, o.clip_id, Number(o.seconds ?? 0.5)); break;
       case "gap": d = insertClips(d, [newGap(Number(o.seconds ?? 1))], o.index ?? d.clips.length); break;
       case "detach_audio": d = detachAudio(d, o.clip_id); break;
@@ -291,7 +355,7 @@ async function run(name: string, inp: any): Promise<Out> {
       const r360 = is360(a);
       // 360: a flat view straight from the original (an .osv's two lens tracks put side by side).
       const lens = r360 ? { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 } : undefined;
-      const shots = await api.frames(a.info.path, times, 768, r360 ? { yaw: 0, pitch: 0, roll: 0, hfov: 100, ...(inp.view ?? {}) } : undefined, lens);
+      const shots = await api.frames(a.info.path, times, 768, r360 ? normView(inp.view) : undefined, lens);
       return shots.flatMap((b, i) => [{ type: "text", text: `${a.info.name} ${r3(times[i])}초` }, img(b)]);
     }
     case "contact_sheet": {
@@ -317,6 +381,80 @@ async function run(name: string, inp: any): Promise<Out> {
       const d = applyOps(d0, inp.ops ?? []);
       editDraft(`AI: 편집본 수정`, () => d, d0.id);
       return `적용했습니다. 길이 ${r3(draftDuration(d0))}초 → ${r3(draftDuration(d))}초\n` + draftInfo(d);
+    }
+    case "get_playbook": return PLAYBOOK_360;
+    case "equirect_sheet": {
+      const a = getAsset(inp.asset_id);
+      if (!is360(a)) throw new Error("360 영상이 아닙니다");
+      const times = (inp.times as number[]).slice(0, 6);
+      const lens = { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 };
+      const shots = await api.eqSheet(a.info.path, lens, times, Math.min(1920, Math.max(480, inp.width ?? 960)));
+      return [{ type: "text", text: "가로 0~960 = 방위 -180~180°(480 = 정면), 세로 240 = 수평선(위가 위쪽). 격자 눈금으로 [x,y]를 읽으세요." }, ...shots.flatMap((b, i) => [{ type: "text", text: `${a.info.name} ${r3(times[i])}초` } as ChatBlock, img(b)])];
+    }
+    case "frame_subject": {
+      const d0 = getDraft(inp.draft_id);
+      const c = d0.clips.find((x) => x.id === inp.clip_id);
+      if (!c) throw new Error(`클립 없음: ${inp.clip_id}`);
+      if (!is360(getAsset(c.asset))) throw new Error("360 영상 클립이 아닙니다");
+      const marks: Mark[] = (inp.marks ?? []).map((m: any) => (Array.isArray(m) ? { t: m[0], x: m[1], y: m[2], hfov: m[3] } : m));
+      if (!marks.length) throw new Error("marks가 비었습니다");
+      const [aw, ah] = d0.aspect.split(":").map(Number);
+      const from = Math.max(c.start, inp.from ?? c.start), to = Math.min(c.end, inp.to ?? c.end);
+      const keys = frameSubject(marks, from, to, { aspect: aw / ah || 16 / 9, hfov: inp.hfov, headroom: inp.headroom, step: inp.step, sigma: inp.smooth });
+      if (!keys.length) throw new Error("키프레임을 만들 수 없습니다 (marks나 구간 확인)");
+      const d = updateClip(d0, c.id, { viewKeys: keys });
+      editDraft("AI: 사람 따라가기", () => d, d0.id);
+      return `${c.id}에 시점 키프레임 ${keys.length}개를 넣었습니다 (원본 ${keys[0].t}–${keys[keys.length - 1].t}초, ${r3(inp.step ?? 0.1)}초 간격, 머리 위 여백 ${inp.headroom ?? 0.33}). check_framing으로 확인하세요.`;
+    }
+    case "get_view_keys": {
+      const c = getDraft(inp.draft_id).clips.find((x) => x.id === inp.clip_id);
+      if (!c) throw new Error(`클립 없음: ${inp.clip_id}`);
+      const ks = c.viewKeys ?? [];
+      if (!ks.length) return `키프레임 없음. 고정 시점: ${JSON.stringify(c.view ?? null)}`;
+      const shown = sampleKeys(ks, Math.max(2, Math.min(200, inp.max ?? 60)));
+      return `키프레임 ${ks.length}개 (${shown.length}개 표시) t | yaw | pitch | roll | hfov\n` + shown.map((k) => `${k.t} | ${k.view.yaw} | ${k.view.pitch} | ${k.view.roll} | ${k.view.hfov}`).join("\n");
+    }
+    case "check_framing": {
+      const c = getDraft(inp.draft_id).clips.find((x) => x.id === inp.clip_id);
+      if (!c) throw new Error(`클립 없음: ${inp.clip_id}`);
+      const a = getAsset(c.asset);
+      if (!is360(a)) throw new Error("360 영상 클립이 아닙니다");
+      const times: number[] = (inp.times?.length ? inp.times : Array.from({ length: 6 }, (_, i) => c.start + ((i + 0.5) * (c.end - c.start)) / 6)).slice(0, 8);
+      const lens = { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 };
+      const out: ChatBlock[] = [{ type: "text", text: "머리가 화면 위에서 약 1/3 선에 있고 위·아래가 잘리지 않아야 합니다. 어긋나면 marks를 고쳐 frame_subject를 다시 하세요." }];
+      for (const t of times) {
+        const v = viewAt(c.view, c.viewKeys, t);
+        const [b] = await api.frames(a.info.path, [t], 640, v, lens);
+        out.push({ type: "text", text: `${r3(t)}초 | yaw ${v.yaw} pitch ${v.pitch} hfov ${v.hfov}` }, img(b));
+      }
+      return out;
+    }
+    case "snap_cuts": {
+      const d0 = getDraft(inp.draft_id);
+      const am = assetMap();
+      for (const c of d0.clips) { const a = asset(c.asset); if (a && !a.words && !waves.has(a.id)) await loadWave(a); }
+      const report: string[] = [];
+      let d = d0;
+      for (const c of d0.clips) {
+        if (isGap(c) || (inp.clip_ids?.length && !inp.clip_ids.includes(c.id))) continue;
+        const a = am.get(c.asset);
+        const sp = a ? speechRuns(a.words, waves.get(a.id), c.start - 2, c.end + 2) : null;
+        if (!sp?.length) continue;
+        const { ranges, moved } = snapRanges([[c.start, c.end]], sp, { reach: inp.reach });
+        if (!moved.length) continue;
+        d = updateClip(d, c.id, { start: r3(ranges[0][0]), end: r3(ranges[0][1]) });
+        report.push(`${c.id}: ${moved.map((m) => `${m.side === "start" ? "시작" : "끝"} ${m.from}→${m.to}`).join(", ")}`);
+      }
+      if (d !== d0) editDraft("AI: 컷 위치를 말 틈으로", () => d, d0.id);
+      return report.length ? `컷 ${report.length}곳을 옮겼습니다.\n` + report.join("\n") : "옮길 컷이 없습니다 (이미 말 틈이거나 가까운 틈이 없음).";
+    }
+    case "delete_draft": {
+      const id = String(inp.draft_id);
+      if (!p.drafts.some((x) => x.id === id)) throw new Error(`편집본을 찾을 수 없습니다: ${id}`);
+      if (p.drafts.length <= 1) throw new Error("마지막 편집본은 지울 수 없습니다");
+      const rest = p.drafts.filter((x) => x.id !== id);
+      setDrafts("AI: 편집본 지우기", rest, st.draftId === id ? rest[0].id : st.draftId);
+      return `지웠습니다. 남은 편집본 ${rest.length}개 (Ctrl+Z로 되돌릴 수 있음)`;
     }
     case "remove_silences": {
       const d0 = getDraft(inp.draft_id);
@@ -581,6 +719,7 @@ export const TOOL_LABEL: Record<string, string> = {
   get_project_overview: "프로젝트 살펴보는 중", get_transcript: "대본 읽는 중", search_transcript: "대본 찾는 중", view_frames: "장면 보는 중",
   contact_sheet: "영상 훑어보는 중", create_draft: "편집본 만드는 중", get_draft: "편집본 확인 중", edit_draft: "편집하는 중",
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
+  get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
 
