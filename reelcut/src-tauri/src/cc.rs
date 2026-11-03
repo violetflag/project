@@ -202,6 +202,9 @@ impl Bridge {
             s.write_all(&out)?;
             s.flush()?;
             if close {
+                // Finish the response cleanly; without this a reset can reach the client when a
+                // child process (ffmpeg) spawned at the same moment exits.
+                let _ = s.shutdown(std::net::Shutdown::Write);
                 return Ok(());
             }
         }
