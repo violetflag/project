@@ -1,6 +1,6 @@
 [package]
 name = "reelcut"
-version = "0.1.0"
+version = "1.0.0"
 description = "Video editor with transcript editing, 360 reframing and an AI agent"
 authors = ["John"]
 edition = "2021"

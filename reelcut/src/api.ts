@@ -31,6 +31,7 @@ export const onJob = (cb: (e: JobEvent) => void) => listenImpl(cb);
 export const onEvent = (name: string, cb: (p: any) => void) => listenAny(name, cb);
 
 export type AppInfo = {
+  version: string;
   ffmpeg: string; ffmpegOk: boolean; ffmpegVersion: string; whisper: string; whisperOk: boolean;
   dataDir: string; cacheDir: string; hw: Hw; platform: string; videosDir: string;
 };

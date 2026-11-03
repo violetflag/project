@@ -101,6 +101,7 @@ async fn app_info(app: St<'_>) -> Result<Value, String> {
     blocking(move || {
         let hw = app.hw();
         Ok(json!({
+            "version": env!("CARGO_PKG_VERSION"),
             "ffmpeg": app.bins.ffmpeg.to_string_lossy(),
             "ffmpegOk": app.bins.ffmpeg.is_file() || hw.ffmpeg_version.len() > 0,
             "ffmpegVersion": hw.ffmpeg_version,

@@ -83,7 +83,7 @@ const words = () => {
 
 export async function invoke(cmd: string, a: any = {}): Promise<any> {
   switch (cmd) {
-    case "app_info": return { ffmpeg: "mock", ffmpegOk: true, ffmpegVersion: "mock", whisper: "", whisperOk: true, dataDir: "/data", cacheDir: "/cache", hw: { threads: 8, gpus: ["Mock GPU"], ffmpeg_version: "7.1", tested: [], av1: "av1_nvenc", hevc: "hevc_nvenc", h264: "h264_nvenc", has_x265: true, has_x264: true, has_opus: true }, platform: "web", videosDir: "C:/Users/me/Videos" };
+    case "app_info": return { version: "1.0.0", ffmpeg: "mock", ffmpegOk: true, ffmpegVersion: "mock", whisper: "", whisperOk: true, dataDir: "/data", cacheDir: "/cache", hw: { threads: 8, gpus: ["Mock GPU"], ffmpeg_version: "7.1", tested: [], av1: "av1_nvenc", hevc: "hevc_nvenc", h264: "h264_nvenc", has_x265: true, has_x264: true, has_opus: true }, platform: "web", videosDir: "C:/Users/me/Videos" };
     case "hw_info": return (await invoke("app_info")).hw;
     case "store_get": return ls.get(a.name);
     case "store_set": ls.set(a.name, a.value); return;

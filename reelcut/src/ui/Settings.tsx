@@ -174,6 +174,7 @@ export function SettingsView() {
           <ul class="facts">
             <li>그래픽카드: {hw.gpus.join(", ") || "알 수 없음"}</li>
             <li>GPU 인코더: AV1 {hw.av1 ?? "없음"} · HEVC {hw.hevc ?? "없음"} · H.264 {hw.h264 ?? "없음"}</li>
+            <li>Reelcut 버전: {s.info?.version || "?"}</li>
             <li>CPU 스레드: {hw.threads}</li>
             <li>ffmpeg: {s.info?.ffmpegVersion || "없음"}</li>
             <li>
