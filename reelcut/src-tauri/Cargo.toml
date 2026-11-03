@@ -25,9 +25,13 @@ sha2 = "0.10"
 flate2 = "1"
 tar = "0.4"
 
+# Built for speed of building: every CPU core compiles in parallel (16 codegen units) and
+# thin LTO links in parallel too. The heavy work at run time is ffmpeg, so the app itself
+# loses nothing noticeable versus the old single-unit fat-LTO build, which ran on one core.
 [profile.release]
-codegen-units = 1
-lto = true
+codegen-units = 16
+lto = "thin"
+incremental = false
 opt-level = 3
 panic = "abort"
 strip = true
