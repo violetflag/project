@@ -1,6 +1,6 @@
 // App state: one module-level store, components re-render through useStore().
 import { useEffect, useReducer } from "preact/hooks";
-import { api, onJob, type AppInfo, type ModelInfo, type QwenStatus } from "./api";
+import { api, onJob, type AppInfo, type CcStatus, type ModelInfo, type QwenStatus } from "./api";
 import { draftDuration, newDraft, uid } from "./edit";
 import type { Asset, Draft, JobEvent, Project, Settings } from "./types";
 
@@ -8,7 +8,7 @@ export type Meta = { id: string; name: string; updated: number; created: number;
 export type ExportJob = { id: string; draft: string; pct: number; state: string; message: string; out: string; result?: any; left?: number };
 
 export const DEFAULT_SETTINGS: Settings = {
-  apiKey: "", model: "claude-opus-5-5", effort: "high", engine: "whisper", whisperModel: "turbo", lang: "ko", exportDir: "", autoProxy: true, autoTranscribe: true,
+  aiMode: "account", apiKey: "", model: "claude-opus-5-5", effort: "high", engine: "whisper", whisperModel: "turbo", lang: "ko", exportDir: "", autoProxy: true, autoTranscribe: true,
 };
 
 type S = {
@@ -25,6 +25,7 @@ type S = {
   info: AppInfo | null;
   models: ModelInfo[];
   qwen: QwenStatus | null;
+  cc: CcStatus | null;
   qwenSetup: { pct: number; state: string; message: string } | null;
   downloads: Record<string, { pct: number; state: string; message: string }>;
   exportJob: ExportJob | null;
@@ -37,7 +38,7 @@ type S = {
 
 export const st: S = {
   route: "home", projects: [], project: null, draftId: null, sourceId: null, folder: "", playhead: 0, selClip: null,
-  settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, qwenSetup: null, downloads: {}, exportJob: null, toast: "",
+  settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, qwenSetup: null, downloads: {}, exportJob: null, toast: "",
   agentBusy: false, agentStatus: "", rightTab: "inspect", leftTab: "media",
 };
 
@@ -292,6 +293,10 @@ export function waitJob(id: string, kind: string): Promise<JobEvent> {
 
 export async function refreshModels() {
   try { set({ models: await api.whisperModels() }); } catch { /* none */ }
+}
+export async function refreshCc() {
+  try { set({ cc: await api.ccStatus() }); } catch (e) { set({ cc: { found: false, path: "", version: "", logged_in: false, method: "", account: "", plan: "", error: String(e) } }); }
+  return st.cc!;
 }
 export async function refreshQwen(deep = false) {
   try { set({ qwen: await api.qwenStatus(deep) }); } catch { /* none */ }

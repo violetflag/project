@@ -26,7 +26,7 @@ export function AgentPanel() {
 
   const send = async (t = text) => {
     if (!t.trim() || s.agentBusy) return;
-    if (!s.settings.apiKey) { setErr("설정에서 Anthropic API 키를 먼저 넣어 주세요."); return; }
+    if (s.settings.aiMode === "api" && !s.settings.apiKey) { setErr("설정에서 Anthropic API 키를 먼저 넣어 주세요."); return; }
     setText(""); setErr("");
     try { await ask(t.trim()); } catch (e) { setErr(String((e as Error)?.message ?? e)); }
   };
@@ -67,7 +67,7 @@ export function AgentPanel() {
         )}
         {items.map((it) => <div class={`msg ${it.kind}`}>{it.text}</div>)}
         {s.agentBusy && <div class="msg status"><span class="spin" /> {s.agentStatus}</div>}
-        {err && <div class="msg err">{err}{!s.settings.apiKey && <> <a onClick={() => set({ route: "settings" })}>설정 열기</a></>}</div>}
+        {err && <div class="msg err">{err} <a onClick={() => set({ route: "settings" })}>설정 열기</a></div>}
       </div>
       <div class="composer">
         <textarea rows={3} placeholder="예: 인트로를 짧게 줄이고 자막 넣어 줘 (Enter 보내기, Shift+Enter 줄바꿈)" value={text}

@@ -1,7 +1,7 @@
 // The editing agent: a tool-use loop against the Claude Messages API (called from Rust).
 // The transcript is append-only (preserved thinking): `system` and `tools` never change, the
 // project state goes into each user turn, and every response's content is kept as returned.
-import { api } from "./api";
+import { api, onEvent } from "./api";
 import {
   clipDur, cutSource, deleteClip, draftDuration, draftWords, fmtTC, insertClips, is360, isFiller, moveClip,
   newClip, newDraft, r3, removeFillers, removeRange, removeSilences, splitAt, starts, transcriptText, uid, updateClip,
@@ -342,7 +342,10 @@ async function run(name: string, inp: any): Promise<Out> {
 // ---------------------------------------------------------------- loop
 
 let stopFlag = false;
-export const stopAgent = () => { stopFlag = true; };
+export const stopAgent = () => {
+  stopFlag = true;
+  if (ccRunning) api.ccStop().catch(() => {});
+};
 
 function stateNote(): string {
   const d = st.project?.drafts.find((x) => x.id === st.draftId);
@@ -356,6 +359,11 @@ function pushMsg(m: ChatMsg) {
 export async function ask(text: string) {
   if (!st.project || st.agentBusy) return;
   const s = st.settings;
+  const mode = s.aiMode ?? "account";
+  // A conversation stays on one connection; switching starts a new one.
+  if (st.project.chat.length && (st.project.chatMode ?? "api") !== mode) clearChat();
+  mutate((p) => ({ ...p, chatMode: mode }));
+  if (mode === "account") return askAccount(text);
   if (!s.apiKey) throw new Error("설정에서 Anthropic API 키를 먼저 넣어 주세요.");
   stopFlag = false;
   set({ agentBusy: true, agentStatus: "생각하는 중…" });
@@ -415,6 +423,103 @@ export const TOOL_LABEL: Record<string, string> = {
 };
 
 export function clearChat() {
-  mutate((p) => ({ ...p, chat: [] }));
+  mutate((p) => ({ ...p, chat: [], ccSession: undefined }));
+}
+
+// ---------------------------------------------------------------- "Claude 계정" mode (Claude Code)
+
+const PREFIX = "mcp__reelcut__";
+const SYSTEM_CC = SYSTEM + `\n\n도구 이름에는 ${PREFIX} 접두어가 붙어 있습니다 (예: ${PREFIX}get_project_overview). 이 앱의 도구 말고 다른 도구는 없습니다.`;
+
+/** A tool's output in MCP content shape. */
+function mcpContent(out: Out): any[] {
+  if (typeof out === "string") return [{ type: "text", text: out }];
+  return out.map((b: any) => (b.type === "image" ? { type: "image", data: b.source.data, mimeType: b.source.media_type } : { type: "text", text: String(b.text ?? "") }));
+}
+
+/** Keeps what the chat shows (text, tool calls, tool errors); drops thinking and images. */
+function shown(blocks: any[]): ChatBlock[] {
+  const r: ChatBlock[] = [];
+  for (const b of blocks ?? []) {
+    if (b.type === "text" && String(b.text).trim()) r.push({ type: "text", text: b.text });
+    else if (b.type === "tool_use") r.push({ type: "tool_use", id: b.id, name: String(b.name).replace(PREFIX, ""), input: {} });
+    else if (b.type === "tool_result" && b.is_error) {
+      const t = typeof b.content === "string" ? b.content : (b.content ?? []).filter((x: any) => x.type === "text").map((x: any) => x.text).join(" ");
+      r.push({ type: "tool_result", tool_use_id: b.tool_use_id, content: t.slice(0, 500), is_error: true });
+    }
+  }
+  return r;
+}
+
+let ccRunning = false;
+
+function loginHint(msg: string) {
+  return /not logged in|log ?in|logged out|authenticat|credential|\b401\b|oauth/i.test(msg)
+    ? "Claude 계정에 로그인되어 있지 않습니다. 설정 > AI 편집에서 'Claude 계정 연결'을 눌러 주세요."
+    : "";
+}
+
+async function askAccount(text: string) {
+  const s = st.settings;
+  const cc = st.cc ?? (await api.ccStatus().catch(() => null));
+  if (cc && !cc.found) throw new Error("Claude Code가 이 PC에 없습니다. 설정 > AI 편집에서 'Claude Code 설치'를 눌러 주세요.");
+  if (cc && !cc.logged_in) throw new Error("Claude 계정에 로그인되어 있지 않습니다. 설정 > AI 편집에서 'Claude 계정 연결'을 눌러 주세요.");
+  stopFlag = false;
+  ccRunning = true;
+  set({ agentBusy: true, agentStatus: "생각하는 중…" });
+  pushMsg({ role: "user", content: [{ type: "text", text: stateNote() }, { type: "text", text }] });
+  const offs: (() => void)[] = [];
+  let resultErr = "";
+  let gotResult = false;
+  try {
+    let resolve!: (v: { ok: boolean; err: string }) => void;
+    const done = new Promise<{ ok: boolean; err: string }>((r) => { resolve = r; });
+    offs.push(await onEvent("cc", (e) => {
+        if (e.kind === "exit") { resolve({ ok: e.ok, err: e.err }); return; }
+        const v = e.data ?? {};
+        if (v.session_id && st.project && st.project.ccSession !== v.session_id) mutate((p) => ({ ...p, ccSession: v.session_id }));
+        if (v.parent_tool_use_id) return;
+        if (v.type === "assistant") {
+          const c = shown(v.message?.content);
+          if (c.length) pushMsg({ role: "assistant", content: c });
+          if (c.some((b) => b.type === "text")) set({ agentStatus: "생각하는 중…" });
+        } else if (v.type === "user") {
+          const c = shown(Array.isArray(v.message?.content) ? v.message.content : []);
+          if (c.length) pushMsg({ role: "user", content: c });
+        } else if (v.type === "result") {
+          gotResult = true;
+          if (v.is_error || (v.subtype && v.subtype !== "success")) resultErr = String(v.result || (v.errors ?? []).join(" ") || v.subtype || "실패");
+        }
+    }));
+    offs.push(await onEvent("cc-tool", async (e) => {
+        const name = String(e.name).replace(PREFIX, "");
+        set({ agentStatus: TOOL_LABEL[name] ?? name });
+        let result: any;
+        if (stopFlag) result = { content: [{ type: "text", text: "사용자가 멈췄습니다." }], isError: true };
+        else {
+          try { result = { content: mcpContent(await run(name, e.input ?? {})), isError: false }; }
+          catch (err) { result = { content: [{ type: "text", text: String((err as Error)?.message ?? err) }], isError: true }; }
+        }
+        await api.ccAnswer(e.id, result);
+        if (ccRunning) set({ agentStatus: "생각하는 중…" });
+    }));
+    await api.ccRun({
+      model: s.model, effort: s.effort, system: SYSTEM_CC, prompt: `${stateNote()}\n\n${text}`,
+      session: st.project!.ccSession ?? null, tools: TOOLS,
+    });
+    const end = await done;
+    if (stopFlag) return;
+    if (resultErr) throw new Error(loginHint(resultErr) || `Claude 오류: ${resultErr.slice(0, 300)}`);
+    if (!end.ok && !gotResult) {
+      // A conversation that can no longer be resumed: start fresh next time.
+      if (/No conversation found|session/i.test(end.err)) mutate((p) => ({ ...p, ccSession: undefined }));
+      throw new Error(loginHint(end.err) || `Claude Code가 멈췄습니다: ${end.err.slice(-300) || "알 수 없는 오류"}`);
+    }
+  } finally {
+    ccRunning = false;
+    offs.forEach((f) => f());
+    set({ agentBusy: false, agentStatus: "" });
+    await saveNow();
+  }
 }
 

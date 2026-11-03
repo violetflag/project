@@ -1,4 +1,5 @@
 mod args;
+mod cc;
 mod ff;
 mod hw;
 mod media;
@@ -26,6 +27,7 @@ struct App {
     cache_dir: PathBuf,
     hw: Mutex<Option<Hw>>,
     jobs: Jobs,
+    cc: Arc<cc::Bridge>,
 }
 
 type St<'a> = State<'a, Arc<App>>;
@@ -487,6 +489,53 @@ async fn claude(key: String, body: Value, betas: Vec<String>) -> Result<Value, S
     .await
 }
 
+/// Claude Code (signed in with the Claude plan): is it installed, who is signed in.
+#[tauri::command]
+async fn cc_status() -> Result<cc::Status, String> {
+    blocking(|| Ok(cc::status())).await
+}
+
+#[tauri::command]
+fn cc_login() -> Result<(), String> {
+    cc::login()
+}
+
+#[tauri::command]
+fn cc_install() -> Result<(), String> {
+    cc::install()
+}
+
+/// Starts one agent turn through Claude Code. Output lines arrive as "cc" events
+/// ({kind:"line", data} … {kind:"exit", ok, err}); tool calls arrive as "cc-tool" events.
+#[tauri::command]
+fn cc_run(handle: tauri::AppHandle, app: St<'_>, model: String, effort: String, system: String, prompt: String, session: Option<String>, tools: Value) -> Result<(), String> {
+    let st = app.inner().clone();
+    st.cc.set_tools(&tools);
+    let workdir = st.data_dir.join("agent");
+    std::thread::spawn(move || {
+        let h2 = handle.clone();
+        let r = cc::run(&st.cc, cc::Turn { model, effort, system, prompt, session, workdir }, |v| {
+            let _ = h2.emit("cc", json!({ "kind": "line", "data": v }));
+        });
+        let (ok, err) = match r {
+            Ok(x) => x,
+            Err(e) => (false, e),
+        };
+        let _ = handle.emit("cc", json!({ "kind": "exit", "ok": ok, "err": err }));
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn cc_answer(app: St<'_>, id: String, result: Value) -> bool {
+    app.cc.answer(&id, result)
+}
+
+#[tauri::command]
+fn cc_stop(app: St<'_>) -> bool {
+    app.cc.stop()
+}
+
 /// Where projects, settings and speech models live: REELCUT_DATA, else the folder named in
 /// `<app data>/data-dir.txt` (set from 설정), else the app data folder itself.
 fn resolve_data_dir(home: &Path) -> PathBuf {
@@ -528,7 +577,12 @@ pub fn run() {
             let cache_dir = app.path().app_cache_dir().unwrap_or_else(|_| std::env::temp_dir().join("reelcut-cache"));
             let _ = std::fs::create_dir_all(&data_dir);
             let _ = std::fs::create_dir_all(&cache_dir);
-            let st = Arc::new(App { bins: ff::locate(res.as_deref()), data_dir, cache_dir, hw: Mutex::new(None), jobs: Jobs::default() });
+            let bridge = cc::Bridge::start().expect("local agent bridge");
+            let h = app.handle().clone();
+            bridge.set_sink(Arc::new(move |id, name, input| {
+                let _ = h.emit("cc-tool", json!({ "id": id, "name": name, "input": input }));
+            }));
+            let st = Arc::new(App { bins: ff::locate(res.as_deref()), data_dir, cache_dir, hw: Mutex::new(None), jobs: Jobs::default(), cc: bridge });
             // Detect encoders in the background so the first proxy does not wait for it.
             let st2 = st.clone();
             std::thread::spawn(move || {
@@ -563,7 +617,13 @@ pub fn run() {
             reveal,
             path_exists,
             initial_files,
-            claude
+            claude,
+            cc_status,
+            cc_login,
+            cc_install,
+            cc_run,
+            cc_answer,
+            cc_stop
         ])
         .run(tauri::generate_context!())
         .expect("error while running reelcut");

@@ -1,6 +1,6 @@
 import { useEffect } from "preact/hooks";
 import { api, onFileDrop, windowCmd } from "../api";
-import { createProject, importPaths, initJobs, loadProjects, loadSettings, refreshModels, refreshQwen, saveNow, set, st, useStore } from "../store";
+import { createProject, importPaths, initJobs, loadProjects, loadSettings, refreshModels, refreshCc, refreshQwen, saveNow, set, st, useStore } from "../store";
 import { Home } from "./Home";
 import { ProjectView } from "./Project";
 import { SettingsView } from "./Settings";
@@ -14,6 +14,7 @@ async function boot() {
   await loadProjects();
   refreshModels();
   refreshQwen(false);
+  refreshCc();
   api.appInfo().then((info) => set({ info })).catch(() => {});
   onFileDrop(async (paths) => {
     if (!st.project) await createProject(paths[0].split(/[\\/]/).pop()!.replace(/\.[^.]+$/, ""));

@@ -93,9 +93,15 @@ export type Project = {
   drafts: Draft[];
   /** Agent conversation (API message format). */
   chat: ChatMsg[];
+  /** Claude Code conversation id ("Claude 계정" mode), resumed on the next message. */
+  ccSession?: string;
+  /** Which connection the current conversation uses. */
+  chatMode?: "account" | "api";
 };
 
 export type Settings = {
+  /** account = Claude plan through Claude Code (default), api = API key, billed per token */
+  aiMode: "account" | "api";
   apiKey: string;
   model: string;
   effort: "low" | "medium" | "high" | "xhigh" | "max";

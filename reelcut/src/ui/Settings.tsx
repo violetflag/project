@@ -1,13 +1,16 @@
 import { useEffect, useState } from "preact/hooks";
 import { api, pickFolder } from "../api";
 import { EFFORTS, MODELS } from "../agent";
-import { refreshModels, refreshQwen, saveNow, saveSettings, set, st, toast, useStore } from "../store";
+import { refreshCc, refreshModels, refreshQwen, saveNow, saveSettings, set, st, toast, useStore } from "../store";
 
 export function SettingsView() {
   const s = useStore();
   const cfg = s.settings;
   const [show, setShow] = useState(false);
   const [testing, setTesting] = useState("");
+  const [ccMsg, setCcMsg] = useState("");
+  const cc = s.cc;
+  useEffect(() => { if ((cfg.aiMode ?? "account") === "account") refreshCc(); }, [cfg.aiMode]);
   useEffect(() => { if (cfg.engine === "qwen") refreshQwen(true); }, [cfg.engine]);
   const q = s.qwen;
   const qs = s.qwenSetup;
@@ -30,15 +33,42 @@ export function SettingsView() {
 
       <section>
         <h2>AI 편집 (Claude)</h2>
-        <label>Anthropic API 키
-          <div class="row">
-            <input type={show ? "text" : "password"} value={cfg.apiKey} placeholder="sk-ant-…" onInput={(e) => saveSettings({ apiKey: (e.target as HTMLInputElement).value.trim() })} style="flex:1" />
-            <button onClick={() => setShow(!show)}>{show ? "숨기기" : "보기"}</button>
-            <button onClick={testKey} disabled={!cfg.apiKey}>연결 확인</button>
-          </div>
+        <label>연결 방식
+          <select value={cfg.aiMode ?? "account"} onChange={(e) => saveSettings({ aiMode: (e.target as HTMLSelectElement).value as any })}>
+            <option value="account">Claude 계정 (구독 사용량 안에서, 추가 비용 없음)</option>
+            <option value="api">API 키 (쓴 만큼 따로 과금)</option>
+          </select>
         </label>
-        {testing && <p class="muted">{testing}</p>}
-        <p class="muted">키는 이 PC의 앱 데이터 폴더에만 저장됩니다.</p>
+        {(cfg.aiMode ?? "account") === "account" ? (
+          <div class="qwen-box cc-box">
+            <p class="muted">이 PC의 Claude Code로 Claude 계정에 로그인해서 씁니다. Pro·Max 구독의 사용 한도 안에서 돌아가고, API 요금은 따로 나가지 않습니다.</p>
+            <ul class="facts">
+              <li>Claude Code: {cc == null ? "확인 중…" : cc.found ? <span class="ok">설치됨{cc.version ? ` (${cc.version})` : ""}</span> : <span class="warn">없음</span>}</li>
+              {cc?.found && <li>계정: {cc.logged_in ? <span class="ok">{cc.account || "로그인됨"}{cc.plan ? ` · ${cc.plan}` : ""}</span> : <span class="warn">로그인 안 됨</span>}
+                {cc.logged_in && cc.method && !/claude/i.test(cc.method) && <span class="warn"> (구독이 아닌 {cc.method} 방식으로 로그인되어 있어 요금이 따로 나갈 수 있습니다)</span>}</li>}
+              {cc?.error && <li class="warn">{cc.error.slice(0, 200)}</li>}
+            </ul>
+            <div class="row">
+              {cc && !cc.found && <button class="primary" onClick={async () => { try { await api.ccInstall(); setCcMsg("설치 창이 열렸습니다. 설치가 끝나면 '다시 확인'을 누르세요."); } catch (e) { setCcMsg("실패: " + e); } }}>Claude Code 설치</button>}
+              {cc?.found && !cc.logged_in && <button class="primary" onClick={async () => { try { await api.ccLogin(); setCcMsg("로그인 창과 브라우저가 열립니다. Claude 계정으로 승인한 뒤 '다시 확인'을 누르세요."); } catch (e) { setCcMsg("실패: " + e); } }}>Claude 계정 연결</button>}
+              {cc?.found && cc.logged_in && <button onClick={async () => { try { await api.ccLogin(); setCcMsg("다른 계정으로 로그인하는 창이 열렸습니다."); } catch (e) { setCcMsg("실패: " + e); } }}>다른 계정으로 연결</button>}
+              <button onClick={async () => { setCcMsg("확인 중…"); const r = await refreshCc(); setCcMsg(r.found && r.logged_in ? "연결되어 있습니다." : ""); }}>다시 확인</button>
+            </div>
+            {ccMsg && <p class="muted">{ccMsg}</p>}
+          </div>
+        ) : (
+          <>
+            <label>Anthropic API 키
+              <div class="row">
+                <input type={show ? "text" : "password"} value={cfg.apiKey} placeholder="sk-ant-…" onInput={(e) => saveSettings({ apiKey: (e.target as HTMLInputElement).value.trim() })} style="flex:1" />
+                <button onClick={() => setShow(!show)}>{show ? "숨기기" : "보기"}</button>
+                <button onClick={testKey} disabled={!cfg.apiKey}>연결 확인</button>
+              </div>
+            </label>
+            {testing && <p class="muted">{testing}</p>}
+            <p class="muted">키는 이 PC의 앱 데이터 폴더에만 저장됩니다. API는 쓴 만큼 요금이 나갑니다.</p>
+          </>
+        )}
         <div class="row">
           <label>모델
             <select value={cfg.model} onChange={(e) => saveSettings({ model: (e.target as HTMLSelectElement).value })}>
@@ -54,7 +84,7 @@ export function SettingsView() {
       </section>
 
       <section>
-        <h2>받아쓰기 (whisper)</h2>
+        <h2>받아쓰기</h2>
         <label>엔진
           <select value={cfg.engine} onChange={(e) => saveSettings({ engine: (e.target as HTMLSelectElement).value })}>
             <option value="whisper">Whisper (whisper.cpp, 가볍고 빠름)</option>

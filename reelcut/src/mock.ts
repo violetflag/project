@@ -8,6 +8,52 @@ export const listen = async (cb: (e: JobEvent) => void) => {
   return () => { const i = subs.indexOf(cb); if (i >= 0) subs.splice(i, 1); };
 };
 
+const evSubs: Record<string, ((p: any) => void)[]> = {};
+const fire = (name: string, p: any) => setTimeout(() => (evSubs[name] ?? []).slice().forEach((f) => f(p)), 10);
+export const listenEvent = async (name: string, cb: (p: any) => void) => {
+  (evSubs[name] ??= []).push(cb);
+  return () => { const a = evSubs[name]; const i = a.indexOf(cb); if (i >= 0) a.splice(i, 1); };
+};
+
+// "Claude 계정" mode: replays window.__mockClaude (same script shape as the API mock) as Claude Code
+// stream-json lines, and sends tool calls through the "cc-tool" event like the real MCP bridge.
+const ccWait = new Map<string, (v: any) => void>();
+let ccStopped = false;
+async function mockCcRun(a: any) {
+  ccStopped = false;
+  const sid = a.session || "mock-session-1";
+  (window as any).__ccRuns = [...((window as any).__ccRuns ?? []), { ...a, tools: undefined, toolNames: (a.tools ?? []).map((t: any) => t.name) }];
+  fire("cc", { kind: "line", data: { type: "system", subtype: "init", session_id: sid } });
+  const messages: any[] = [{ role: "user", content: a.prompt }];
+  let n = 0;
+  for (let turn = 0; turn < 20; turn++) {
+    await new Promise((r) => setTimeout(r, 20));
+    if (ccStopped) { fire("cc", { kind: "exit", ok: false, err: "" }); return; }
+    const h = (window as any).__mockClaude;
+    const res = h ? h({ model: a.model, system: a.system, messages }) : { content: [{ type: "text", text: "(모의 응답) Claude 계정으로 연결되었습니다." }] };
+    const content = (res.content ?? []).map((b: any) => (b.type === "tool_use" ? { ...b, name: "mcp__reelcut__" + b.name } : b));
+    fire("cc", { kind: "line", data: { type: "assistant", message: { role: "assistant", content }, session_id: sid, parent_tool_use_id: null } });
+    messages.push({ role: "assistant", content: res.content });
+    const uses = content.filter((b: any) => b.type === "tool_use");
+    if (!uses.length) {
+      await new Promise((r) => setTimeout(r, 20));
+      fire("cc", { kind: "line", data: { type: "result", subtype: "success", is_error: false, result: "", session_id: sid } });
+      await new Promise((r) => setTimeout(r, 20));
+      fire("cc", { kind: "exit", ok: true, err: "" });
+      return;
+    }
+    const results: any[] = [];
+    for (const u of uses) {
+      const id = "m" + ++n;
+      const r: any = await new Promise((res2) => { ccWait.set(id, res2); fire("cc-tool", { id, name: u.name, input: u.input }); });
+      const text = (r.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
+      results.push({ type: "tool_result", tool_use_id: u.id, content: text, is_error: r.isError });
+    }
+    fire("cc", { kind: "line", data: { type: "user", message: { role: "user", content: results }, session_id: sid, parent_tool_use_id: null } });
+    messages.push({ role: "user", content: results });
+  }
+}
+
 const ls = {
   get: (k: string) => { try { return localStorage.getItem("rc:" + k); } catch { return null; } },
   set: (k: string, v: string) => { try { localStorage.setItem("rc:" + k, v); } catch { /* */ } },
@@ -61,6 +107,11 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
     case "reveal": return;
     case "path_exists": return true;
     case "initial_files": return [];
+    case "cc_status": return (window as any).__mockCcStatus ?? { found: true, path: "C:/Users/me/.local/bin/claude.exe", version: "2.1.0", logged_in: true, method: "claude.ai", account: "me@example.com", plan: "max", error: "" };
+    case "cc_login": case "cc_install": (window as any).__ccOpened = cmd; return;
+    case "cc_run": mockCcRun(a); return;
+    case "cc_answer": { const f = ccWait.get(a.id); ccWait.delete(a.id); f?.(a.result); return !!f; }
+    case "cc_stop": ccStopped = true; ccWait.forEach((f) => f({ content: [{ type: "text", text: "멈춤" }], isError: true })); ccWait.clear(); return true;
     case "claude": {
       const h = (window as any).__mockClaude;
       if (h) return h(a.body);

@@ -8,6 +8,7 @@ type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 let invokeImpl: Invoke;
 let convert: (p: string) => string = (p) => p;
 let listenImpl: (cb: (e: JobEvent) => void) => Promise<() => void>;
+let listenAny: (name: string, cb: (p: any) => void) => Promise<() => void>;
 
 if (inTauri) {
   const core = await import("@tauri-apps/api/core");
@@ -15,22 +16,28 @@ if (inTauri) {
   invokeImpl = core.invoke as Invoke;
   convert = (p) => core.convertFileSrc(p);
   listenImpl = (cb) => ev.listen<JobEvent>("job", (e) => cb(e.payload));
+  listenAny = (name, cb) => ev.listen<any>(name, (e) => cb(e.payload));
 } else {
   const m = await import("./mock");
   invokeImpl = m.invoke as Invoke;
   listenImpl = m.listen;
+  listenAny = m.listenEvent;
 }
 
 export const invoke = invokeImpl;
 /** URL the webview can load for a local file. */
 export const fileSrc = (p: string) => (p.startsWith("/mock/") || p.startsWith("data:") || p.startsWith("blob:") ? p : convert(p));
 export const onJob = (cb: (e: JobEvent) => void) => listenImpl(cb);
+export const onEvent = (name: string, cb: (p: any) => void) => listenAny(name, cb);
 
 export type AppInfo = {
   ffmpeg: string; ffmpegOk: boolean; ffmpegVersion: string; whisper: string; whisperOk: boolean;
   dataDir: string; cacheDir: string; hw: Hw; platform: string; videosDir: string;
 };
 export type QwenStatus = { env: boolean; package: boolean; models: boolean; ready: boolean; cuda: boolean; gpu: string; vram_gb: number; torch: string; error: string };
+/** Claude Code on this PC (the "Claude 계정" connection). */
+export type CcStatus = { found: boolean; path: string; version: string; logged_in: boolean; method: string; account: string; plan: string; error: string };
+export type CcRun = { model: string; effort: string; system: string; prompt: string; session: string | null; tools: unknown };
 export type ModelInfo = { id: string; label: string; file: string; size_mb: number; downloaded: boolean };
 
 export const api = {
@@ -60,6 +67,12 @@ export const api = {
   reveal: (path: string) => invoke<void>("reveal", { path }),
   pathExists: (path: string) => invoke<boolean>("path_exists", { path }),
   initialFiles: () => invoke<string[]>("initial_files"),
+  ccStatus: () => invoke<CcStatus>("cc_status"),
+  ccLogin: () => invoke<void>("cc_login"),
+  ccInstall: () => invoke<void>("cc_install"),
+  ccRun: (r: CcRun) => invoke<void>("cc_run", r),
+  ccAnswer: (id: string, result: unknown) => invoke<boolean>("cc_answer", { id, result }),
+  ccStop: () => invoke<boolean>("cc_stop"),
   claude: (key: string, body: unknown, betas: string[] = []) => invoke<any>("claude", { key, body, betas }),
 };
 
