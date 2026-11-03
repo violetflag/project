@@ -19,7 +19,7 @@ function Badges({ a }: { a: Asset }) {
       {is360(a) && <span class="b b360">360</span>}
       {a.info.ext && ["osv", "lrf", "lrv"].includes(a.info.ext) && <span class="b">{a.info.ext.toUpperCase()}</span>}
       {a.info.lrf && <span class="b" title={`미리보기용 짝 파일: ${a.info.lrf}`}>LRF 짝</span>}
-      {a.proxyState === "running" && <span class="b busy">미리보기 {Math.round(a.proxyPct ?? 0)}%</span>}
+      {a.proxyState === "running" && <span class="b busy">{a.proxyStage ? "흔들림 분석" : "미리보기"} {Math.round(a.proxyPct ?? 0)}%</span>}
       {a.proxyState === "error" && <span class="b err" title={a.proxyError}>미리보기 실패</span>}
       {a.tState === "running" && <span class="b busy">받아쓰기 {Math.round(a.tPct ?? 0)}%</span>}
       {a.words && <span class="b ok">대본</span>}

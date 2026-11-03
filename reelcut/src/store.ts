@@ -393,7 +393,7 @@ export async function initJobs() {
     lastPaint = Date.now();
     switch (e.kind) {
       case "proxy":
-        if (e.state === "running") patchAsset(e.id, { proxyState: "running", proxyPct: e.pct });
+        if (e.state === "running") patchAsset(e.id, { proxyState: "running", proxyPct: e.pct, proxyStage: e.message });
         else if (e.state === "done") onProxyDone(e.id, e.result);
         else patchAsset(e.id, { proxyState: e.state, proxyError: e.message });
         break;

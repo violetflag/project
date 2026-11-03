@@ -92,6 +92,7 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
     case "expand_paths": return a.paths.map((p: string) => [p, ""]);
     case "inspect": return info(a.path);
     case "calibrate_360": return { on: true, fov: 192.4, yaw: 0.6, pitch: -0.3, roll: 0.2, gain_a: [0.97, 1.2, -0.8], gain_b: [1.031, -1.2, 0.8], calibrated: true, before: 6.1, after: 2.3 };
+    case "motion_info": return { source: "gyro", note: "축 맞춤 오차 4% · 시간차 +0ms · 롤링셔터 12.0ms", readout: 0.012, product: "Osmo 360" };
     case "make_proxy": emit({ id: a.id, kind: "proxy", pct: 100, state: "done", message: "", result: "/mock/clip.mp4" }); return null;
     case "filmstrip": case "poster": return "/mock/poster.jpg";
     case "waveform": return Array.from({ length: Math.round(20 * 50) }, (_, i) => (Math.floor(i / 50) % 5 === 3 ? 10 : 150 + ((i * 37) % 80)));

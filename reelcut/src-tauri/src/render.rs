@@ -360,7 +360,7 @@ fn wrap180(d: f64) -> f64 {
 
 /// The view at `t` (keys sorted by time): linear between keys, the nearest key outside them.
 /// Yaw takes the shorter way round.
-fn view_at(keys: &[ViewKey], t: f64) -> View {
+pub(crate) fn view_at(keys: &[ViewKey], t: f64) -> View {
     let (first, last) = (&keys[0], &keys[keys.len() - 1]);
     if t <= first.t {
         return first.view.clone();
@@ -975,7 +975,7 @@ mod tests {
 
     #[test]
     fn osv_is_stitched_by_default() {
-        let lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: None });
+        let lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: None, stab: None });
         let mut s = Seg { lens: lens.clone(), view: Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0 }), ..seg("c.osv", 0.0, 4.0) };
         s.speed = 2.0;
         let g = graph(&Plan { segs: vec![s], width: 1280, height: 720, ..plan(vec![]) }).graph;
@@ -1003,7 +1003,7 @@ mod tests {
     }
 
     fn osv(start: f64, dur: f64) -> Seg {
-        Seg { lens: Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off() }), view: Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0 }), ..seg("c.osv", start, dur) }
+        Seg { lens: Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off(), stab: None }), view: Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0 }), ..seg("c.osv", start, dur) }
     }
 
     fn key(t: f64, yaw: f64, hfov: f64) -> ViewKey {
@@ -1025,7 +1025,7 @@ mod tests {
     fn speed_and_360() {
         let mut s = seg("c.osv", 0.0, 4.0);
         s.speed = 2.0;
-        s.lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off() });
+        s.lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off(), stab: None });
         s.view = Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0 });
         let p = Plan { segs: vec![s], width: 1280, height: 720, ..plan(vec![]) };
         let b = build(&p, &Hw::default(), "g.txt", true, false, "o.part.mp4").unwrap();
@@ -1218,7 +1218,7 @@ mod tests {
 
     #[test]
     fn overlay_360_gets_its_own_view() {
-        let o = Overlay { path: "c.osv".into(), dur: 4.0, at: 0.0, lens: Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off() }), view_keys: vec![key(0.0, 0.0, 90.0), key(1.0, 30.0, 90.0)], ..Default::default() };
+        let o = Overlay { path: "c.osv".into(), dur: 4.0, at: 0.0, lens: Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off(), stab: None }), view_keys: vec![key(0.0, 0.0, 90.0), key(1.0, 30.0, 90.0)], ..Default::default() };
         let g = graph(&Plan { overlays: vec![o], ..plan(vec![seg("a.mp4", 0.0, 6.0)]) }).graph;
         assert!(g.contains(";[1:v:0][1:v:1]hstack[lso0];[lso0]setpts=(PTS-STARTPTS)/1.00000,sendcmd=c='0.067 v360@o0 yaw 2.000;"), "{g}");
         assert!(g.contains("reset_rot=1,setsar=1,format=yuva420p,fps="), "{g}");
@@ -1275,7 +1275,7 @@ mod tests {
         let (ok, _, err) = ff::output(&ffmpeg, &v(&["-y", "-v", "error", "-ss", "2", "-i", &walk, "-frames:v", "1", "-vf", "drawbox=c=red:t=24", &still.to_string_lossy()])).unwrap();
         assert!(ok, "{err}");
 
-        let lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off() });
+        let lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off(), stab: None });
         let clip = |s: f64, d: f64| Seg { path: walk.clone(), kind: "video".into(), start: s, dur: d, has_audio: true, fit: "fit".into(), ..Default::default() };
         let vk = |t: f64, yaw: f64, pitch: f64, hfov: f64| ViewKey { t, view: View { yaw, pitch, roll: 0.0, hfov } };
         let segs = vec![
