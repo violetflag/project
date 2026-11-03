@@ -1,6 +1,7 @@
 mod args;
 mod cc;
 mod ff;
+mod framing;
 mod hw;
 mod live;
 mod media;
@@ -236,6 +237,59 @@ fn analyze_motion(handle: tauri::AppHandle, app: St<'_>, id: String, info: Media
             Err(e) => emit(&handle, &id, "motion", 0.0, if e == CANCELLED { "cancelled" } else { "error" }, &e, Value::Null),
         }
     });
+}
+
+#[derive(serde::Deserialize)]
+struct EqReq {
+    path: String,
+    #[serde(default)]
+    lens: Option<Lens>,
+    times: Vec<f64>,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    grid: Option<bool>,
+}
+
+/// Level 360 panoramas for placing views (the AI reads positions off them): for each time, a
+/// width × width/2 equirectangular JPEG (base64) in the export's stabilised orientation, with a
+/// grid every 120 px of a 960-wide scale (labelled), the horizon at 240 and lines at 120/360 of
+/// a 480-high scale.
+#[tauri::command]
+async fn eq_sheet(app: St<'_>, req: EqReq) -> Result<Vec<String>, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let info = media::inspect(&app.bins.ffprobe, &req.path)?;
+        let mut lens = req.lens.unwrap_or_default();
+        if lens.layout.is_empty() || lens.layout == "none" {
+            lens.layout = info.layout360.clone();
+        }
+        if lens.layout == "none" {
+            return Err("360 영상이 아닙니다".into());
+        }
+        if lens.fov <= 0.0 {
+            lens.fov = 190.0;
+        }
+        let w = req.width.unwrap_or(960).clamp(320, 2048) & !1;
+        let h = (w / 2) & !1;
+        let times: Vec<f64> = req.times.iter().copied().filter(|t| t.is_finite()).take(16).collect();
+        let vf = |t: f64| if req.grid.unwrap_or(true) { media::eq_grid(t) } else { "null".to_string() };
+        let tag = "eqsheet";
+        let gen = app.jobs.generation(tag);
+        let dir = app.dir("eqsheet").join(format!("{:x}", hash(&(&req.path, std::time::SystemTime::now()))));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let res = if motion::engine_lens(&info, &lens) {
+            let m = motion::motion_for(&app.dir("motion"), &app.bins.ffmpeg, &app.bins.ffprobe, &app.jobs, tag, gen, &info, &lens, &file_key(&req.path), |_| {})?;
+            let sphere = |_t: f64| (pano::I3, None);
+            motion::stills(&app.bins.ffmpeg, &app.jobs, tag, gen, &info, &lens, m.as_ref(), &times, w, h, &sphere, &vf, &dir)
+        } else {
+            media::equirect_stills(&app.bins.ffmpeg, &info, &lens, &times, w, &vf, &dir)
+        };
+        let out = res.and_then(|files| files.iter().map(|f| std::fs::read(f).map(|b| media::jpeg_b64(&b)).map_err(|e| e.to_string())).collect());
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    })
+    .await
 }
 
 /// The address of a live preview stream or still frame (see `live`) for a file the WebView cannot play.
@@ -509,7 +563,9 @@ fn engine_prepass(app: &App, tag: &str, gen: u64, plan: &render::Plan, work: &Pa
         let mut keys = j.keys.clone();
         keys.sort_by(|a, b| a.t.total_cmp(&b.t));
         let still = j.view.clone().unwrap_or(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0 });
-        let view_at = move |t: f64| if keys.len() >= 2 { render::view_at(&keys, t) } else if keys.len() == 1 { keys[0].view.clone() } else { still.clone() };
+        // Prepared once: the engine asks for the view on every frame (clips may carry 20 000 keys).
+        let curve = framing::Curve::new(&keys);
+        let view_at = move |t: f64| if keys.len() >= 2 { curve.at(t) } else if keys.len() == 1 { framing::norm_view(&keys[0].view) } else { framing::norm_view(&still) };
         let out = work.join(format!("360-{n}.mkv"));
         let base = done + share * 0.2;
         motion::render_flat(&app.bins.ffmpeg, &app.jobs, tag, gen, &info, &j.lens, m.as_ref(), j.start, j.dur, j.speed, w, h, &view_at, &out, |f| on(base + f * share * 0.8))?;
@@ -702,7 +758,8 @@ pub fn run() {
             // Detect encoders in the background so the first export does not wait for it.
             let st2 = st.clone();
             std::thread::spawn(move || {
-                st2.hw();
+                let hw = st2.hw();
+                st2.live.set_qsv(hw.tested.iter().any(|(n, ok)| n.ends_with("_qsv") && *ok));
                 // 2.5.0 dropped preview copies (proxies): clear the ones older versions made.
                 for d in [st2.cache_dir.join("proxies"), st2.data_dir.join("proxies")] {
                     if d.is_dir() {
@@ -728,6 +785,7 @@ pub fn run() {
             inspect,
             analyze_motion,
             live_url,
+            eq_sheet,
             live_stop,
             calibrate_360,
             filmstrip,

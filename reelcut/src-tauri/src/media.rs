@@ -284,11 +284,12 @@ pub struct View {
     pub hfov: f64,
 }
 
-/// v360 to a flat w×h picture looking along `view`.
+/// v360 to a flat w×h picture looking along `view` (normalised first: v360 refuses a yaw of 195).
 pub fn v360_flat(lens: &Lens, view: &View, w: u32, h: u32) -> String {
-    let hf = view.hfov.clamp(20.0, 160.0);
+    let v = crate::framing::norm_view(view);
+    let hf = v.hfov;
     let vf = 2.0 * ((hf.to_radians() / 2.0).tan() * h as f64 / w as f64).atan().to_degrees();
-    format!("v360={}:output=flat:h_fov={hf:.3}:v_fov={vf:.3}:yaw={:.3}:pitch={:.3}:roll={:.3}:w={w}:h={h}:interp=lanczos", v360_in(lens), view.yaw, view.pitch, view.roll)
+    format!("v360={}:output=flat:h_fov={hf:.3}:v_fov={vf:.3}:yaw={:.3}:pitch={:.3}:roll={:.3}:w={w}:h={h}:interp=lanczos", v360_in(lens), v.yaw, v.pitch, v.roll)
 }
 
 /// A strip of `count` small frames side by side (for timeline clips).
@@ -371,6 +372,42 @@ pub fn frames(ffmpeg: &Path, req: &FrameReq) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// The grid drawn over a level panorama: lines every 1/8 of the width (120 px of a 960 scale,
+/// labelled 0–960), every 1/4 of the height (120 px of 480) with the horizon (240) in red, and
+/// the time.
+pub fn eq_grid(t: f64) -> String {
+    let font = if cfg!(windows) { "fontfile='C\\:/Windows/Fonts/arial.ttf':" } else { "" };
+    let mut f = vec!["drawgrid=w=iw/8:h=ih/4:t=1:c=yellow@0.7".to_string(), "drawbox=x=0:y=ih/2-1:w=iw:h=3:c=red@0.9:t=fill".to_string()];
+    for k in 0..=8 {
+        let x = if k == 8 { "w-tw-3".to_string() } else { format!("{k}*w/8+3") };
+        f.push(format!("drawtext={font}text='{}':x={x}:y=4:fontsize=h/26:fontcolor=yellow:box=1:boxcolor=black@0.55", k * 120));
+    }
+    for (k, label) in [(1, "120"), (2, "240"), (3, "360")] {
+        f.push(format!("drawtext={font}text='{label}':x=3:y={k}*h/4+3:fontsize=h/30:fontcolor=yellow:box=1:boxcolor=black@0.55"));
+    }
+    f.push(format!("drawtext={font}text='t={t:.1}s':x=w-tw-6:y=h-th-6:fontsize=h/22:fontcolor=white:box=1:boxcolor=black@0.6"));
+    f.join(",")
+}
+
+/// Level panoramas without the engine (an equirect file, or stitching turned off): ffmpeg's v360
+/// from the lenses as filmed. One JPEG per time.
+pub fn equirect_stills(ffmpeg: &Path, info: &MediaInfo, lens: &Lens, times: &[f64], w: u32, vf: &dyn Fn(f64) -> String, out_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let h = (w / 2) & !1;
+    let mut outs = Vec::new();
+    for (i, &t) in times.iter().enumerate() {
+        let out = out_dir.join(format!("eq-{i}.jpg"));
+        let conv = if lens.layout == "equirect" { format!("scale={w}:{h}") } else { format!("v360={}:output=equirect:w={w}:h={h}", v360_in(lens)) };
+        let g = format!("{};[s]{conv},{}[o]", lens_source(0, lens, None, "s"), vf(t));
+        let a = s(&["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-ss", &format!("{:.3}", t.max(0.0)), "-i", &info.path, "-filter_complex", &g, "-map", "[o]", "-frames:v", "1", "-q:v", "3", &out.to_string_lossy()]);
+        let (ok, _, err) = ff::output(ffmpeg, &a)?;
+        if !ok || !out.is_file() {
+            return Err(format!("{t:.1}초 장면을 만들지 못했습니다: {}", err.trim()));
+        }
+        outs.push(out);
+    }
+    Ok(outs)
+}
+
 /// One image with tiles every `every` seconds (cols × rows), with the time burned into each tile.
 pub fn contact_sheet(ffmpeg: &Path, path: &str, start: f64, every: f64, cols: u32, rows: u32, tile_w: u32) -> Result<String, String> {
     let n = cols * rows;
@@ -403,6 +440,15 @@ mod tests {
         let f = v360_flat(&Lens { layout: "dfisheye".into(), swap: false, fov: 190.0, stitch: None, stab: None }, &View { yaw: 30.0, pitch: -10.0, roll: 0.0, hfov: 90.0 }, 1920, 1080);
         assert!(f.starts_with("v360=input=dfisheye:ih_fov=190:iv_fov=190:output=flat:h_fov=90.000:v_fov=58.716"), "{f}");
         assert!(f.contains("yaw=30.000:pitch=-10.000"));
+    }
+
+    #[test]
+    fn views_out_of_range_are_normalised() {
+        let l = Lens { layout: "dfisheye".into(), swap: false, fov: 190.0, stitch: None, stab: None };
+        for (yaw, want) in [(195.0, "yaw=-165.000"), (-190.0, "yaw=170.000"), (540.0, "yaw=180.000")] {
+            let f = v360_flat(&l, &View { yaw, pitch: 120.0, roll: 365.0, hfov: 400.0 }, 1280, 720);
+            assert!(f.contains(want) && f.contains("pitch=89.000") && f.contains("roll=5.000") && f.contains("h_fov=160.000"), "{f}");
+        }
     }
 
     #[test]

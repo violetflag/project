@@ -15,6 +15,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// What the viewer asks for: a stream from `t` (seconds in the file) or one frame at `t`.
@@ -41,6 +42,9 @@ pub struct Live {
     /// The ffmpeg serving each slot (generation, process).
     slots: Mutex<HashMap<String, (u64, Child)>>,
     frames: Mutex<VecDeque<(String, Arc<Vec<u8>>)>>,
+    /// Intel Quick Sync works here: an .osv's two 4K HEVC tracks are decoded and shrunk on the GPU
+    /// (software decoding of a real Osmo 360 file barely keeps up with real time).
+    qsv: AtomicBool,
 }
 
 const KEEP_REQS: usize = 64;
@@ -50,7 +54,7 @@ impl Live {
     /// Starts the server on a free local port.
     pub fn start(ffmpeg: PathBuf) -> std::io::Result<Arc<Live>> {
         let l = TcpListener::bind("127.0.0.1:0")?;
-        let live = Arc::new(Live { port: l.local_addr()?.port(), ffmpeg, next: Mutex::new(1), reqs: Mutex::default(), slots: Mutex::default(), frames: Mutex::default() });
+        let live = Arc::new(Live { port: l.local_addr()?.port(), ffmpeg, next: Mutex::new(1), reqs: Mutex::default(), slots: Mutex::default(), frames: Mutex::default(), qsv: AtomicBool::new(false) });
         let me = live.clone();
         std::thread::spawn(move || {
             for c in l.incoming().flatten() {
@@ -59,6 +63,11 @@ impl Live {
             }
         });
         Ok(live)
+    }
+
+    /// Whether streams may decode with Quick Sync (set once the encoders have been tested).
+    pub fn set_qsv(&self, on: bool) {
+        self.qsv.store(on, Ordering::Relaxed);
     }
 
     /// Registers a request and returns the URL that answers it.
@@ -146,24 +155,18 @@ impl Live {
     }
 
     fn stream(&self, mut c: TcpStream, req: &Req) {
-        let rate = req.rate.unwrap_or(1.0).clamp(0.25, 16.0);
-        let mut a = s(&["-hide_banner", "-nostdin", "-loglevel", "error", "-ss", &format!("{:.3}", req.t.max(0.0))]);
-        // Real time after a short head start, so ffmpeg works only as fast as the picture plays.
-        a.extend(s(&["-readrate", &format!("{rate:.3}"), "-readrate_initial_burst", "2", "-i", &req.info.path]));
-        a.extend(picture(&req.info, req.lens.as_ref()));
-        if req.info.has_audio {
-            a.extend(s(&["-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"]));
-        }
-        let g = (req.info.fps.max(1.0) / 2.0).round().max(1.0).to_string();
-        a.extend(s(&["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "21", "-pix_fmt", "yuv420p", "-g", &g, "-bf", "0"]));
-        a.extend(s(&["-f", "mp4", "-frag_duration", "100000", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-"]));
-        let Some((gen, mut out)) = self.spawn(&req.slot, &a) else {
+        let gpu = self.qsv.load(Ordering::Relaxed) && qsv_fits(&req.info, req.lens.as_ref());
+        let started = self.start_stream(req, &self.stream_args(req, gpu)).or_else(|| {
+            // Quick Sync refused this file: decode it in software instead.
+            if gpu { self.start_stream(req, &self.stream_args(req, false)) } else { None }
+        });
+        let Some((gen, mut out, first)) = started else {
             let _ = c.write_all(b"HTTP/1.1 500 Internal Server Error\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             return;
         };
         let _ = c.set_nodelay(true);
         let head = "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
-        if c.write_all(head.as_bytes()).is_ok() {
+        if c.write_all(head.as_bytes()).is_ok() && c.write_all(&first).is_ok() {
             let mut buf = vec![0u8; 256 * 1024];
             loop {
                 match out.read(&mut buf) {
@@ -178,6 +181,41 @@ impl Live {
         }
         self.release(&req.slot, gen);
         let _ = c.shutdown(std::net::Shutdown::Write);
+    }
+
+    /// Starts ffmpeg and waits for its first bytes (none = it could not open the file).
+    fn start_stream(&self, req: &Req, a: &[String]) -> Option<(u64, std::process::ChildStdout, Vec<u8>)> {
+        let (gen, mut out) = self.spawn(&req.slot, a)?;
+        let mut first = vec![0u8; 64 * 1024];
+        match out.read(&mut first) {
+            Ok(n) if n > 0 => {
+                first.truncate(n);
+                Some((gen, out, first))
+            }
+            _ => {
+                self.release(&req.slot, gen);
+                None
+            }
+        }
+    }
+
+    fn stream_args(&self, req: &Req, gpu: bool) -> Vec<String> {
+        let rate = req.rate.unwrap_or(1.0).clamp(0.25, 16.0);
+        let mut a = s(&["-hide_banner", "-nostdin", "-loglevel", "error"]);
+        if gpu {
+            a.extend(s(&["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"]));
+        }
+        a.extend(s(&["-ss", &format!("{:.3}", req.t.max(0.0))]));
+        // Real time after a short head start, so ffmpeg works only as fast as the picture plays.
+        a.extend(s(&["-readrate", &format!("{rate:.3}"), "-readrate_initial_burst", "2", "-i", &req.info.path]));
+        a.extend(picture_with(&req.info, req.lens.as_ref(), gpu));
+        if req.info.has_audio {
+            a.extend(s(&["-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"]));
+        }
+        let g = (req.info.fps.max(1.0) / 2.0).round().max(1.0).to_string();
+        a.extend(s(&["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "21", "-pix_fmt", "yuv420p", "-g", &g, "-bf", "0"]));
+        a.extend(s(&["-f", "mp4", "-frag_duration", "100000", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-"]));
+        a
     }
 
     fn frame(&self, mut c: TcpStream, req: &Req) {
@@ -228,6 +266,18 @@ fn s(a: &[&str]) -> Vec<String> {
 /// the 2048×1024 stitched sphere (the viewer draws a flat view of it), anything else at most
 /// 1080 lines high.
 pub fn picture(info: &MediaInfo, lens: Option<&Lens>) -> Vec<String> {
+    picture_with(info, lens, false)
+}
+
+/// Quick Sync is used for a stitched two-track recording (the heavy case).
+fn qsv_fits(info: &MediaInfo, lens: Option<&Lens>) -> bool {
+    let l = Lens { layout: info.layout360.clone(), ..lens.cloned().unwrap_or(Lens { layout: String::new(), swap: false, fov: 190.0, stitch: None, stab: None }) };
+    info.layout360 == "dual" && crate::stitch::active(&l)
+}
+
+/// `picture`, with each lens decoded and shrunk on the GPU when `gpu` (the input opened with
+/// `-hwaccel qsv -hwaccel_output_format qsv`).
+pub fn picture_with(info: &MediaInfo, lens: Option<&Lens>, gpu: bool) -> Vec<String> {
     let layout = lens.map(|l| l.layout.as_str()).filter(|l| !l.is_empty() && *l != "none").unwrap_or(info.layout360.as_str()).to_string();
     let graph = if layout == "none" {
         "[0:v:0]scale=-2:'min(1080,ih)':flags=bilinear,format=yuv420p[pv]".to_string()
@@ -237,7 +287,11 @@ pub fn picture(info: &MediaInfo, lens: Option<&Lens>) -> Vec<String> {
             "[0:v:0]scale=2048:1024:flags=bilinear,format=yuv420p[pv]".to_string()
         } else if crate::stitch::active(&l) {
             // Both lenses at 1024 each, the seam blended; linear sampling is plenty for a preview.
-            let g = crate::stitch::graph(0, &l, Some(1024), "", &crate::stitch::Out::Equi { w: 2048, h: 1024 }, None, "sb");
+            let g = if gpu && layout == "dual" {
+                crate::stitch::graph(0, &l, None, "vpp_qsv=w=1024:h=1024:format=nv12,hwdownload,format=nv12", &crate::stitch::Out::Equi { w: 2048, h: 1024 }, None, "sb")
+            } else {
+                crate::stitch::graph(0, &l, Some(1024), "", &crate::stitch::Out::Equi { w: 2048, h: 1024 }, None, "sb")
+            };
             format!("{};[sb]format=yuv420p[pv]", g.replace("interp=lanczos", "interp=linear"))
         } else {
             let each = if layout == "dual" { Some(1024) } else { None };

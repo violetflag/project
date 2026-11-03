@@ -952,6 +952,37 @@ pub fn render_flat(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &Media
 }
 
 #[allow(dead_code)]
+/// Single pictures of a recording through the engine, one JPEG per time in `times` (source
+/// seconds), stabilised and levelled exactly as the export: `view(t)` gives the look direction
+/// and field of view (None = the whole sphere, equirectangular). `vf(t)` is applied before each
+/// JPEG is written (grid and labels).
+#[allow(clippy::too_many_arguments)]
+pub fn stills(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo, lens: &Lens, m: Option<&Motion>, times: &[f64], w: u32, h: u32, view: &dyn Fn(f64) -> (M3, Option<f64>), vf: &dyn Fn(f64) -> String, out_dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let s = crate::stitch::params(lens);
+    let stab = stab_of(lens);
+    let tg = m.map(|m| targets(m, &stab)).unwrap_or_default();
+    let fps = if info.fps > 1.0 { info.fps } else { 30.0 };
+    // Each lens decoded at about the output's resolution (a 3840² lens is not needed for 1920 wide).
+    let px = (w / 2).clamp(256, 2048) & !1;
+    let mut outs = Vec::new();
+    for (i, &t) in times.iter().enumerate() {
+        let t = t.clamp(0.0, (info.duration - 1.0 / fps).max(0.0));
+        let src = source_for(info, lens, t, 0.9 / fps, Some(px), false);
+        let mut st = Stitcher::new(&s, src.n() as f64, w as usize, h as usize, false, rs_of(m, &stab));
+        let k0 = (t * fps).round().max(0.0) as usize;
+        let at = move |_x: f64| view(t);
+        let setup = setup_fn(m, &tg, k0, &stab, &at);
+        let out = out_dir.join(format!("still-{i}.jpg"));
+        let args: Vec<String> = ["-vf", &vf(t), "-q:v", "3", "-update", "1", "-f", "image2", &out.to_string_lossy()].iter().map(|x| x.to_string()).collect();
+        pano::run::<u8>(ffmpeg, jobs, tag, gen, &src, &mut st, &setup, Sink::Encode { args }, |_| {})?;
+        if !out.is_file() {
+            return Err(format!("{t:.1}초 장면을 만들지 못했습니다"));
+        }
+        outs.push(out);
+    }
+    Ok(outs)
+}
+
 pub fn rotate_view(rot: M3, w: [f64; 3]) -> M3 {
     mmul(&rot, &expmap(w))
 }
@@ -960,6 +991,53 @@ pub fn rotate_view(rot: M3, w: [f64; 3]) -> M3 {
 mod tests {
     use super::*;
     use crate::stitch::{matrix, ypr};
+
+    /// The level panorama and a flat view agree on directions: a view at yaw/pitch shows what sits
+    /// at x = (yaw+180)/360·W, y = (90−pitch)/180·H of the panorama (the coordinates the AI reads).
+    /// Checked on two synthetic recordings whose brightness encodes the direction (made from an
+    /// equirect ramp turned into side-by-side fisheyes; REELCUT_FX/ramp).
+    #[test]
+    fn panorama_matches_view_directions() {
+        let Ok(fx) = std::env::var("REELCUT_FX") else { return };
+        let fx = std::path::PathBuf::from(fx);
+        if !fx.join("ramp/yawramp.mp4").is_file() {
+            return;
+        }
+        let bin = |n: &str| std::path::PathBuf::from(std::env::var("FFDIR").unwrap_or_else(|_| "/usr/bin".into())).join(n);
+        let (ffmpeg, ffprobe) = (bin("ffmpeg"), bin("ffprobe"));
+        let work = fx.join("work-eq");
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        let lens = Lens { layout: "dfisheye".into(), swap: false, fov: 190.0, stitch: None, stab: Some(Stab { mode: "off".into(), ..Default::default() }) };
+        let jobs = Jobs::default();
+        let gray = |p: &Path, w: usize, h: usize| -> Vec<u8> { ff::command(&ffmpeg).args(["-v", "error", "-i", &p.to_string_lossy(), "-vf", &format!("scale={w}:{h},format=gray"), "-f", "rawvideo", "-"]).output().unwrap().stdout };
+        let none = |_t: f64| "null".to_string();
+        let sphere = |_t: f64| (I3, None);
+        for (file, axis) in [("yawramp.mp4", 0), ("pitchramp.mp4", 1)] {
+            let mut info = crate::media::inspect(&ffprobe, &fx.join("ramp").join(file).to_string_lossy()).unwrap();
+            info.layout360 = "dfisheye".into();
+            let dir = work.join(file);
+            std::fs::create_dir_all(&dir).unwrap();
+            // The panorama: brightness follows x (yaw file) or y (pitch file).
+            let e = gray(&stills(&ffmpeg, &jobs, "t", 0, &info, &lens, None, &[1.0], 512, 256, &sphere, &none, &dir).unwrap()[0], 512, 256);
+            for (x, y) in [(100usize, 60usize), (300, 128), (420, 200), (256, 30)] {
+                let want = if axis == 0 { x as f64 / 512.0 * 255.0 } else { y as f64 / 256.0 * 255.0 };
+                let got = e[y * 512 + x] as f64;
+                assert!((got - want).abs() < 8.0, "{file} panorama at ({x},{y}): {got} vs {want}");
+            }
+            // Flat views: the centre shows the direction they look along.
+            for (yaw, pitch) in [(60.0, 20.0), (-100.0, -15.0), (150.0, 35.0), (10.0, -40.0)] {
+                let flat = move |_t: f64| (matrix(ypr(yaw, pitch, 0.0)), Some(20.0));
+                let d2 = dir.join(format!("v{yaw}_{pitch}"));
+                std::fs::create_dir_all(&d2).unwrap();
+                let g = gray(&stills(&ffmpeg, &jobs, "t", 0, &info, &lens, None, &[1.0], 64, 64, &flat, &none, &d2).unwrap()[0], 64, 64);
+                let got = g[32 * 64 + 32] as f64;
+                let want = if axis == 0 { (yaw + 180.0) / 360.0 * 255.0 } else { (90.0 - pitch) / 180.0 * 255.0 };
+                assert!((got - want).abs() < 8.0, "{file} view yaw {yaw} pitch {pitch}: centre {got} vs {want}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&work);
+    }
 
     fn sphere_img(rot: &M3, w: usize, h: usize) -> Vec<u8> {
         // A textured sphere seen through `rot` (direction in the picture → world: rotᵀ).

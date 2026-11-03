@@ -6,6 +6,7 @@
 use crate::args::{self, Settings};
 use crate::hw::Hw;
 use crate::media::{self, Lens, View};
+use crate::framing;
 use crate::stitch;
 use crate::probe::{Audio, Source};
 use serde::{Deserialize, Serialize};
@@ -354,26 +355,10 @@ fn color_filters(c: &Option<ColorAdj>) -> Vec<String> {
     f
 }
 
-fn wrap180(d: f64) -> f64 {
-    (d + 180.0).rem_euclid(360.0) - 180.0
-}
-
-/// The view at `t` (keys sorted by time): linear between keys, the nearest key outside them.
-/// Yaw takes the shorter way round.
+/// The view at `t`: the smooth curve through the keys (`framing::Curve`, the same maths as the
+/// preview), the end keys held outside them. For many samples build the `Curve` once instead.
 pub(crate) fn view_at(keys: &[ViewKey], t: f64) -> View {
-    let (first, last) = (&keys[0], &keys[keys.len() - 1]);
-    if t <= first.t {
-        return first.view.clone();
-    }
-    if t >= last.t {
-        return last.view.clone();
-    }
-    let i = keys.windows(2).position(|w| t < w[1].t).unwrap_or(keys.len() - 2);
-    let (a, b) = (&keys[i].view, &keys[i + 1].view);
-    let span = keys[i + 1].t - keys[i].t;
-    let f = if span > 1e-9 { (t - keys[i].t) / span } else { 1.0 };
-    let lerp = |x: f64, y: f64| x + (y - x) * f;
-    View { yaw: wrap180(a.yaw + wrap180(b.yaw - a.yaw) * f), pitch: lerp(a.pitch, b.pitch), roll: lerp(a.roll, b.roll), hfov: lerp(a.hfov, b.hfov) }
+    framing::Curve::new(keys).at(t)
 }
 
 const KEY_STEP: f64 = 1.0 / 15.0;
@@ -387,7 +372,10 @@ fn view_anim(lens: &Lens, keys: &[ViewKey], name: &str, w: u32, h: u32, len: f64
     let mut keys = keys.to_vec();
     keys.sort_by(|a, b| a.t.total_cmp(&b.t));
     let dfov = |hf: f64| 2.0 * ((hf.clamp(20.0, 160.0).to_radians() / 2.0).tan() * (w as f64).hypot(h as f64) / w as f64).atan().to_degrees();
-    let vals = |vw: &View| [wrap180(vw.yaw), vw.pitch.clamp(-180.0, 180.0), vw.roll.clamp(-180.0, 180.0), dfov(vw.hfov)].map(|x| format!("{x:.3}"));
+    let vals = |vw: &View| {
+        let v = framing::norm_view(vw);
+        [v.yaw, v.pitch, v.roll, dfov(v.hfov)].map(|x| format!("{x:.3}"))
+    };
     let (v0, steps) = view_steps(&keys, len);
     let mut prev = vals(&v0);
     let mut cmds = Vec::new();
@@ -409,14 +397,14 @@ fn view_anim(lens: &Lens, keys: &[ViewKey], name: &str, w: u32, h: u32, len: f64
 /// The start view and the view every 1/15 s (output seconds) up to the last key or `len`.
 /// `keys` sorted by time.
 fn view_steps(keys: &[ViewKey], len: f64) -> (View, Vec<(f64, View)>) {
-    let mut v0 = view_at(keys, 0.0);
-    v0.yaw = wrap180(v0.yaw);
+    let curve = framing::Curve::new(keys);
+    let v0 = curve.at(0.0);
     let end = keys[keys.len() - 1].t.min(len);
     let mut times: Vec<f64> = (1..).map(|k| k as f64 * KEY_STEP).take_while(|t| *t < end - 1e-6).collect();
     if end > 0.0 {
         times.push(end);
     }
-    let steps = times.into_iter().map(|t| (t, view_at(keys, t))).collect();
+    let steps = times.into_iter().map(|t| (t, curve.at(t))).collect();
     (v0, steps)
 }
 
@@ -426,7 +414,7 @@ fn stitched(p: &Pic, l: &Lens, ls: &str, w: u32, h: u32) -> (String, bool) {
     let moving = p.keys.len() >= 2 && view_anim(l, p.keys, &p.vname, w, h, p.len).is_some();
     let mut keys = p.keys.to_vec();
     keys.sort_by(|a, b| a.t.total_cmp(&b.t));
-    let still = if p.keys.len() >= 2 { view_at(&keys, 0.0) } else { p.view.clone().unwrap_or(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0 }) };
+    let still = framing::norm_view(&if p.keys.len() >= 2 { view_at(&keys, 0.0) } else { p.view.clone().unwrap_or(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0 }) });
     let moves = moving.then(|| {
         let (v0, steps) = view_steps(&keys, p.len);
         stitch::Moves { v0, steps }
