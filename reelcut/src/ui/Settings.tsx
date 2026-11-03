@@ -41,7 +41,7 @@ export function SettingsView() {
         </label>
         {(cfg.aiMode ?? "account") === "account" ? (
           <div class="qwen-box cc-box">
-            <p class="muted">Claude Pro·Max 구독의 사용 한도 안에서 돌아가고, API 요금은 따로 나가지 않습니다. 처음 한 번 'Claude 계정 연결'을 누르면 Reelcut 전용 Claude Code(약 150MB)를 Anthropic 공식 저장소에서 받아 오고, 브라우저에서 로그인합니다. 이 로그인은 Reelcut만 씁니다.</p>
+            <p class="muted">Claude Pro·Max 구독의 사용 한도 안에서 돌아가고, API 요금은 따로 나가지 않습니다. 처음 한 번 'Claude 계정 연결'을 누르면 Reelcut 전용 Claude Code(내려받기 약 150MB, 설치하면 약 340MB)를 Anthropic 공식 저장소에서 받아 오고, 브라우저에서 로그인합니다. 이 로그인은 Reelcut만 씁니다.</p>
             <ul class="facts">
               <li>계정: {cc == null ? "확인 중…" : cc.logged_in ? <span class="ok">{cc.account || "연결됨"}{cc.plan ? ` · ${cc.plan}` : ""}</span> : <span class="warn">연결 안 됨</span>}
                 {cc?.logged_in && /api.?key|console/i.test(cc.method) && <span class="warn"> (구독이 아닌 API 방식으로 로그인되어 요금이 따로 나갈 수 있습니다)</span>}</li>
