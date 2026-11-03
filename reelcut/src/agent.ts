@@ -8,7 +8,7 @@ import {
   type Pacing,
 } from "./edit";
 import { exportAndWait } from "./exporter";
-import { cleanKeys, frameSubject, normView, sampleKeys, snapRanges, type Mark } from "./framing";
+import { cleanKeys, frameGroup, frameSubject, normView, sampleKeys, snapRanges, type Mark, type Subject } from "./framing";
 import { PLAYBOOK_360 } from "./playbook";
 import { compactBudget, ctxLimit, estTokens, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
 import { activeChat, asset, assetMap, editDraft, loadWave, mutate, mutateChat, saveNow, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
@@ -130,17 +130,21 @@ export const TOOLS = [
     input_schema: { type: "object", properties: { asset_id: str, times: { type: "array", items: num }, width: { ...num, description: "그림 가로 픽셀(기본 960)" } }, required: ["asset_id", "times"] },
   },
   {
-    name: "frame_subject", description: "사람(머리) 위치 표시를 따라가는 시점 키프레임을 만듭니다. marks는 equirect_sheet에서 읽은 [원본 초, x, y] 목록(빠르면 1초, 보통 2.5초 간격). 0.1초 간격 키프레임으로 부드럽게 이어서 클립에 넣고, 머리가 화면 위에서 1/3 지점에 오게 합니다.",
+    name: "frame_subject", description: "사람(머리) 위치 표시를 따라가는 시점 키프레임을 만듭니다. 한 사람이면 marks에 equirect_sheet에서 읽은 [원본 초, x, y] 목록(빠르면 1초, 보통 2.5초 간격). 여러 사람을 함께 화면에 담으려면(쌍둥이 등) subjects에 사람마다 이름과 marks를 넣으세요. 화면이 모두의 가운데를 보고, 모두 들어오도록 화각을 넓힙니다(90~130°). 0.1초 간격 키프레임으로 부드럽게 이어서 클립에 넣고, 가장 높은 머리가 화면 위에서 1/3 지점에 오게 합니다. 결과에 사람마다 화면 안에 있었던 비율과, 너무 멀리 떨어져 한 화면에 못 담은 구간을 알려 줍니다.",
     input_schema: {
       type: "object",
       properties: {
         draft_id: draftId, clip_id: str,
-        marks: { type: "array", items: { type: "array", items: num }, description: "[[t,x,y], …] 또는 [t,x,y,hfov]. t=원본 초, x 0~960, y 0~480(수평선 240), 머리 위치" },
+        marks: { type: "array", items: { type: "array", items: num }, description: "한 사람: [[t,x,y], …] 또는 [t,x,y,hfov]. t=원본 초, x 0~960, y 0~480(수평선 240), 머리 위치" },
+        subjects: {
+          type: "array", description: "여러 사람을 함께: [{name:\"첫째\", marks:[[t,x,y],…]}, {name:\"둘째\", marks:[…]}]. 사람마다 다른 시각에 찍어도 됩니다. 3초 안에 표시가 없는 사람은 그 순간 빼고 나머지를 담습니다.",
+          items: { type: "object", properties: { name: str, marks: { type: "array", items: { type: "array", items: num } } }, required: ["marks"] },
+        },
         hfov: { ...num, description: "화각(기본 90)" }, headroom: { ...num, description: "머리 위 여백 비율(기본 0.33)" },
         step: { ...num, description: "키 간격 초(기본 0.1)" }, smooth: { ...num, description: "부드럽게 하는 정도 초(기본 0.4, 0이면 끔)" },
         from: num, to: num,
       },
-      required: ["clip_id", "marks"],
+      required: ["clip_id"],
     },
   },
   {
@@ -148,7 +152,7 @@ export const TOOLS = [
     input_schema: { type: "object", properties: { draft_id: draftId, clip_id: str, max: num }, required: ["clip_id"] },
   },
   {
-    name: "check_framing", description: "클립의 시점 키프레임으로 실제 잡히는 화면을 원본 시간 times에서 확인합니다(없으면 클립 안 고르게 6곳). 머리가 위 1/3 선 근처인지, 잘리지 않았는지 보세요.",
+    name: "check_framing", description: "클립의 시점 키프레임으로 실제 잡히는 화면을 원본 시간 times에서 확인합니다(없으면 클립 안 고르게 6곳). 머리가 위 1/3 선 근처인지, 잘리지 않았는지 보세요. 여러 사람(쌍둥이 등)을 담는 클립이면 모든 머리가 화면 안에 함께 있어야 합니다.",
     input_schema: { type: "object", properties: { draft_id: draftId, clip_id: str, times: { type: "array", items: num } }, required: ["clip_id"] },
   },
   {
@@ -396,15 +400,27 @@ async function run(name: string, inp: any): Promise<Out> {
       const c = d0.clips.find((x) => x.id === inp.clip_id);
       if (!c) throw new Error(`클립 없음: ${inp.clip_id}`);
       if (!is360(getAsset(c.asset))) throw new Error("360 영상 클립이 아닙니다");
-      const marks: Mark[] = (inp.marks ?? []).map((m: any) => (Array.isArray(m) ? { t: m[0], x: m[1], y: m[2], hfov: m[3] } : m));
-      if (!marks.length) throw new Error("marks가 비었습니다");
+      const toMark = (m: any): Mark => (Array.isArray(m) ? { t: m[0], x: m[1], y: m[2], hfov: m[3] } : m);
+      const subjects: Subject[] = (inp.subjects ?? []).map((s: any, i: number) => ({ name: String(s?.name ?? `사람${i + 1}`), marks: (s?.marks ?? []).map(toMark) })).filter((s: Subject) => s.marks.length);
+      const marks: Mark[] = (inp.marks ?? []).map(toMark);
+      if (!marks.length && !subjects.length) throw new Error("marks나 subjects가 비었습니다");
       const [aw, ah] = d0.aspect.split(":").map(Number);
       const from = Math.max(c.start, inp.from ?? c.start), to = Math.min(c.end, inp.to ?? c.end);
-      const keys = frameSubject(marks, from, to, { aspect: aw / ah || 16 / 9, hfov: inp.hfov, headroom: inp.headroom, step: inp.step, sigma: inp.smooth });
+      const opts = { aspect: aw / ah || 16 / 9, hfov: inp.hfov, headroom: inp.headroom, step: inp.step, sigma: inp.smooth };
+      let note = "";
+      let keys;
+      if (subjects.length > 1 || (subjects.length === 1 && !marks.length)) {
+        const g = frameGroup(subjects.length ? subjects : [{ name: "사람", marks }], from, to, opts);
+        keys = g.keys;
+        note = `\n화면 안 비율: ${g.report.subjects.map((s) => `${s.name} ${s.inFrame}%`).join(", ")}`
+          + (g.report.tooFar.length ? `\n너무 멀리 떨어져 한 화면에 다 못 담은 구간(원본 초): ${g.report.tooFar.map(([a, b]) => `${r3(a)}–${r3(b)}`).join(", ")}. 이 구간은 클립을 나눠 한 사람씩 번갈아 따라가고, 두 사람의 화면 시간이 비슷하게 맞추세요.` : "");
+      } else {
+        keys = frameSubject(marks, from, to, opts);
+      }
       if (!keys.length) throw new Error("키프레임을 만들 수 없습니다 (marks나 구간 확인)");
       const d = updateClip(d0, c.id, { viewKeys: keys });
       editDraft("AI: 사람 따라가기", () => d, d0.id);
-      return `${c.id}에 시점 키프레임 ${keys.length}개를 넣었습니다 (원본 ${keys[0].t}–${keys[keys.length - 1].t}초, ${r3(inp.step ?? 0.1)}초 간격, 머리 위 여백 ${inp.headroom ?? 0.33}). check_framing으로 확인하세요.`;
+      return `${c.id}에 시점 키프레임 ${keys.length}개를 넣었습니다 (원본 ${keys[0].t}–${keys[keys.length - 1].t}초, ${r3(inp.step ?? 0.1)}초 간격, 머리 위 여백 ${inp.headroom ?? 0.33}).${note} check_framing으로 확인하세요.`;
     }
     case "get_view_keys": {
       const c = getDraft(inp.draft_id).clips.find((x) => x.id === inp.clip_id);
@@ -547,7 +563,7 @@ function setCtx(sid: string, tokens: number, model: string) {
 const BASE_KEY = "reelcut-ctx-base";
 function baseTokens(mode: "account" | "api"): number {
   try { const v = JSON.parse(localStorage.getItem(BASE_KEY) || "{}")[mode]; if (v > 0) return v; } catch { /* default */ }
-  return mode === "api" ? estTokens(SYSTEM + JSON.stringify(TOOLS)) : 22_000;
+  return mode === "api" ? estTokens(sys() + JSON.stringify(TOOLS)) : 22_000;
 }
 function noteBase(mode: "account" | "api", ctx: number, sent: string) {
   const b = Math.max(1000, ctx - estTokens(sent) - 500);
@@ -591,7 +607,7 @@ async function askApi(sid: string, text: string) {
   for (let turn = 0; turn < 40; turn++) {
     if (stopFlag) break;
     const body: any = {
-      model: s.model, max_tokens: 16000, system: SYSTEM, tools: TOOLS, messages: sent(),
+      model: s.model, max_tokens: 16000, system: sys(), tools: TOOLS, messages: sent(),
       thinking: { type: "adaptive" }, output_config: { effort: s.effort }, cache_control: { type: "ephemeral" },
     };
     let res: any;
@@ -680,7 +696,7 @@ async function summariseApi(c: ChatSession): Promise<string> {
   // Messages must alternate and end with the assistant before our request.
   while (msgs.length && msgs[msgs.length - 1].role === "user") msgs.pop();
   const body: any = {
-    model: s.model, max_tokens: 8000, system: SYSTEM, tools: TOOLS, tool_choice: { type: "none" },
+    model: s.model, max_tokens: 8000, system: sys(), tools: TOOLS, tool_choice: { type: "none" },
     messages: [...msgs, { role: "user", content: [{ type: "text", text: SUMMARY_REQUEST }] }],
   };
   const res = await api.claude(s.apiKey, body);
@@ -705,7 +721,7 @@ async function summariseAccount(c: ChatSession): Promise<string> {
     offs.push(await onEvent("cc-tool", async (e) => { await api.ccAnswer(e.id, { content: [{ type: "text", text: "요약 중에는 도구를 쓸 수 없습니다. 요약만 답하세요." }], isError: true }); }));
     // Without a Claude Code conversation to resume (e.g. right after another compaction), summarise the visible history.
     const prompt = c.ccSession ? SUMMARY_REQUEST : `${SUMMARY_REQUEST}\n\n<conversation>\n${(c.seed ? c.seed + "\n\n" : "") + recentWithin(c.messages, 60_000)}\n</conversation>`;
-    await api.ccRun({ model: c.model ?? s.model, effort: "low", system: SYSTEM_CC, prompt, session: c.ccSession ?? null, tools: TOOLS });
+    await api.ccRun({ model: c.model ?? s.model, effort: "low", system: sysCc(), prompt, session: c.ccSession ?? null, tools: TOOLS });
     const end = await done;
     if (!text.trim() && !end.ok) throw new Error(end.err.slice(-200) || "요약을 받지 못했습니다");
     return text;
@@ -726,7 +742,12 @@ export const TOOL_LABEL: Record<string, string> = {
 // ---------------------------------------------------------------- "Claude 계정" mode (Claude Code)
 
 const PREFIX = "mcp__reelcut__";
-const SYSTEM_CC = SYSTEM + `\n\n도구 이름에는 ${PREFIX} 접두어가 붙어 있습니다 (예: ${PREFIX}get_project_overview). 이 앱의 도구 말고 다른 도구는 없습니다.`;
+/** The system prompt with what the user asked the AI always to keep in mind (설정 > AI 편집). */
+const sys = () => {
+  const notes = (st.settings.aiNotes ?? "").trim();
+  return notes ? `${SYSTEM}\n\n## 사용자가 늘 지켜 달라고 한 것 (설정에 적어 둔 내용)\n${notes}` : SYSTEM;
+};
+const sysCc = () => sys() + `\n\n도구 이름에는 ${PREFIX} 접두어가 붙어 있습니다 (예: ${PREFIX}get_project_overview). 이 앱의 도구 말고 다른 도구는 없습니다.`;
 
 /** A tool's output in MCP content shape. */
 function mcpContent(out: Out): any[] {
@@ -808,7 +829,7 @@ async function askAccount(sid: string, text: string) {
         await api.ccAnswer(e.id, result);
         if (ccRunning) set({ agentStatus: "생각하는 중…" });
     }));
-    await api.ccRun({ model: s.model, effort: s.effort, system: SYSTEM_CC, prompt, session: c0.ccSession ?? null, tools: TOOLS });
+    await api.ccRun({ model: s.model, effort: s.effort, system: sysCc(), prompt, session: c0.ccSession ?? null, tools: TOOLS });
     const end = await done;
     if (fresh && !c0.seed && lastCtx) noteBase("account", lastCtx, prompt);
     if (stopFlag) return;

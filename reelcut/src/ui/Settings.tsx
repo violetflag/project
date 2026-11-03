@@ -88,6 +88,11 @@ export function SettingsView() {
             </select>
           </label>
         </div>
+        <label>AI에게 늘 알려 줄 것
+          <textarea rows={3} value={cfg.aiNotes ?? ""} placeholder="예: 우리 아이는 쌍둥이(두 명)입니다. 아이를 따라갈 때는 둘을 함께 화면 가운데에 담아 주세요."
+            onChange={(e) => saveSettings({ aiNotes: (e.target as HTMLTextAreaElement).value })} />
+        </label>
+        <p class="muted">새 대화에서도 AI가 항상 이 내용을 지킵니다.</p>
         <h3 class="sub">컨텍스트와 자동 요약</h3>
         <p class="muted">대화가 길어지면 한도의 {cfg.compactAt || 90}%에서 자동으로 요약해 {cfg.compactTo || 50}% 이하로 줄입니다. 지난 대화는 패널에 그대로 남습니다.</p>
         <div class="row">

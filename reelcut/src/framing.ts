@@ -196,6 +196,164 @@ export function frameSubject(marks: Mark[], from: number, to: number, o: FrameOp
     ({ t: r3(tt), view: normView({ yaw: sy[i], pitch: sp[i] - headDrop(sf[i], aspect, headroom), roll: 0, hfov: sf[i] }) }));
 }
 
+// ---------------------------------------------------------------- following several people at once
+
+/** One person to keep in the frame: their head marks on the level panorama. */
+export type Subject = { name: string; marks: Mark[] };
+
+export type GroupOpts = FrameOpts & {
+  /** A person counts at a moment only with a mark within this many seconds (default 3). */
+  reach?: number;
+  /** Degrees kept free on each side of the outermost heads (default 25). */
+  margin?: number;
+  /** Widest the frame may open for a group, degrees (default 130). */
+  maxHfov?: number;
+};
+
+export type GroupReport = {
+  /** Per person: share of the moments they are counted at where their head is inside the frame. */
+  subjects: { name: string; inFrame: number; counted: number }[];
+  /** Source-time ranges where the people are too far apart for one frame. */
+  tooFar: [number, number][];
+};
+
+const rad = (d: number) => (d * Math.PI) / 180;
+const deg = (r: number) => (r * 180) / Math.PI;
+
+/** Where a direction (yaw, pitch) lands in a flat view: u, v in -1..1 (right, down), or null behind. */
+export function project(yaw: number, pitch: number, view: View, aspect: number): { u: number; v: number } | null {
+  const d = [Math.cos(rad(pitch)) * Math.sin(rad(yaw)), Math.sin(rad(pitch)), Math.cos(rad(pitch)) * Math.cos(rad(yaw))];
+  const cy = rad(view.yaw), cp = rad(view.pitch);
+  const f = [Math.cos(cp) * Math.sin(cy), Math.sin(cp), Math.cos(cp) * Math.cos(cy)];
+  const r = [Math.cos(cy), 0, -Math.sin(cy)];
+  const up = [-Math.sin(cp) * Math.sin(cy), Math.cos(cp), -Math.sin(cp) * Math.cos(cy)];
+  const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const z = dot(d, f);
+  if (z <= 1e-6) return null;
+  const tx = Math.tan(rad(view.hfov) / 2), ty = tx / aspect;
+  return { u: dot(d, r) / z / tx, v: -dot(d, up) / z / ty };
+}
+
+/** The smallest arc of the circle holding all these yaws: its middle and its width (degrees). */
+export function yawArc(yaws: number[]): { mid: number; spread: number } {
+  if (yaws.length === 1) return { mid: wrap180(yaws[0]), spread: 0 };
+  const s = yaws.map((y) => ((y % 360) + 360) % 360).sort((a, b) => a - b);
+  let gap = -1, at = 0;
+  for (let i = 0; i < s.length; i++) {
+    const g = i + 1 < s.length ? s[i + 1] - s[i] : s[0] + 360 - s[i];
+    if (g > gap) { gap = g; at = i; }
+  }
+  // The arc runs from just after the largest gap all the way round to just before it.
+  const start = s[(at + 1) % s.length], spread = 360 - gap;
+  return { mid: wrap180(start + spread / 2), spread };
+}
+
+/** Maximum over a window of ±`reach` seconds (sorted times). */
+function rollingMax(ts: number[], vs: number[], reach: number): number[] {
+  return ts.map((t, i) => {
+    let m = vs[i];
+    for (let j = i - 1; j >= 0 && ts[j] >= t - reach; j--) m = Math.max(m, vs[j]);
+    for (let j = i + 1; j < ts.length && ts[j] <= t + reach; j++) m = Math.max(m, vs[j]);
+    return m;
+  });
+}
+
+/**
+ * Dense view keys that keep several people in the frame together (twins, a family): each person's
+ * head marks are interpolated on their own, the frame aims at the middle of the group and opens up
+ * to hold everyone with a margin (never narrower than the single-person view), the higher head sits
+ * on the headroom line unless that would push a lower head off the bottom, and the motion is
+ * smoothed (zoom twice as slowly, widening ahead of time). One person behaves like frameSubject.
+ */
+export function frameGroup(subjects: Subject[], from: number, to: number, o: GroupOpts = {}): { keys: ViewKey[]; report: GroupReport } {
+  const people = subjects
+    .map((s) => ({ name: s.name, ms: s.marks.filter((m) => Number.isFinite(m.t) && Number.isFinite(m.x) && Number.isFinite(m.y)).sort((a, b) => a.t - b.t) }))
+    .filter((s) => s.ms.length);
+  if (!people.length || to <= from) return { keys: [], report: { subjects: [], tooFar: [] } };
+  const step = Math.max(0.02, o.step ?? 0.1);
+  const base = o.hfov ?? 90, aspect = o.aspect ?? 16 / 9, headroom = Math.max(0, Math.min(0.5, o.headroom ?? 0.33));
+  const reach = o.reach ?? 3, margin = o.margin ?? 25, maxF = Math.max(base, o.maxHfov ?? 130);
+  // Each person's head path, with how far each moment is from their nearest mark.
+  const paths = people.map((p) => {
+    const t = p.ms.map((m) => m.t), a = p.ms.map(markAngles);
+    const yaw = unwrapYaw(a.map((x) => x.yaw)), pitch = a.map((x) => x.pitch);
+    const my = pchipSlopes(t, yaw), mp = pchipSlopes(t, pitch);
+    return {
+      at: (tt: number) => ({ yaw: wrap180(pchipAt(t, yaw, my, tt)), pitch: pchipAt(t, pitch, mp, tt) }),
+      near: (tt: number) => {
+        let lo = 0, hi = t.length - 1;
+        while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (t[mid] <= tt) lo = mid; else hi = mid; }
+        return Math.min(Math.abs(t[lo] - tt), Math.abs(t[hi] - tt));
+      },
+    };
+  });
+  const n = Math.max(1, Math.round((to - from) / step));
+  const ts: number[] = [], heads: ({ yaw: number; pitch: number } | null)[][] = [];
+  const cy: number[] = [], need: number[] = [], far: boolean[] = [];
+  let lastMid = 0;
+  for (let i = 0; i <= n; i++) {
+    const tt = Math.min(to, from + i * step);
+    ts.push(tt);
+    let h = paths.map((p) => (p.near(tt) <= reach ? p.at(tt) : null));
+    // Nobody marked near this moment: keep following whoever was marked closest.
+    if (h.every((x) => !x)) {
+      const k = paths.reduce((b, p, j) => (p.near(tt) < paths[b].near(tt) ? j : b), 0);
+      h = paths.map((p, j) => (j === k ? p.at(tt) : null));
+    }
+    heads.push(h);
+    const on = h.filter((x): x is { yaw: number; pitch: number } => !!x);
+    const arc = yawArc(on.map((x) => x.yaw));
+    // Unwrap the centre against the previous one so smoothing never swings the long way round.
+    let mid = arc.mid;
+    if (i) mid = lastMid + wrap180(mid - lastMid);
+    lastMid = mid;
+    cy.push(mid);
+    // Wide enough for the spread across (with a margin each side) and the spread up–down (with
+    // room above the higher head and below the lower one, at this aspect).
+    const ps = on.map((x) => x.pitch);
+    const vNeed = Math.min(170, Math.max(...ps) - Math.min(...ps) + margin);
+    const hFromV = deg(2 * Math.atan(Math.tan(rad(vNeed) / 2) * aspect));
+    const want = on.length > 1 ? Math.max(arc.spread + 2 * margin, hFromV) : base;
+    far.push(want > maxF);
+    need.push(Math.min(maxF, Math.max(base, want)));
+  }
+  const sg = o.sigma ?? 0.4;
+  // Open up ahead of time, then ease: zoom moves twice as slowly as the aim.
+  const fov = gaussian(ts, rollingMax(ts, need, 0.7), sg * 2);
+  const sy = gaussian(ts, cy, sg);
+  // Vertical aim at each moment for the smoothed zoom.
+  const pt = ts.map((_, i) => {
+    const on = heads[i].filter((x): x is { yaw: number; pitch: number } => !!x);
+    const top = Math.max(...on.map((x) => x.pitch)), low = Math.min(...on.map((x) => x.pitch));
+    const aim = top - headDrop(fov[i], aspect, headroom);
+    if (on.length < 2) return aim;
+    const view = { yaw: wrap180(sy[i]), pitch: aim, roll: 0, hfov: fov[i] };
+    const lowest = Math.max(...on.map((x) => project(x.yaw, x.pitch, view, aspect)?.v ?? 1));
+    return lowest > 0.7 ? (top + low) / 2 : aim;
+  });
+  const sp = gaussian(ts, pt, sg);
+  const keys = ts.map((tt, i) => ({ t: r3(tt), view: normView({ yaw: sy[i], pitch: sp[i], roll: 0, hfov: fov[i] }) }));
+  // How well everyone was kept in view, and where they could not all fit.
+  const counts = people.map(() => ({ inFrame: 0, counted: 0 }));
+  keys.forEach((k, i) => heads[i].forEach((h, j) => {
+    if (!h || paths[j].near(ts[i]) > reach) return;
+    counts[j].counted++;
+    const p = project(h.yaw, h.pitch, k.view, aspect);
+    if (p && Math.abs(p.u) <= 1 && Math.abs(p.v) <= 1) counts[j].inFrame++;
+  }));
+  const tooFar: [number, number][] = [];
+  far.forEach((f, i) => {
+    if (!f) return;
+    const last = tooFar[tooFar.length - 1];
+    if (last && ts[i] - last[1] <= step * 1.5) last[1] = r3(ts[i]);
+    else tooFar.push([r3(ts[i]), r3(ts[i])]);
+  });
+  return {
+    keys,
+    report: { subjects: people.map((p, j) => ({ name: p.name, inFrame: counts[j].counted ? Math.round((counts[j].inFrame / counts[j].counted) * 100) : 0, counted: counts[j].counted })), tooFar },
+  };
+}
+
 // ---------------------------------------------------------------- snapping cuts into silences
 
 export type Gap = [number, number];

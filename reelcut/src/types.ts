@@ -194,6 +194,8 @@ export type Settings = {
   autoTranscribe: boolean;
   /** Export presets saved by the user. */
   exportPresets?: SavedExport[];
+  /** What the AI should always keep in mind (added to its instructions), e.g. "our children are twins". */
+  aiNotes?: string;
   /** Context limits in tokens (Haiku models / all others) and the compaction rule in percent. */
   ctxHaiku?: number;
   ctxOther?: number;
