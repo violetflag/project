@@ -52,6 +52,8 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
     case "contact_sheet": return "";
     case "whisper_models": return [{ id: "turbo", label: "large-v3-turbo", file: "x", size_mb: 574, downloaded: true }, { id: "base", label: "base", file: "y", size_mb: 148, downloaded: false }];
     case "download_model": emit({ id: a.id, kind: "download", pct: 100, state: "done", message: "", result: "" }); return;
+    case "qwen_status": return { env: true, package: true, models: true, ready: true, cuda: true, gpu: "Mock GPU", vram_gb: 12, torch: "2.9", error: "" };
+    case "qwen_setup": emit({ id: "qwen", kind: "qwen-setup", pct: 100, state: "done", message: "", result: null }); return;
     case "transcribe": emit({ id: a.id, kind: "transcribe", pct: 100, state: "done", message: "", result: { lang: "ko", words: words() } }); return;
     case "export": emit({ id: a.id, kind: "export", pct: 100, state: "done", message: "", result: { path: a.plan.out, size: 12_345_678, seconds: 3, duration: 10 } }); (window as any).__lastPlan = a.plan; return a.plan.out;
     case "cancel": return 1;

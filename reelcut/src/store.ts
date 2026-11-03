@@ -1,6 +1,6 @@
 // App state: one module-level store, components re-render through useStore().
 import { useEffect, useReducer } from "preact/hooks";
-import { api, onJob, type AppInfo, type ModelInfo } from "./api";
+import { api, onJob, type AppInfo, type ModelInfo, type QwenStatus } from "./api";
 import { draftDuration, newDraft, uid } from "./edit";
 import type { Asset, Draft, JobEvent, Project, Settings } from "./types";
 
@@ -8,7 +8,7 @@ export type Meta = { id: string; name: string; updated: number; created: number;
 export type ExportJob = { id: string; draft: string; pct: number; state: string; message: string; out: string; result?: any; left?: number };
 
 export const DEFAULT_SETTINGS: Settings = {
-  apiKey: "", model: "claude-opus-5-5", effort: "high", whisperModel: "turbo", lang: "ko", exportDir: "", autoProxy: true, autoTranscribe: true,
+  apiKey: "", model: "claude-opus-5-5", effort: "high", engine: "whisper", whisperModel: "turbo", lang: "ko", exportDir: "", autoProxy: true, autoTranscribe: true,
 };
 
 type S = {
@@ -24,6 +24,8 @@ type S = {
   settings: Settings;
   info: AppInfo | null;
   models: ModelInfo[];
+  qwen: QwenStatus | null;
+  qwenSetup: { pct: number; state: string; message: string } | null;
   downloads: Record<string, { pct: number; state: string; message: string }>;
   exportJob: ExportJob | null;
   toast: string;
@@ -35,7 +37,7 @@ type S = {
 
 export const st: S = {
   route: "home", projects: [], project: null, draftId: null, sourceId: null, folder: "", playhead: 0, selClip: null,
-  settings: { ...DEFAULT_SETTINGS }, info: null, models: [], downloads: {}, exportJob: null, toast: "",
+  settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, qwenSetup: null, downloads: {}, exportJob: null, toast: "",
   agentBusy: false, agentStatus: "", rightTab: "inspect", leftTab: "media",
 };
 
@@ -264,14 +266,19 @@ function onProxyDone(id: string, path: string) {
 export async function startTranscribe(id: string) {
   const a = asset(id);
   if (!a || !a.info.has_audio) return;
+  const qwen = st.settings.engine === "qwen";
   const m = st.models.find((x) => x.id === st.settings.whisperModel);
-  if (m && !m.downloaded) {
+  if (!qwen && m && !m.downloaded) {
     patchAsset(id, { tState: "error", tError: "받아쓰기 모델이 없습니다. 설정에서 내려받아 주세요." });
+    return;
+  }
+  if (qwen && st.qwen && !st.qwen.ready) {
+    patchAsset(id, { tState: "error", tError: "Qwen 받아쓰기가 아직 설치되지 않았습니다. 설정에서 설치해 주세요." });
     return;
   }
   patchAsset(id, { tState: "running", tPct: 0, tError: "" });
   try {
-    await api.transcribe(id, a.info.path, st.settings.whisperModel, st.settings.lang === "auto" ? "" : st.settings.lang);
+    await api.transcribe(id, a.info.path, st.settings.whisperModel, st.settings.lang === "auto" ? "" : st.settings.lang, st.settings.engine);
   } catch (e) {
     patchAsset(id, { tState: "error", tError: String(e) });
   }
@@ -285,6 +292,9 @@ export function waitJob(id: string, kind: string): Promise<JobEvent> {
 
 export async function refreshModels() {
   try { set({ models: await api.whisperModels() }); } catch { /* none */ }
+}
+export async function refreshQwen(deep = false) {
+  try { set({ qwen: await api.qwenStatus(deep) }); } catch { /* none */ }
 }
 
 let lastPaint = 0;
@@ -313,6 +323,11 @@ export async function initJobs() {
         set({ downloads: { ...st.downloads, [e.id]: { pct: e.pct, state: e.state, message: e.message } } });
         if (e.state === "done") { refreshModels(); toast("모델을 내려받았습니다"); }
         if (e.state === "error") toast("모델 내려받기 실패: " + e.message);
+        break;
+      case "qwen-setup":
+        set({ qwenSetup: { pct: e.pct, state: e.state, message: e.message } });
+        if (e.state === "done") { refreshQwen(true); toast("Qwen 받아쓰기를 설치했습니다"); }
+        if (e.state === "error") toast("Qwen 설치 실패: " + e.message.slice(0, 200));
         break;
       case "export":
         if (st.exportJob && st.exportJob.id === e.id) {

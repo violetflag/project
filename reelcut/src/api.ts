@@ -30,6 +30,7 @@ export type AppInfo = {
   ffmpeg: string; ffmpegOk: boolean; ffmpegVersion: string; whisper: string; whisperOk: boolean;
   dataDir: string; cacheDir: string; hw: Hw; platform: string; videosDir: string;
 };
+export type QwenStatus = { env: boolean; package: boolean; models: boolean; ready: boolean; cuda: boolean; gpu: string; vram_gb: number; torch: string; error: string };
 export type ModelInfo = { id: string; label: string; file: string; size_mb: number; downloaded: boolean };
 
 export const api = {
@@ -50,7 +51,9 @@ export const api = {
     invoke<string>("contact_sheet", { path, start, every, cols, rows, tileW }),
   whisperModels: () => invoke<ModelInfo[]>("whisper_models"),
   downloadModel: (id: string) => invoke<void>("download_model", { id }),
-  transcribe: (id: string, path: string, model: string, lang: string) => invoke<void>("transcribe", { id, path, model, lang }),
+  transcribe: (id: string, path: string, model: string, lang: string, engine = "whisper") => invoke<void>("transcribe", { id, path, model, lang, engine }),
+  qwenStatus: (deep: boolean) => invoke<QwenStatus>("qwen_status", { deep }),
+  qwenSetup: () => invoke<void>("qwen_setup"),
   export: (id: string, plan: Plan) => invoke<string>("export", { id, plan }),
   cancel: (tag: string) => invoke<number>("cancel", { tag }),
   reveal: (path: string) => invoke<void>("reveal", { path }),

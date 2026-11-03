@@ -3,6 +3,7 @@ mod ff;
 mod hw;
 mod media;
 mod probe;
+mod qwen;
 mod render;
 mod transcribe;
 #[cfg(test)]
@@ -320,19 +321,42 @@ fn download_model(handle: tauri::AppHandle, app: St<'_>, id: String) -> Result<(
 }
 
 #[tauri::command]
-fn transcribe(handle: tauri::AppHandle, app: St<'_>, id: String, path: String, model: String, lang: String) -> Result<(), String> {
+fn transcribe(handle: tauri::AppHandle, app: St<'_>, id: String, path: String, model: String, lang: String, engine: Option<String>) -> Result<(), String> {
     let app = app.inner().clone();
     let tag = format!("transcribe:{id}");
     let gen = app.jobs.generation(&tag);
-    let model_path = transcribe::model_path(&app.models_dir(), &model)?;
+    let engine = engine.unwrap_or_else(|| "whisper".into());
+    let model_path = if engine == "qwen" { PathBuf::new() } else { transcribe::model_path(&app.models_dir(), &model)? };
     std::thread::spawn(move || {
         let work = app.dir("transcribe").join(&id);
-        let r = transcribe::Run { ffmpeg: &app.bins.ffmpeg, whisper: &app.bins.whisper, model: model_path, media: path, lang, work: work.clone(), threads: hw::threads() };
+        let r = transcribe::Run { ffmpeg: &app.bins.ffmpeg, whisper: &app.bins.whisper, model: model_path, media: path, lang, work: work.clone(), threads: hw::threads(), engine, data: app.data_dir.clone() };
         let res = transcribe::run(&r, &app.jobs, &tag, gen, |p| emit(&handle, &id, "transcribe", p, "running", "", Value::Null));
         let _ = std::fs::remove_dir_all(&work);
         match res {
             Ok((lang, words)) => emit(&handle, &id, "transcribe", 100.0, "done", "", json!({ "lang": lang, "words": words })),
             Err(e) => emit(&handle, &id, "transcribe", 0.0, if e == CANCELLED { "cancelled" } else { "error" }, &e, Value::Null),
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn qwen_status(app: St<'_>, deep: bool) -> Result<qwen::Status, String> {
+    let app = app.inner().clone();
+    blocking(move || Ok(qwen::status(&app.data_dir, deep))).await
+}
+
+/// Installs the Qwen3-ASR engine in the background ("job" events, kind "qwen-setup", id "qwen").
+#[tauri::command]
+fn qwen_setup(handle: tauri::AppHandle, app: St<'_>) -> Result<(), String> {
+    let app = app.inner().clone();
+    let tag = "qwen-setup".to_string();
+    let gen = app.jobs.generation(&tag);
+    std::thread::spawn(move || {
+        let r = qwen::setup(&app.data_dir, &app.jobs, &tag, gen, |p, m| emit(&handle, "qwen", "qwen-setup", p, "running", m, Value::Null));
+        match r {
+            Ok(_) => emit(&handle, "qwen", "qwen-setup", 100.0, "done", "", Value::Null),
+            Err(e) => emit(&handle, "qwen", "qwen-setup", 0.0, if e == CANCELLED { "cancelled" } else { "error" }, &e, Value::Null),
         }
     });
     Ok(())
@@ -483,6 +507,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_info,
+            qwen_status,
+            qwen_setup,
             hw_info,
             store_get,
             store_set,

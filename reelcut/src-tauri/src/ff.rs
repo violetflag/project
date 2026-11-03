@@ -211,12 +211,18 @@ pub fn run_ffmpeg_in(
 
 /// Runs any tracked program (whisper) to completion, feeding each stderr/stdout line to `on`.
 /// Cancelled like ffmpeg jobs.
-pub fn run_tracked(jobs: &Jobs, tag: &str, gen: u64, bin: &Path, args: &[String], mut on: impl FnMut(&str)) -> Result<String, String> {
+pub fn run_tracked(jobs: &Jobs, tag: &str, gen: u64, bin: &Path, args: &[String], on: impl FnMut(&str)) -> Result<String, String> {
+    run_tracked_env(jobs, tag, gen, bin, args, &[], on)
+}
+
+/// `run_tracked` with extra environment variables.
+pub fn run_tracked_env(jobs: &Jobs, tag: &str, gen: u64, bin: &Path, args: &[String], envs: &[(String, String)], mut on: impl FnMut(&str)) -> Result<String, String> {
     if jobs.generation(tag) != gen {
         return Err(CANCELLED.into());
     }
     let mut child = command(bin)
         .args(args)
+        .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -124,11 +124,15 @@ pub struct Run<'a> {
     pub lang: String,
     pub work: PathBuf,
     pub threads: u32,
+    /// whisper | qwen
+    pub engine: String,
+    pub data: PathBuf,
 }
 
 /// Extracts 16 kHz mono audio, runs whisper and returns the language and words. `on` gets 0–100.
 pub fn run(r: &Run, jobs: &Jobs, tag: &str, gen: u64, mut on: impl FnMut(f64)) -> Result<(String, Vec<Word>), String> {
-    if !r.model.is_file() {
+    let qwen = r.engine == "qwen";
+    if !qwen && !r.model.is_file() {
         return Err("받아쓰기 모델이 없습니다. 설정에서 먼저 내려받아 주세요.".into());
     }
     std::fs::create_dir_all(&r.work).map_err(|e| e.to_string())?;
@@ -136,6 +140,11 @@ pub fn run(r: &Run, jobs: &Jobs, tag: &str, gen: u64, mut on: impl FnMut(f64)) -
     let a: Vec<String> = ["-i", &r.media, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav", &wav.to_string_lossy()].iter().map(|x| x.to_string()).collect();
     ff::run_ffmpeg(jobs, tag, gen, r.ffmpeg, &a, |_| {}).map_err(|e| if e == ff::CANCELLED { e } else { format!("소리를 꺼내지 못했습니다: {e}") })?;
     on(3.0);
+    if qwen {
+        let res = crate::qwen::run(&r.data, &wav, &r.lang, &r.work, jobs, tag, gen, |p| on(3.0 + p * 0.97));
+        let _ = std::fs::remove_file(&wav);
+        return res;
+    }
     let base = r.work.join("words");
     let mut args: Vec<String> = vec![
         "-m".into(),

@@ -99,6 +99,8 @@ export type Settings = {
   apiKey: string;
   model: string;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
+  /** whisper | qwen */
+  engine: string;
   whisperModel: string;
   lang: string;
   exportDir: string;
