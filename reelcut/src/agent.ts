@@ -140,6 +140,7 @@ export const TOOLS = [
           type: "array", description: "여러 사람을 함께: [{name:\"첫째\", marks:[[t,x,y],…]}, {name:\"둘째\", marks:[…]}]. 사람마다 다른 시각에 찍어도 됩니다. 3초 안에 표시가 없는 사람은 그 순간 빼고 나머지를 담습니다.",
           items: { type: "object", properties: { name: str, marks: { type: "array", items: { type: "array", items: num } } }, required: ["marks"] },
         },
+        track: { type: "boolean", description: "표시를 시작점으로 얼굴·머리를 자동 추적해 0.2초 단위로 다듬습니다(기본 켬, 구간 3분 이하). 표시가 몇 개뿐이어도 따라갑니다." },
         hfov: { ...num, description: "화각(기본 90)" }, headroom: { ...num, description: "머리 위 여백 비율(기본 0.33)" },
         step: { ...num, description: "키 간격 초(기본 0.1)" }, smooth: { ...num, description: "부드럽게 하는 정도 초(기본 0.4, 0이면 끔)" },
         from: num, to: num,
@@ -152,7 +153,19 @@ export const TOOLS = [
     input_schema: { type: "object", properties: { draft_id: draftId, clip_id: str, max: num }, required: ["clip_id"] },
   },
   {
-    name: "check_framing", description: "클립의 시점 키프레임으로 실제 잡히는 화면을 원본 시간 times에서 확인합니다(없으면 클립 안 고르게 6곳). 머리가 위 1/3 선 근처인지, 잘리지 않았는지 보세요. 여러 사람(쌍둥이 등)을 담는 클립이면 모든 머리가 화면 안에 함께 있어야 합니다.",
+    name: "find_faces", description: "360 영상의 특정 원본 시각들에서 얼굴을 자동으로 찾습니다(내장 얼굴 인식, 최대 16곳). 수평 파노라마 좌표로 x, y, 크기를 돌려줍니다. 머리 위치를 눈으로 읽는 대신 정확한 값을 얻을 때 씁니다. 뒤돈 얼굴은 안 잡히니 equirect_sheet와 함께 보세요. 어른은 얼굴이 크고 위쪽, 어린아이는 작고 아래쪽에 있는 경우가 많습니다.",
+    input_schema: { type: "object", properties: { asset_id: str, times: { type: "array", items: num } }, required: ["asset_id", "times"] },
+  },
+  {
+    name: "track_people", description: "사람을 구간 내내 자동으로 따라가 위치 표시를 돌려줍니다. subjects마다 시작 위치 seeds([t,x,y], find_faces나 equirect_sheet에서 읽은 값) 하나 이상을 주면 앞뒤로 추적합니다(한 번에 3분까지). 돌려준 marks는 frame_subject에 그대로 넣을 수 있습니다. frame_subject의 track(기본 켬)을 쓰면 이 도구를 따로 부르지 않아도 됩니다.",
+    input_schema: {
+      type: "object",
+      properties: { asset_id: str, from: num, to: num, subjects: { type: "array", items: { type: "object", properties: { name: str, seeds: { type: "array", items: { type: "array", items: num } } }, required: ["seeds"] } } },
+      required: ["asset_id", "from", "to", "subjects"],
+    },
+  },
+  {
+    name: "check_framing", description: "클립의 시점 키프레임으로 실제 잡히는 화면을 원본 시간 times에서 확인합니다(없으면 클립 안 고르게 6곳). 머리가 위 1/3 선 근처인지, 잘리지 않았는지 보세요. 여러 사람(쌍둥이 등)을 담는 클립이면 모든 머리가 화면 안에 함께 있어야 합니다. 얼굴이 화면 가장자리에 걸린 곳은 자동으로 찾아 알려 줍니다.",
     input_schema: { type: "object", properties: { draft_id: draftId, clip_id: str, times: { type: "array", items: num } }, required: ["clip_id"] },
   },
   {
@@ -395,6 +408,22 @@ async function run(name: string, inp: any): Promise<Out> {
       const shots = await api.eqSheet(a.info.path, lens, times, Math.min(1920, Math.max(480, inp.width ?? 960)));
       return [{ type: "text", text: "가로 0~960 = 방위 -180~180°(480 = 정면), 세로 240 = 수평선(위가 위쪽). 격자 눈금으로 [x,y]를 읽으세요." }, ...shots.flatMap((b, i) => [{ type: "text", text: `${a.info.name} ${r3(times[i])}초` } as ChatBlock, img(b)])];
     }
+    case "find_faces": {
+      const a = getAsset(inp.asset_id);
+      if (!is360(a)) throw new Error("360 영상이 아닙니다");
+      const lens = { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 };
+      const found = await api.findFaces(a.info.path, lens, inp.times);
+      return found.map((r) => `${r3(r.t)}초: ${r.faces.length ? r.faces.map((f) => `[x ${Math.round(f.x + f.w / 2)}, y ${Math.round(f.y + f.h / 2)}, 크기 ${Math.round(f.w)}]`).join(" ") : "얼굴 없음"}`).join("\n");
+    }
+    case "track_people": {
+      const a = getAsset(inp.asset_id);
+      if (!is360(a)) throw new Error("360 영상이 아닙니다");
+      const lens = { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 };
+      const subs = (inp.subjects ?? []).map((s: any, i: number) => ({ name: String(s?.name ?? `사람${i + 1}`), seeds: s.seeds }));
+      const res = await api.trackPeople(a.info.path, lens, inp.from, inp.to, subs);
+      // About one mark a second is plenty to hand on to frame_subject.
+      return res.map((s) => `${s.name}: ${s.tracked}% 추적\n${JSON.stringify(s.marks.filter((_, i) => i % 5 === 0))}`).join("\n");
+    }
     case "frame_subject": {
       const d0 = getDraft(inp.draft_id);
       const c = d0.clips.find((x) => x.id === inp.clip_id);
@@ -409,10 +438,27 @@ async function run(name: string, inp: any): Promise<Out> {
       const opts = { aspect: aw / ah || 16 / 9, hfov: inp.hfov, headroom: inp.headroom, step: inp.step, sigma: inp.smooth };
       let note = "";
       let keys;
-      if (subjects.length > 1 || (subjects.length === 1 && !marks.length)) {
-        const g = frameGroup(subjects.length ? subjects : [{ name: "사람", marks }], from, to, opts);
+      let people: Subject[] = subjects.length ? subjects : [{ name: "사람", marks }];
+      // The marks are starting points: follow each head between them with the built-in tracker.
+      if (inp.track !== false && to - from <= 180) {
+        try {
+          const a = getAsset(c.asset);
+          const lens = { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 };
+          const seeds = people.map((s) => ({ name: s.name, seeds: s.marks.map((m) => [m.t, m.x, m.y] as [number, number, number]) }));
+          const tracked = await api.trackPeople(a.info.path, lens, from, to, seeds);
+          people = people.map((s, i) => {
+            const tr = tracked[i];
+            return tr && tr.marks.length >= s.marks.length ? { name: s.name, marks: tr.marks.map(([t, x, y]) => ({ t, x, y })) } : s;
+          });
+          note += `\n자동 추적: ${tracked.map((s) => `${s.name} ${s.tracked}%`).join(", ")}`;
+        } catch (e) {
+          note += `\n자동 추적을 못 해 표시만 썼습니다: ${e}`;
+        }
+      }
+      if (people.length > 1 || inp.track !== false) {
+        const g = frameGroup(people, from, to, opts);
         keys = g.keys;
-        note = `\n화면 안 비율: ${g.report.subjects.map((s) => `${s.name} ${s.inFrame}%`).join(", ")}`
+        note += `\n화면 안 비율: ${g.report.subjects.map((s) => `${s.name} ${s.inFrame}%`).join(", ")}`
           + (g.report.tooFar.length ? `\n너무 멀리 떨어져 한 화면에 다 못 담은 구간(원본 초): ${g.report.tooFar.map(([a, b]) => `${r3(a)}–${r3(b)}`).join(", ")}. 이 구간은 클립을 나눠 한 사람씩 번갈아 따라가고, 두 사람의 화면 시간이 비슷하게 맞추세요.` : "");
       } else {
         keys = frameSubject(marks, from, to, opts);
@@ -438,10 +484,15 @@ async function run(name: string, inp: any): Promise<Out> {
       const times: number[] = (inp.times?.length ? inp.times : Array.from({ length: 6 }, (_, i) => c.start + ((i + 0.5) * (c.end - c.start)) / 6)).slice(0, 8);
       const lens = { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 };
       const out: ChatBlock[] = [{ type: "text", text: "머리가 화면 위에서 약 1/3 선에 있고 위·아래가 잘리지 않아야 합니다. 어긋나면 marks를 고쳐 frame_subject를 다시 하세요." }];
-      for (const t of times) {
+      const seen = await api.faceCheck(a.info.path, lens, times.map((t) => [t, viewAt(c.view, c.viewKeys, t)] as [number, View])).catch(() => []);
+      times.forEach((t, i) => void (seen[i] && (seen[i].t = t)));
+      for (let i = 0; i < times.length; i++) {
+        const t = times[i];
         const v = viewAt(c.view, c.viewKeys, t);
         const [b] = await api.frames(a.info.path, [t], 640, v, lens);
-        out.push({ type: "text", text: `${r3(t)}초 | yaw ${v.yaw} pitch ${v.pitch} hfov ${v.hfov}` }, img(b));
+        const f = seen[i];
+        const faces = f ? ` | 얼굴 ${f.faces}개${f.edges.length ? ` · 가장자리에 걸림: ${f.edges.join(", ")}` : ""}` : "";
+        out.push({ type: "text", text: `${r3(t)}초 | yaw ${v.yaw} pitch ${v.pitch} hfov ${v.hfov}${faces}` }, img(b));
       }
       return out;
     }
@@ -735,7 +786,7 @@ export const TOOL_LABEL: Record<string, string> = {
   get_project_overview: "프로젝트 살펴보는 중", get_transcript: "대본 읽는 중", search_transcript: "대본 찾는 중", view_frames: "장면 보는 중",
   contact_sheet: "영상 훑어보는 중", create_draft: "편집본 만드는 중", get_draft: "편집본 확인 중", edit_draft: "편집하는 중",
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
-  get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
+  find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
 

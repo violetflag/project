@@ -55,6 +55,11 @@ export const api = {
   liveUrl: (req: { slot: string; info: MediaInfo; lens: Lens | null; t: number; kind: "stream" | "frame"; rate?: number }) => invoke<string>("live_url", { req }),
   liveStop: (slot: string) => invoke<boolean>("live_stop", { slot }),
   calibrate360: (info: MediaInfo, lens: Lens) => invoke<Stitch>("calibrate_360", { info, lens }),
+  findFaces: (path: string, lens: Lens, times: number[]) => invoke<{ t: number; faces: { x: number; y: number; w: number; h: number; score: number }[] }[]>("find_faces", { req: { path, lens, times } }),
+  trackPeople: (path: string, lens: Lens, from: number, to: number, subjects: { name: string; seeds: [number, number, number][] }[]) =>
+    invoke<{ name: string; tracked: number; marks: [number, number, number][] }[]>("track_people", { req: { path, lens, from, to, subjects } }),
+  faceCheck: (path: string, lens: Lens, items: [number, View][]) => invoke<{ t: number; faces: number; edges: string[] }[]>("face_check", { req: { path, lens, items } }),
+  motionTrack: (path: string, lens: Lens) => invoke<{ fps: number; quats: string } | null>("motion_track", { path, lens }),
   motionInfo: (path: string) => invoke<MotionInfo | null>("motion_info", { path }),
   filmstrip: (path: string, duration: number, count: number) => invoke<string>("filmstrip", { path, duration, count }),
   poster: (path: string, at: number) => invoke<string>("poster", { path, at }),

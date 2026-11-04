@@ -1,5 +1,6 @@
 mod args;
 mod cc;
+mod faces;
 mod ff;
 mod framing;
 mod hw;
@@ -34,6 +35,7 @@ struct App {
     jobs: Jobs,
     cc: Arc<cc::Bridge>,
     live: Arc<live::Live>,
+    faces: faces::Detector,
 }
 
 type St<'a> = State<'a, Arc<App>>;
@@ -78,6 +80,9 @@ fn hash<T: Hash>(t: &T) -> u64 {
 
 /// Identity of a file version: path + size + modified time.
 fn file_key(path: &str) -> String {
+    // The same file however its path is spelled.
+    let spelled = if cfg!(windows) { path.replace('/', "\\") } else { path.to_string() };
+    let path = spelled.as_str();
     let m = std::fs::metadata(path).ok();
     let size = m.as_ref().map(|m| m.len()).unwrap_or(0);
     let mt = m.and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
@@ -211,6 +216,33 @@ async fn calibrate_360(app: St<'_>, info: MediaInfo, lens: Lens) -> Result<stitc
     blocking(move || stitch::calibrate(&app.bins.ffmpeg, &app.bins.ffprobe, &info, &lens)).await
 }
 
+/// The stabilising turn of each frame (base64 of f32 w, x, y, z), for the preview to look the same
+/// way as the export. None until the recording has been analysed.
+#[tauri::command]
+async fn motion_track(app: St<'_>, path: String, lens: Lens) -> Result<Option<Value>, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let info = media::inspect(&app.bins.ffprobe, &path)?;
+        let Ok(t) = std::fs::read_to_string(app.dir("motion").join(format!("{}-m1.json", file_key(&path)))) else { return Ok(None) };
+        let m: motion::Motion = serde_json::from_str(&t).map_err(|e| e.to_string())?;
+        if !motion::usable(&m, &info) {
+            return Ok(None);
+        }
+        let q = motion::stab_track(&m, &motion::stab_of(&lens));
+        if q.is_empty() {
+            return Ok(None);
+        }
+        let mut b = Vec::with_capacity(q.len() * 16);
+        for v in &q {
+            for x in v {
+                b.extend_from_slice(&x.to_le_bytes());
+            }
+        }
+        Ok(Some(json!({ "fps": m.fps, "quats": media::jpeg_b64(&b) })))
+    })
+    .await
+}
+
 /// What the stabilisation found for a recording (gyro or picture), once analysed.
 #[tauri::command]
 fn motion_info(app: St<'_>, path: String) -> Option<Value> {
@@ -288,6 +320,131 @@ async fn eq_sheet(app: St<'_>, req: EqReq) -> Result<Vec<String>, String> {
         let out = res.and_then(|files| files.iter().map(|f| std::fs::read(f).map(|b| media::jpeg_b64(&b)).map_err(|e| e.to_string())).collect());
         let _ = std::fs::remove_dir_all(&dir);
         out
+    })
+    .await
+}
+
+/// A 360 lens that goes through the engine (stitching on, whatever the clip's own setting), with
+/// its motion track, for looking at the level picture.
+fn engine_for(app: &App, tag: &str, gen: u64, path: &str, lens: Option<Lens>) -> Result<(MediaInfo, Lens, Option<motion::Motion>), String> {
+    let info = media::inspect(&app.bins.ffprobe, path)?;
+    let mut lens = lens.unwrap_or_default();
+    if lens.layout.is_empty() || lens.layout == "none" {
+        lens.layout = info.layout360.clone();
+    }
+    if !matches!(lens.layout.as_str(), "dual" | "dfisheye") {
+        return Err("두 렌즈 360 영상에서만 쓸 수 있습니다".into());
+    }
+    if lens.fov <= 0.0 {
+        lens.fov = 190.0;
+    }
+    if !motion::engine_lens(&info, &lens) {
+        lens.stitch = None;
+    }
+    let m = motion::motion_for(&app.dir("motion"), &app.bins.ffmpeg, &app.bins.ffprobe, &app.jobs, tag, gen, &info, &lens, &file_key(path), |_| {})?;
+    Ok((info, lens, m))
+}
+
+#[derive(serde::Deserialize)]
+struct FindFaces {
+    path: String,
+    #[serde(default)]
+    lens: Option<Lens>,
+    times: Vec<f64>,
+}
+
+/// Faces on the level panorama at each time (x, y, w, h on the sheet's 960×480 scale).
+#[tauri::command]
+async fn find_faces(app: St<'_>, req: FindFaces) -> Result<Vec<Value>, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let gen = app.jobs.generation("faces");
+        let (info, lens, m) = engine_for(&app, "faces", gen, &req.path, req.lens)?;
+        let items: Vec<(f64, pano::M3, Option<f64>)> = req.times.iter().copied().filter(|t| t.is_finite()).take(16).map(|t| (t, pano::I3, None)).collect();
+        let mut out = Vec::new();
+        let mut err = None;
+        motion::look_at(&app.bins.ffmpeg, &app.jobs, "faces", gen, &info, &lens, m.as_ref(), &items, 1920, 960, &mut |_, t, f| match app.faces.detect_sphere(f) {
+            Ok(faces) => out.push(json!({ "t": t, "faces": faces })),
+            Err(e) => err = Some(e),
+        })?;
+        err.map_or(Ok(out), Err)
+    })
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct TrackSubject {
+    name: String,
+    /// [t, x, y] marks on the panorama sheet.
+    seeds: Vec<(f64, f32, f32)>,
+}
+#[derive(serde::Deserialize)]
+struct TrackReq {
+    path: String,
+    #[serde(default)]
+    lens: Option<Lens>,
+    from: f64,
+    to: f64,
+    subjects: Vec<TrackSubject>,
+}
+
+/// Follows heads through a stretch of a 360 recording from the marks given: 5 pictures a second on
+/// the level panorama, template matching carried by face detections once a second. Returns each
+/// person's marks and how much of the stretch they were followed for.
+#[tauri::command]
+async fn track_people(app: St<'_>, req: TrackReq) -> Result<Vec<Value>, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        if req.to - req.from > 180.0 {
+            return Err("한 번에 3분까지 추적합니다. 구간을 나눠 주세요.".to_string());
+        }
+        let gen = app.jobs.generation("track");
+        let (info, lens, m) = engine_for(&app, "track", gen, &req.path, req.lens)?;
+        let mut samples: Vec<faces::Sample> = Vec::new();
+        motion::sphere_run(&app.bins.ffmpeg, &app.jobs, "track", gen, &info, &lens, m.as_ref(), req.from, req.to, 5.0, 1920, &mut |k, t, f| {
+            let found = if k % 5 == 0 { app.faces.detect_sphere(f).unwrap_or_default() } else { Vec::new() };
+            samples.push(faces::Sample { t, luma: faces::luma_small(f), faces: found });
+        })?;
+        Ok(req
+            .subjects
+            .iter()
+            .map(|s| {
+                let tr = faces::track(&samples, &s.seeds);
+                let pct = if samples.is_empty() { 0 } else { tr.len() * 100 / samples.len() };
+                json!({ "name": s.name, "tracked": pct, "marks": tr.iter().map(|(t, x, y)| [(*t * 100.0).round() / 100.0, (*x as f64 * 10.0).round() / 10.0, (*y as f64 * 10.0).round() / 10.0]).collect::<Vec<_>>() })
+            })
+            .collect())
+    })
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct FaceCheck {
+    path: String,
+    #[serde(default)]
+    lens: Option<Lens>,
+    /// Source time and the view at that time.
+    items: Vec<(f64, media::View)>,
+}
+
+/// Faces in the flat picture each view shows, and which of them touch the frame edge.
+#[tauri::command]
+async fn face_check(app: St<'_>, req: FaceCheck) -> Result<Vec<Value>, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let gen = app.jobs.generation("faces");
+        let (info, lens, m) = engine_for(&app, "faces", gen, &req.path, req.lens)?;
+        let items: Vec<(f64, pano::M3, Option<f64>)> = req.items.iter().take(16).map(|(t, v)| {
+            let v = framing::norm_view(v);
+            (*t, stitch::matrix(stitch::ypr(v.yaw, v.pitch, v.roll)), Some(v.hfov))
+        }).collect();
+        let mut out = Vec::new();
+        motion::look_at(&app.bins.ffmpeg, &app.jobs, "faces", gen, &info, &lens, m.as_ref(), &items, 640, 360, &mut |_, t, f| {
+            let found = app.faces.detect_frame(f).unwrap_or_default();
+            let edges: Vec<&str> = found.iter().filter_map(|m| faces::edge_of(m, 640.0, 360.0)).collect();
+            out.push(json!({ "t": t, "faces": found.len(), "edges": edges }));
+        })?;
+        Ok(out)
     })
     .await
 }
@@ -786,7 +943,7 @@ pub fn run() {
             }));
             let bins = ff::locate(res.as_deref());
             let live = live::Live::start(bins.ffmpeg.clone()).expect("local preview server");
-            let st = Arc::new(App { bins, data_dir, cache_dir, hw: Mutex::new(None), jobs: Jobs::default(), cc: bridge, live });
+            let st = Arc::new(App { bins, data_dir, cache_dir, hw: Mutex::new(None), jobs: Jobs::default(), cc: bridge, live, faces: faces::Detector::default() });
             // Detect encoders in the background so the first export does not wait for it.
             let st2 = st.clone();
             std::thread::spawn(move || {
@@ -804,6 +961,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             motion_info,
+            motion_track,
             app_info,
             qwen_status,
             set_data_dir,
@@ -818,6 +976,9 @@ pub fn run() {
             analyze_motion,
             live_url,
             eq_sheet,
+            find_faces,
+            track_people,
+            face_check,
             live_stop,
             calibrate_360,
             filmstrip,

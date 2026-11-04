@@ -93,6 +93,8 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
     case "inspect": return info(a.path);
     case "calibrate_360": return { on: true, fov: 192.4, yaw: 0.6, pitch: -0.3, roll: 0.2, gain_a: [0.97, 1.2, -0.8], gain_b: [1.031, -1.2, 0.8], calibrated: true, before: 6.1, after: 2.3 };
     case "motion_info": return { source: "gyro", note: "축 맞춤 오차 4% · 시간차 +0ms · 롤링셔터 12.0ms", readout: 0.012, product: "Osmo 360" };
+    case "motion_track": return null;
+    case "find_faces": case "track_people": case "face_check": return [];
     case "live_url": return "";
     case "live_stop": return false;
     case "analyze_motion": emit({ id: a.id, kind: "motion", pct: 100, state: "done", message: "", result: null }); return;

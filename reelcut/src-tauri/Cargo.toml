@@ -1,6 +1,6 @@
 [package]
 name = "reelcut"
-version = "2.6.1"
+version = "2.7.0"
 description = "Video editor with transcript editing, 360 reframing and an AI agent"
 authors = ["John"]
 edition = "2021"
@@ -24,6 +24,7 @@ ureq = { version = "2", features = ["json"] }
 sha2 = "0.10"
 flate2 = "1"
 tar = "0.4"
+tract-onnx = "0.21"
 
 # Built for speed of building: every CPU core compiles in parallel (16 codegen units) and
 # thin LTO links in parallel too. The heavy work at run time is ffmpeg, so the app itself

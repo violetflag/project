@@ -52,7 +52,7 @@ export type Proj = { kind: "equirect" } | { kind: "dfisheye"; fov: number; swap:
 const VS = `attribute vec2 p; varying vec2 uv; void main(){ uv = vec2(p.x*0.5+0.5, 0.5-p.y*0.5); gl_Position = vec4(p,0.0,1.0); }`;
 const FS = `precision highp float;
 varying vec2 uv; uniform sampler2D tex; uniform vec4 q; uniform vec2 rng;
-uniform float fish; uniform float frng; uniform float swp;
+uniform float fish; uniform float frng; uniform float swp; uniform vec4 stab;
 vec4 qm(vec4 a, vec4 b){ return vec4(
   a.x*b.x - a.y*b.y - a.z*b.z - a.w*b.w,
   a.x*b.y + a.y*b.x + a.z*b.w - a.w*b.z,
@@ -61,6 +61,7 @@ vec4 qm(vec4 a, vec4 b){ return vec4(
 void main(){
   vec3 d = normalize(vec3(rng.x*(2.0*uv.x-1.0), rng.y*(2.0*uv.y-1.0), 1.0));
   vec4 r = qm(qm(q, vec4(0.0, d)), vec4(q.x, -q.yzw));
+  r = qm(qm(stab, r), vec4(stab.x, -stab.yzw));
   vec2 t;
   if (fish > 0.5) {
     vec3 v = r.yzw;
@@ -112,7 +113,8 @@ export class Flat360 {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   }
-  draw(src: TexImageSource, view: View, proj: Proj = { kind: "equirect" }) {
+  /** `stab`: the frame's stabilising turn (w, x, y, z), the same one the export applies. */
+  draw(src: TexImageSource, view: View, proj: Proj = { kind: "equirect" }, stab?: ArrayLike<number> | null) {
     const { gl, canvas } = this;
     const w = canvas.clientWidth * devicePixelRatio, h = canvas.clientHeight * devicePixelRatio;
     if (canvas.width !== Math.round(w) || canvas.height !== Math.round(h)) { canvas.width = Math.round(w); canvas.height = Math.round(h); }
@@ -124,6 +126,7 @@ export class Flat360 {
     const tx = Math.tan((Math.max(20, Math.min(160, view.hfov)) * Math.PI) / 360);
     gl.uniform4f(gl.getUniformLocation(this.prog, "q"), q[0], q[1], q[2], q[3]);
     gl.uniform2f(gl.getUniformLocation(this.prog, "rng"), tx, (tx * canvas.height) / Math.max(1, canvas.width));
+    gl.uniform4f(gl.getUniformLocation(this.prog, "stab"), stab ? stab[0] : 1, stab ? stab[1] : 0, stab ? stab[2] : 0, stab ? stab[3] : 0);
     const fish = proj.kind === "dfisheye";
     gl.uniform1f(gl.getUniformLocation(this.prog, "fish"), fish ? 1 : 0);
     gl.uniform1f(gl.getUniformLocation(this.prog, "frng"), fish ? proj.fov / 360 : 1);

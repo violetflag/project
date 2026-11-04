@@ -948,6 +948,8 @@ pub struct Source {
     /// Shrink each fisheye to this size first (None = as is).
     pub scale_to: Option<u32>,
     pub fps: f64,
+    /// Keep one frame in this many (1 = all); frame k of the run is frame k·every of the source.
+    pub every: u32,
 }
 
 impl Source {
@@ -958,13 +960,14 @@ impl Source {
     fn decode_args(&self, fmt: &str) -> Vec<String> {
         let n = self.n();
         let sc = |l: &str| format!("[{l}]scale={n}:{n}:flags=area[{l}s]");
+        let pick = if self.every > 1 { format!("select='not(mod(n\\,{}))',", self.every) } else { String::new() };
         let g = match self.layout.as_str() {
             "dual" => {
                 let (ia, ib) = if self.swap { (1, 0) } else { (0, 1) };
-                format!("[0:v:{ia}]null[a];[0:v:{ib}]null[b];{};{};[as][bs]hstack,format={fmt}[o]", sc("a"), sc("b"))
+                format!("[0:v:{ia}]null[a];[0:v:{ib}]null[b];{};{};[as][bs]hstack,{pick}format={fmt}[o]", sc("a"), sc("b"))
             }
-            _ if self.swap => format!("[0:v:0]scale={}:{n}:flags=area,split[l][r];[l]crop=iw/2:ih:0:0[b];[r]crop=iw/2:ih:iw/2:0[a];[a][b]hstack,format={fmt}[o]", 2 * n),
-            _ => format!("[0:v:0]scale={}:{n}:flags=area,format={fmt}[o]", 2 * n),
+            _ if self.swap => format!("[0:v:0]scale={}:{n}:flags=area,split[l][r];[l]crop=iw/2:ih:0:0[b];[r]crop=iw/2:ih:iw/2:0[a];[a][b]hstack,{pick}format={fmt}[o]", 2 * n),
+            _ => format!("[0:v:0]scale={}:{n}:flags=area,{pick}format={fmt}[o]", 2 * n),
         };
         let mut a: Vec<String> = ["-hide_banner", "-nostdin", "-loglevel", "error"].iter().map(|x| x.to_string()).collect();
         if self.start > 0.0 {
@@ -973,7 +976,11 @@ impl Source {
         if self.dur > 0.0 {
             a.extend(["-t".to_string(), format!("{:.3}", self.dur)]);
         }
-        a.extend(["-i".to_string(), self.path.clone(), "-filter_complex".into(), g, "-map".into(), "[o]".into(), "-f".into(), "rawvideo".into(), "-".into()]);
+        a.extend(["-i".to_string(), self.path.clone(), "-filter_complex".into(), g, "-map".into(), "[o]".into()]);
+        if self.every > 1 {
+            a.extend(["-fps_mode".to_string(), "passthrough".to_string()]);
+        }
+        a.extend(["-f".to_string(), "rawvideo".to_string(), "-".to_string()]);
         a
     }
 }

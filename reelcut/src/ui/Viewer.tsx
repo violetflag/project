@@ -12,7 +12,7 @@ import {
   parseTC, playableInWebView, previewSource, setViewKey, starts, timedDur, trackState, updateClip, viewAt,
 } from "../edit";
 import { Flat360, type Proj } from "../gl360";
-import { asset, assetMap, draft, editDraft, set, st, toast, useStore } from "../store";
+import { analyzeMotion, asset, assetMap, draft, editDraft, set, st, toast, useStore } from "../store";
 import type { Asset, Clip, ColorAdj, Draft, Overlay, Transform, View } from "../types";
 
 /** Files the WebView started but could not decode; they go through the live preview from then on. */
@@ -98,6 +98,10 @@ class Player {
   /** When the stream for the latest play/seek was asked for, and how long its first picture took. */
   private askedAt = 0;
   lastOpenMs = 0;
+  private stillAt = 0;
+  /** Stabilising turns of 360 files, by file + settings (null = not analysed yet, asked at `at`). */
+  private tracks = new Map<string, { fps: number; q: Float32Array | null; at: number }>();
+  private analysed = new Set<string>();
 
   attach(v: HTMLVideoElement, img: HTMLImageElement, still: HTMLImageElement, canvas: HTMLCanvasElement, ov: NonNullable<Player["ov"]>) {
     this.video = v; this.img = img; this.still = still; this.ov = ov;
@@ -157,9 +161,44 @@ class Player {
     api.liveStop("main").catch(() => {});
   }
 
+  /**
+   * The turn the export applies to this moment, so the preview looks the same way (level and
+   * stabilised). Fetched once per file and settings; a recording with a gyro is analysed by itself.
+   */
+  stabOf(a: Asset, t: number): Float32Array | null {
+    if (a.info.layout360 !== "dual" && a.info.layout360 !== "dfisheye") return null;
+    const lens = a.lens ?? { layout: a.info.layout360, swap: false, fov: 190 };
+    if (lens.stab?.mode === "off") return null;
+    const key = `${a.info.path}|${JSON.stringify(lens.stab ?? null)}|${st.motionRev}`;
+    let tr = this.tracks.get(key);
+    if (!tr || (!tr.q && performance.now() - tr.at > 15000)) {
+      tr = { fps: 30, q: null, at: performance.now() };
+      this.tracks.set(key, tr);
+      const entry = tr;
+      api.motionTrack(a.info.path, { ...lens, layout: a.info.layout360 }).then((r) => {
+        if (r) {
+          const bin = atob(r.quats);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          entry.fps = r.fps;
+          entry.q = new Float32Array(bytes.buffer);
+          set({});
+        } else if (a.info.djmd && !this.analysed.has(a.info.path)) {
+          this.analysed.add(a.info.path);
+          analyzeMotion(a.id);
+        }
+      }).catch(() => {});
+    }
+    if (!tr.q) return null;
+    const n = tr.q.length / 4;
+    const k = Math.max(0, Math.min(n - 1, Math.round(t * tr.fps)));
+    return tr.q.subarray(k * 4, k * 4 + 4);
+  }
+
   /** One decoded frame of a live file at `t` (asked for a moment after the last move). */
   private showStill(a: Asset, t: number) {
     this.stillOn = true;
+    this.stillAt = t;
     this.path = a.info.path;
     clearTimeout(this.stillT);
     const gen = ++this.stillGen;
@@ -413,8 +452,8 @@ class Player {
     }
     if (a && is360(a) && this.gl) {
       const s = this.still;
-      if (this.stillOn) { if (s && s.complete && s.naturalWidth) this.gl.draw(s, this.currentView(), projOf(a)); }
-      else if (v.readyState >= 2) this.gl.draw(v, this.currentView(), projOf(a));
+      if (this.stillOn) { if (s && s.complete && s.naturalWidth) this.gl.draw(s, this.currentView(), projOf(a), this.stabOf(a, this.stillAt)); }
+      else if (v.readyState >= 2) this.gl.draw(v, this.currentView(), projOf(a), this.stabOf(a, this.pos()));
     }
   }
 
@@ -664,7 +703,7 @@ export function Viewer() {
           {noPreview && <div class="overlay no-preview" role="note">{NO_PREVIEW}</div>}
           {!shown && !hitClip && <div class="overlay muted">{d && !d.clips.length ? "미디어를 타임라인에 끌어다 놓거나, 미디어를 두 번 눌러 구간을 골라 넣으세요." : ""}</div>}
           {line && <div class={`caption ${d!.captionStyle.position}`} style={{ fontSize: `${d!.captionStyle.size * 0.9}cqh`, color: d!.captionStyle.color }}>{line.text}</div>}
-          {r360 && <div class="hint360">360° · 끌어서 방향, 휠로 화각 · yaw {Math.round(player.currentView().yaw)}° pitch {Math.round(player.currentView().pitch)}° 화각 {Math.round(player.currentView().hfov)}°{hitClip?.viewKeys?.length ? " · 키프레임" : ""}{fish ? " · 미리보기는 이음새·흔들림 보정 전 (내보낸 파일에 적용)" : shownSrc?.live ? " · 원본 실시간 스티칭 (흔들림 보정은 내보낸 파일에)" : ""}</div>}
+          {r360 && <div class="hint360">360° · 끌어서 방향, 휠로 화각 · yaw {Math.round(player.currentView().yaw)}° pitch {Math.round(player.currentView().pitch)}° 화각 {Math.round(player.currentView().hfov)}°{hitClip?.viewKeys?.length ? " · 키프레임" : ""}{fish ? " · 미리보기는 이음새 맞춤 전 (내보낸 파일에 적용)" : shownSrc?.live ? " · 원본 실시간 스티칭" : ""}</div>}
           {opening && <div class="hint-r info">원본 여는 중…</div>}
           {(lut || ov360) && <div class="hint-r">{lut ? "LUT·색온도는 내보낸 파일에 정확히 반영됩니다" : "360 V2/V3는 내보낸 파일에서 보입니다"}</div>}
           {hit && hitClip?.xin && Math.abs(s.playhead - hit.at) < (hitClip.xin ?? 0) && <div class="hint-r">디졸브 구간 (미리보기는 컷, 내보내기에 반영)</div>}

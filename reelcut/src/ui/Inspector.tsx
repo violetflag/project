@@ -227,7 +227,7 @@ function ClipView({ d, c }: { d: Draft; c: Clip }) {
                 </label>
                 <Stitch360 a={a} />
                 <Stab360 a={a} />
-                <p class="muted tip">.osv 원본은 미리보기에서 바로 이어 붙여 보여 줍니다. 흔들림 보정은 내보낸 파일에 적용됩니다. 이음매가 겹치거나 벌어지면 화각을 조정하세요.</p>
+                <p class="muted tip">.osv 원본은 미리보기에서 바로 이어 붙여 보여 줍니다. 이음매가 겹치거나 벌어지면 화각을 조정하세요.</p>
               </>
             ) : <p class="muted">이미 펼친 360 영상입니다.</p>}
           </Section>

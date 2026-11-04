@@ -685,9 +685,9 @@ pub fn source_for(info: &MediaInfo, lens: &Lens, start: f64, dur: f64, scale_to:
     let layout = if lens.layout.is_empty() || lens.layout == "none" { info.layout360.clone() } else { lens.layout.clone() };
     let fps = if info.fps > 1.0 { info.fps } else { 30.0 };
     match (&info.lrf, layout.as_str(), small) {
-        (Some(l), "dual", true) => Source { path: l.clone(), layout: "dfisheye".into(), swap: lens.swap, start, dur, lens_px: scale_to.unwrap_or(1024), scale_to, fps },
-        (_, "dual", _) => Source { path: info.path.clone(), layout: "dual".into(), swap: lens.swap, start, dur, lens_px: info.videos.first().map(|v| v.width).unwrap_or(info.width), scale_to, fps },
-        _ => Source { path: info.path.clone(), layout: "dfisheye".into(), swap: lens.swap, start, dur, lens_px: info.width / 2, scale_to, fps },
+        (Some(l), "dual", true) => Source { path: l.clone(), layout: "dfisheye".into(), swap: lens.swap, start, dur, lens_px: scale_to.unwrap_or(1024), scale_to, fps, every: 1 },
+        (_, "dual", _) => Source { path: info.path.clone(), layout: "dual".into(), swap: lens.swap, start, dur, lens_px: info.videos.first().map(|v| v.width).unwrap_or(info.width), scale_to, fps, every: 1 },
+        _ => Source { path: info.path.clone(), layout: "dfisheye".into(), swap: lens.swap, start, dur, lens_px: info.width / 2, scale_to, fps, every: 1 },
     }
 }
 
@@ -894,6 +894,21 @@ pub fn setup_fn<'a>(m: Option<&'a Motion>, tg: &'a [M3], k0: usize, s: &Stab, vi
     }
 }
 
+/// The turn the export applies on every frame (camera as filmed → stabilised and level), as
+/// quaternions w, x, y, z, so the preview can look the same way. Empty when stabilisation is off.
+pub fn stab_track(m: &Motion, s: &Stab) -> Vec<[f32; 4]> {
+    if s.mode == "off" || m.rot.is_empty() {
+        return Vec::new();
+    }
+    let tg = targets(m, s);
+    (0..m.rot.len())
+        .map(|i| {
+            let q = quat_of(&mmul(&mt(&m.at(i)), &tg[i.min(tg.len() - 1)]));
+            [q[0] as f32, q[1] as f32, q[2] as f32, q[3] as f32]
+        })
+        .collect()
+}
+
 pub fn rs_of(m: Option<&Motion>, s: &Stab) -> Option<Rs> {
     let m = m?;
     (s.rs && s.mode != "off" && m.readout > 0.0).then_some(Rs { readout: m.readout, top_first: m.top_first })
@@ -907,6 +922,14 @@ pub fn engine_lens(info: &MediaInfo, lens: &Lens) -> bool {
     matches!(layout, "dual" | "dfisheye") && crate::stitch::active(&Lens { layout: layout.into(), ..lens.clone() })
 }
 
+/// A motion track covers the whole recording, and a file with a gyro was analysed with it (versions
+/// before 2.6 could not read an Osmo 360's gyro and fell back to the picture).
+pub fn usable(m: &Motion, info: &MediaInfo) -> bool {
+    let fps = if info.fps > 1.0 { info.fps } else { 30.0 };
+    let frames = (info.duration * fps).round();
+    (m.rot.len() as f64) >= frames * 0.97 && !(info.djmd && m.source == "video" && m.note == "자이로 기록 없음")
+}
+
 /// The motion track, from the cache or worked out now (None when stabilisation is off or the
 /// analysis fails; the picture is then stitched as filmed).
 #[allow(clippy::too_many_arguments)]
@@ -917,11 +940,17 @@ pub fn motion_for(dir: &Path, ffmpeg: &Path, ffprobe: &Path, jobs: &Jobs, tag: &
     let file = dir.join(format!("{key}-m1.json"));
     if let Ok(t) = std::fs::read_to_string(&file) {
         if let Ok(m) = serde_json::from_str::<Motion>(&t) {
-            return Ok(Some(m));
+            if usable(&m, info) {
+                return Ok(Some(m));
+            }
         }
     }
     match analyze(ffmpeg, ffprobe, jobs, tag, gen, info, lens, on) {
         Ok(m) => {
+            // An analysis cut short (ffmpeg stopped) is not kept, nor trusted.
+            if !usable(&m, info) {
+                return Ok(None);
+            }
             let _ = std::fs::write(&file, serde_json::to_string(&m).unwrap_or_default());
             Ok(Some(m))
         }
@@ -988,6 +1017,49 @@ pub fn stills(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo,
     Ok(outs)
 }
 
+/// Like `stills`, handing each picture to `each` instead of writing it (for looking at the pixels).
+#[allow(clippy::too_many_arguments)]
+pub fn look_at(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo, lens: &Lens, m: Option<&Motion>, items: &[(f64, M3, Option<f64>)], w: u32, h: u32, each: &mut dyn FnMut(usize, f64, &Frame<u8>)) -> Result<(), String> {
+    let s = crate::stitch::params(lens);
+    let stab = stab_of(lens);
+    let tg = m.map(|m| targets(m, &stab)).unwrap_or_default();
+    let fps = if info.fps > 1.0 { info.fps } else { 30.0 };
+    let px = (w / 2).clamp(256, 2048) & !1;
+    for (i, (t, rot, hfov)) in items.iter().enumerate() {
+        let t = t.clamp(0.0, (info.duration - 1.0 / fps).max(0.0));
+        let src = source_for(info, lens, t, 0.9 / fps, Some(px), false);
+        let mut st = Stitcher::new(&s, src.n() as f64, w as usize, h as usize, false, rs_of(m, &stab));
+        let k0 = (t * fps).round().max(0.0) as usize;
+        let (rot, hfov) = (*rot, *hfov);
+        let at = move |_x: f64| (rot, hfov);
+        let setup = setup_fn(m, &tg, k0, &stab, &at);
+        let mut cb = |_k: usize, f: &Frame<u8>| each(i, t, f);
+        pano::run::<u8>(ffmpeg, jobs, tag, gen, &src, &mut st, &setup, Sink::Call(&mut cb), |_| {})?;
+    }
+    Ok(())
+}
+
+/// The stabilised, level sphere of a stretch of a recording, `hz` pictures a second (w × w/2).
+#[allow(clippy::too_many_arguments)]
+pub fn sphere_run(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo, lens: &Lens, m: Option<&Motion>, from: f64, to: f64, hz: f64, w: u32, each: &mut dyn FnMut(usize, f64, &Frame<u8>)) -> Result<(), String> {
+    let s = crate::stitch::params(lens);
+    let stab = stab_of(lens);
+    let tg = m.map(|m| targets(m, &stab)).unwrap_or_default();
+    let fps = if info.fps > 1.0 { info.fps } else { 30.0 };
+    let every = (fps / hz).round().max(1.0) as usize;
+    let mut src = source_for(info, lens, from.max(0.0), (to - from).max(0.1), Some((w / 2).clamp(256, 2048) & !1), false);
+    src.every = every as u32;
+    let mut st = Stitcher::new(&s, src.n() as f64, w as usize, (w / 2) as usize, false, rs_of(m, &stab));
+    let k0 = (from * fps).round().max(0.0) as usize;
+    let sphere = |_t: f64| (I3, None);
+    let inner = setup_fn(m, &tg, k0, &stab, &sphere);
+    let setup = |k: usize, t: f64| inner(k * every, t);
+    let step = every as f64 / fps;
+    let mut cb = |k: usize, f: &Frame<u8>| each(k, from + k as f64 * step, f);
+    pano::run::<u8>(ffmpeg, jobs, tag, gen, &src, &mut st, &setup, Sink::Call(&mut cb), |_| {})?;
+    Ok(())
+}
+
 pub fn rotate_view(rot: M3, w: [f64; 3]) -> M3 {
     mmul(&rot, &expmap(w))
 }
@@ -996,6 +1068,30 @@ pub fn rotate_view(rot: M3, w: [f64; 3]) -> M3 {
 mod tests {
     use super::*;
     use crate::stitch::{matrix, ypr};
+
+    /// The preview's quaternion turns a direction exactly as the engine's matrix does.
+    #[test]
+    fn stab_track_quaternions_match_the_matrix() {
+        let mut rot = Vec::new();
+        for k in 0..40 {
+            rot.push(to9(&matrix(ypr(k as f64 * 3.0, 20.0 + k as f64, -10.0))));
+        }
+        let m = Motion { source: "video".into(), fps: 30.0, rot, readout: 0.0, top_first: true, down: [0.0, 1.0, 0.0], product: String::new(), note: String::new() };
+        let s = Stab { mode: "horizon".into(), ..Default::default() };
+        let qs = stab_track(&m, &s);
+        let tg = targets(&m, &s);
+        assert_eq!(qs.len(), 40);
+        for (i, q) in qs.iter().enumerate() {
+            let want = mv(&mmul(&mt(&m.at(i)), &tg[i]), [0.3, -0.5, 0.81]);
+            let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+            let v = [0.3, -0.5, 0.81];
+            let t = [2.0 * (y * v[2] - z * v[1]), 2.0 * (z * v[0] - x * v[2]), 2.0 * (x * v[1] - y * v[0])];
+            let got = [v[0] + w * t[0] + (y * t[2] - z * t[1]), v[1] + w * t[1] + (z * t[0] - x * t[2]), v[2] + w * t[2] + (x * t[1] - y * t[0])];
+            for a in 0..3 {
+                assert!((got[a] - want[a]).abs() < 1e-3, "frame {i}: {got:?} vs {want:?}");
+            }
+        }
+    }
 
     /// The level panorama and a flat view agree on directions: a view at yaw/pitch shows what sits
     /// at x = (yaw+180)/360·W, y = (90−pitch)/180·H of the panorama (the coordinates the AI reads).

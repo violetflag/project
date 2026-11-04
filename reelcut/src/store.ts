@@ -61,6 +61,8 @@ type S = {
   showSilence: boolean;
   /** 360 motion analysis running, by asset id: percent. */
   motion: Record<string, number>;
+  /** Goes up when an analysis ends (the preview fetches the stabilisation again). */
+  motionRev: number;
   /** AI requests saved for reuse (all projects). */
   prompts: SavedPrompt[];
 };
@@ -69,7 +71,7 @@ export const st: S = {
   route: "home", projects: [], project: null, draftId: null, sourceId: null, folder: "", playhead: 0, selClip: null,
   settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, ccConnect: null, qwenSetup: null, downloads: {}, exportJob: null, toast: "",
   agentBusy: false, agentStatus: "", rightTab: "inspect", leftTab: "media",
-  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, dialog: "", showSafe: false, showSilence: false, motion: {}, prompts: [],
+  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, dialog: "", showSafe: false, showSilence: false, motion: {}, motionRev: 0, prompts: [],
 };
 
 const subs = new Set<() => void>();
@@ -329,7 +331,7 @@ export async function analyzeMotion(id: string) {
 }
 function endMotion(id: string) {
   const { [id]: _, ...rest } = st.motion;
-  set({ motion: rest });
+  set({ motion: rest, motionRev: st.motionRev + 1 });
 }
 
 export async function startTranscribe(id: string) {

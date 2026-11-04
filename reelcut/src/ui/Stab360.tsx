@@ -65,7 +65,7 @@ export function Stab360({ a }: { a: Asset }) {
           {!found && !busy && (
             <button class="small" onClick={() => analyzeMotion(a.id)} title="처음 내보낼 때 할 분석을 미리 해 둡니다 (진행은 아래 상태 표시줄에)">흔들림 분석</button>
           )}
-          <p class="muted tip">흔들림 보정은 미리보기에는 보이지 않고 내보낸 파일에 적용됩니다.</p>
+          <p class="muted tip">분석이 끝나면 미리보기도 내보낼 파일과 같은 방향으로 수평이 맞춰집니다.</p>
         </>
       )}
     </div>
