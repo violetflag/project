@@ -330,11 +330,13 @@ export function rippleConnected(before: Draft, after: Draft): Draft {
   if (before.clips === after.clips || !before.clips.length) return after;
   const ov = overlays(after);
   const moves = (m: { at: number }) => mapTime(before, after, m.at);
-  const changed = ov.some((o) => moves(o) !== o.at) || after.music.some((m) => audioTrack(m) !== 2 && moves(m) !== m.at);
+  const texts = after.texts ?? [];
+  const changed = ov.some((o) => moves(o) !== o.at) || texts.some((t) => moves(t) !== t.at) || after.music.some((m) => audioTrack(m) !== 2 && moves(m) !== m.at);
   if (!changed) return after;
   return {
     ...after,
     overlays: ov.map((o) => ({ ...o, at: moves(o) })),
+    texts: texts.map((t) => ({ ...t, at: moves(t) })),
     music: after.music.map((m) => (audioTrack(m) === 2 ? m : { ...m, at: moves(m) })),
   };
 }

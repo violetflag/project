@@ -7,10 +7,11 @@ import { useState } from "preact/hooks";
 import { pickLut } from "../api";
 import {
   ASPECTS, audioTrack, clipAt, clipDur, DEFAULT_COLOR, DEFAULT_TRANSFORM, DEFAULT_VIEW, detachAudio, fmtTCF, is360, isGap, overlays, parseTC, r3, setTransition, setViewKey, starts,
-  timedDur, updateAudio, updateClip, updateOverlay, viewAt,
+  timedDur, uid, updateAudio, updateClip, updateOverlay, viewAt,
 } from "../edit";
+import { CAPTION_PRESETS, STICKERS, TEXT_KINDS, textLook } from "../graphics";
 import { asset, draft, editDraft, patchAsset, prepare360, st, toast, useStore } from "../store";
-import type { Clip, ColorAdj, Draft, MusicClip, Overlay, Transform, View } from "../types";
+import type { Clip, ColorAdj, Draft, MusicClip, Overlay, TextItem, Transform, View } from "../types";
 import { player } from "./Viewer";
 import { Stab360 } from "./Stab360";
 import { Stitch360 } from "./Stitch360";
@@ -304,6 +305,8 @@ function AudioView({ d, m }: { d: Draft; m: MusicClip }) {
 }
 
 function DraftView({ d }: { d: Draft }) {
+  const addText = (t: Pick<TextItem, "kind" | "text" | "dur" | "sticker">) => editDraft("글자·스티커 넣기", (x) => ({ ...x, texts: [...(x.texts ?? []), { id: uid(), at: Math.round(st.playhead * 100) / 100, ...t }] }), st.draftId, false);
+  const setText = (id: string, patch: Partial<TextItem>) => editDraft("글자·스티커", (x) => ({ ...x, texts: (x.texts ?? []).map((y) => (y.id === id ? { ...y, ...patch } : y)) }), st.draftId, false);
   return (
     <div class="inspector">
       <Section id="draft" title="편집본" term="Sequence Settings">
@@ -318,10 +321,43 @@ function DraftView({ d }: { d: Draft }) {
           </select>
         </label>
       </Section>
+      <Section id="texts" title={`글자·스티커${d.texts?.length ? ` (${d.texts.length})` : ""}`} term="Titles" defaultOpen={false}>
+        <div class="row wrap">
+          {TEXT_KINDS.map((k) => <button class="small" onClick={() => addText({ kind: k.id, text: k.text, dur: k.dur })}>{k.label}</button>)}
+        </div>
+        <div class="row wrap">
+          {Object.entries(STICKERS).map(([id, k]) => <button class="small" title={`${k.label} 스티커`} onClick={() => addText({ kind: "sticker", text: "", sticker: id, dur: 3 })}>{k.label}</button>)}
+        </div>
+        {(d.texts ?? []).slice().sort((a, b) => a.at - b.at).map((t) => (
+          <div class="text-item" key={t.id}>
+            <div class="row">
+              <a onClick={() => player.seek(t.at)} title="그 시각으로">{fmtTCF(t.at, d.fps || 30)}</a>
+              {t.kind === "sticker" ? <span class="muted" style="flex:1">{STICKERS[t.sticker ?? "star"]?.label} 스티커</span>
+                : <input value={t.text} style="flex:1;min-width:0" aria-label="글자" onChange={(e) => setText(t.id, { text: (e.target as HTMLInputElement).value })} />}
+              <button class="icon-btn" aria-label="지우기" title="지우기" onClick={() => editDraft("글자 지우기", (x) => ({ ...x, texts: (x.texts ?? []).filter((y) => y.id !== t.id) }), st.draftId, false)}><Trash2 size={13} /></button>
+            </div>
+            <div class="row">
+              <Num label="길이" value={t.dur} min={0.5} max={60} step={0.5} def={4} unit="초" onChange={(v) => setText(t.id, { dur: v })} />
+              <Num label="크기" value={textLook(t).size} min={2} max={40} step={0.5} def={textLook({ ...t, size: undefined }).size} unit="%" onChange={(v) => setText(t.id, { size: v })} />
+            </div>
+            <div class="row">
+              <Num label="가로" value={Math.round(textLook(t).x * 100)} min={0} max={100} step={1} def={Math.round(textLook({ ...t, x: undefined }).x * 100)} unit="%" onChange={(v) => setText(t.id, { x: v / 100 })} />
+              <Num label="세로" value={Math.round(textLook(t).y * 100)} min={0} max={100} step={1} def={Math.round(textLook({ ...t, y: undefined }).y * 100)} unit="%" onChange={(v) => setText(t.id, { y: v / 100 })} />
+              <label>색<input type="color" value={textLook(t).color} onChange={(e) => setText(t.id, { color: (e.target as HTMLInputElement).value })} /></label>
+            </div>
+          </div>
+        ))}
+      </Section>
       <Section id="captions" title="자막" term="Captions">
         <label class="check"><input type="checkbox" checked={d.captions} onChange={(e) => editDraft("자막", (x) => ({ ...x, captions: (e.target as HTMLInputElement).checked }), st.draftId, false)} /> 받아쓰기로 자막 넣기</label>
         {d.captions && (
           <>
+            <label>자막 모양
+              <select value="" onChange={(e) => { const p = CAPTION_PRESETS.find((k) => k.id === (e.target as HTMLSelectElement).value); if (p) editDraft("자막 모양", (x) => ({ ...x, captionStyle: { ...x.captionStyle, ...p.style } }), st.draftId, false); }}>
+                <option value="">고르기…</option>
+                {CAPTION_PRESETS.map((p) => <option value={p.id}>{p.label}</option>)}
+              </select>
+            </label>
             <Num label="크기" value={d.captionStyle.size} min={2} max={14} step={0.5} def={6} unit="%" onChange={(v) => editDraft("자막 크기", (x) => ({ ...x, captionStyle: { ...x.captionStyle, size: v } }), st.draftId, false)} />
             <Num label="한 줄 글자" value={d.captionStyle.maxChars} min={6} max={40} step={1} def={18} onChange={(v) => editDraft("자막 줄 길이", (x) => ({ ...x, captionStyle: { ...x.captionStyle, maxChars: v } }), st.draftId, false)} />
             <div class="row">

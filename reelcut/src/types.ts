@@ -114,7 +114,20 @@ export type MusicClip = {
 };
 export type Marker = { id: string; t: number; label: string; color: string };
 
-export type CaptionStyle = { size: number; color: string; outline: string; position: "bottom" | "middle" | "top"; maxChars: number; font: string };
+export type CaptionStyle = {
+  size: number; color: string; outline: string; position: "bottom" | "middle" | "top"; maxChars: number; font: string;
+  /** Black box behind the words instead of an outline. */
+  box?: boolean;
+  /** Colour of the word being spoken ("" = no highlight). */
+  highlight?: string;
+  /** The spoken word also grows a little. */
+  pop?: boolean;
+  bold?: boolean;
+};
+
+export type TextKind = "title" | "subtitle" | "lower" | "pin" | "sticker";
+/** A title, place/date pin or sticker on screen from `at` for `dur` seconds (x, y: fractions of the frame; size: % of its height). */
+export type TextItem = { id: string; kind: TextKind; at: number; dur: number; text: string; sticker?: string; x?: number; y?: number; size?: number; color?: string; fade?: number };
 
 export type TrackId = "V1" | "V2" | "V3" | "A1" | "A2" | "A3" | "C1";
 export type TrackState = { mute?: boolean; hide?: boolean; lock?: boolean; solo?: boolean };
@@ -131,6 +144,8 @@ export type Draft = {
   markers: Marker[];
   captions: boolean;
   captionStyle: CaptionStyle;
+  /** Titles, pins and stickers. */
+  texts?: TextItem[];
   /** Output aspect: 16:9 | 9:16 | 1:1 | 4:5 */
   aspect: string;
   fps: number;

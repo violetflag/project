@@ -76,6 +76,7 @@ export const api = {
   qwenSetup: () => invoke<void>("qwen_setup"),
   setDataDir: (path: string) => invoke<void>("set_data_dir", { path }),
   export: (id: string, plan: Plan) => invoke<string>("export", { id, plan }),
+  saveSrt: (video: string, text: string) => invoke<string>("save_srt", { video, text }),
   cancel: (tag: string) => invoke<number>("cancel", { tag }),
   reveal: (path: string) => invoke<void>("reveal", { path }),
   pathExists: (path: string) => invoke<boolean>("path_exists", { path }),

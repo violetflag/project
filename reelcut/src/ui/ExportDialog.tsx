@@ -180,6 +180,7 @@ export function ExportDialog({ draft: d, onClose }: { draft: Draft; onClose: () 
               </select>
             </label>
           )}
+          {d?.captions && <label class="check"><input type="checkbox" checked={!!c.srt} onChange={(e) => up({ srt: (e.target as HTMLInputElement).checked })} /> 자막 파일(SRT)도 같이 저장</label>}
           <label class="check"><input type="checkbox" checked={!!c.loudnorm} onChange={(e) => up({ loudnorm: (e.target as HTMLInputElement).checked })} /> 소리 크기 맞추기 (−14 LUFS, 유튜브 기준) · Loudness Normalize</label>
           <label class="check"><input type="checkbox" checked={!!c.duck} disabled={!d.music.length} onChange={(e) => up({ duck: (e.target as HTMLInputElement).checked })} /> 말할 때 음악 자동으로 줄이기 · Ducking</label>
           <div class="row">

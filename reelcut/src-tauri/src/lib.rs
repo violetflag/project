@@ -810,6 +810,14 @@ fn engine_prepass(app: &App, tag: &str, gen: u64, plan: &render::Plan, work: &Pa
     Ok(Some(p2))
 }
 
+/// Saves the captions as a subtitle file next to the exported video.
+#[tauri::command]
+fn save_srt(video: String, text: String) -> Result<String, String> {
+    let p = Path::new(&video).with_extension("srt");
+    std::fs::write(&p, format!("\u{feff}{text}")).map_err(|e| e.to_string())?;
+    Ok(p.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn cancel(app: St<'_>, tag: String) -> u64 {
     app.jobs.cancel(&tag)
@@ -1002,6 +1010,7 @@ pub fn run() {
             analyze_motion,
             live_url,
             eq_sheet,
+            save_srt,
             scan_shots,
             find_faces,
             track_people,

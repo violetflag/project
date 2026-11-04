@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
-import { mergeScenes, playableInWebView, previewSource, searchScenes } from "../src/edit";
+import { captionLines, toAss } from "../src/captions";
+import { STICKERS, stickerSvgPath, textEvent, textLook } from "../src/graphics";
+import { DEFAULT_CAPTION, mergeScenes, playableInWebView, previewSource, searchScenes } from "../src/edit";
 import { dirToDfisheye } from "../src/gl360";
 import type { Asset, MediaInfo } from "../src/types";
 
@@ -67,5 +69,40 @@ describe("scene notes", () => {
     expect(hits.map((h) => h.asset)).toContain("b");
     expect(searchScenes(assets, "   ")).toEqual([]);
     expect(searchScenes(assets, "바닷가")).toEqual([]);
+  });
+});
+
+describe("titles, stickers and caption looks", () => {
+  const word = (t: string, t0: number, t1: number) => ({ t, s: t0, e: t1, t0, t1, clip: "c", ci: 0, wi: 0, asset: "a" });
+  it("writes titles and pins with position, size and fade, on top of the captions", () => {
+    const e = textEvent({ id: "1", kind: "title", at: 2, dur: 3, text: "식물원 나들이" }, 1920, 1080);
+    expect(e).toContain("Dialogue: 2,0:00:02.00,0:00:05.00,Default");
+    expect(e).toContain("\\pos(960,454)");
+    expect(e).toContain("\\fs119");
+    expect(e).toContain("\\fad(300,300)");
+    const pin = textEvent({ id: "2", kind: "pin", at: 0, dur: 5, text: "식물원 · 2026.10.25" }, 1920, 1080);
+    expect(pin).toContain("\\p1");
+    expect(pin).toContain("식물원 · 2026.10.25");
+  });
+  it("draws stickers as the same shape in the export and the preview", () => {
+    const e = textEvent({ id: "3", kind: "sticker", at: 1, dur: 2, text: "", sticker: "heart", size: 20 }, 1000, 1000);
+    expect(e).toContain(STICKERS.heart.path);
+    expect(e).toContain("\\fscx200");
+    expect(stickerSvgPath("heart").startsWith("M 50 90 C")).toBe(true);
+    expect(textLook({ id: "4", kind: "sticker", at: 0, dur: 1, text: "", sticker: "star" }).color).toBe(STICKERS.star.color);
+  });
+  it("colours the word being spoken, one event per word", () => {
+    const lines = captionLines([word("안녕", 1, 1.5), word("하세요", 1.5, 2)], 18);
+    const ass = toAss(lines, { ...DEFAULT_CAPTION, highlight: "#FFE14D" }, 1280, 720);
+    const ev = ass.split("\n").filter((l) => l.startsWith("Dialogue"));
+    expect(ev).toHaveLength(2);
+    expect(ev[0]).toContain("{\\c&H004DE1FF&}안녕{\\r} 하세요");
+    expect(ev[1]).toContain("안녕 {\\c&H004DE1FF&}하세요{\\r}");
+    const plain = toAss(lines, DEFAULT_CAPTION, 1280, 720).split("\n").filter((l) => l.startsWith("Dialogue"));
+    expect(plain).toHaveLength(1);
+  });
+  it("uses a box instead of an outline when asked", () => {
+    const ass = toAss([], { ...DEFAULT_CAPTION, box: true }, 1280, 720);
+    expect(ass.split("\n").find((l) => l.startsWith("Style: Default"))).toMatch(/,3,\d+,0,2,/);
   });
 });

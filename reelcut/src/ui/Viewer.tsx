@@ -12,6 +12,7 @@ import {
   parseTC, playableInWebView, previewSource, setViewKey, starts, timedDur, trackState, updateClip, viewAt,
 } from "../edit";
 import { Flat360, type Proj } from "../gl360";
+import { STICKERS, stickerSvgPath, textLook } from "../graphics";
 import { analyzeMotion, asset, assetMap, draft, editDraft, set, st, toast, useStore } from "../store";
 import type { Asset, Clip, ColorAdj, Draft, Overlay, Transform, View } from "../types";
 
@@ -703,7 +704,30 @@ export function Viewer() {
           <img ref={o3i} class="ov ov3" alt="" style={{ display: "none" }} />
           {noPreview && <div class="overlay no-preview" role="note">{NO_PREVIEW}</div>}
           {!shown && !hitClip && <div class="overlay muted">{d && !d.clips.length ? "미디어를 타임라인에 끌어다 놓거나, 미디어를 두 번 눌러 구간을 골라 넣으세요." : ""}</div>}
-          {line && <div class={`caption ${d!.captionStyle.position}`} style={{ fontSize: `${d!.captionStyle.size * 0.9}cqh`, color: d!.captionStyle.color }}>{line.text}</div>}
+          {line && (
+            <div class={`caption ${d!.captionStyle.position} ${d!.captionStyle.box ? "boxed" : ""}`} style={{ fontSize: `${d!.captionStyle.size * 0.9}cqh`, color: d!.captionStyle.color, fontWeight: d!.captionStyle.bold === false ? 400 : 700 }}>
+              <span>{d!.captionStyle.highlight && line.words?.length
+                ? line.words.map((w, i) => {
+                    const on = s.playhead >= w.t0 && (i + 1 < line.words!.length ? s.playhead < line.words![i + 1].t0 : s.playhead < line.t1);
+                    return <>{i ? " " : ""}<span style={on ? { color: d!.captionStyle.highlight, display: "inline-block", transform: d!.captionStyle.pop ? "scale(1.12)" : undefined } : undefined}>{w.t}</span></>;
+                  })
+                : line.text}</span>
+            </div>
+          )}
+          {!src && (d?.texts ?? []).filter((t) => s.playhead >= t.at && s.playhead < t.at + t.dur && !trackState(d!, "C1").hide).map((t) => {
+            const l = textLook(t);
+            const pos = { left: `${l.x * 100}%`, top: `${l.y * 100}%`, transform: l.align === "left" ? "translateY(-50%)" : "translate(-50%, -50%)" };
+            if (t.kind === "sticker") {
+              const sk = STICKERS[t.sticker ?? "star"] ?? STICKERS.star;
+              return <svg class="stk" viewBox="0 0 100 100" style={{ ...pos, transform: "translate(-50%, -50%)", height: `${l.size}cqh`, width: `${l.size}cqh` }} aria-hidden="true"><path d={stickerSvgPath(t.sticker ?? "star")} fill={sk.ring ? "none" : l.color} stroke={sk.ring ? l.color : "#000"} stroke-width={sk.ring ? 7 : 2} /></svg>;
+            }
+            return (
+              <div class={`txt ${l.box ? "boxed" : ""}`} style={{ ...pos, fontSize: `${l.size * 0.9}cqh`, color: l.color, fontWeight: l.bold ? 700 : 400 }}>
+                {t.kind === "pin" && <svg viewBox="0 0 100 100" class="pin" aria-hidden="true"><path d={stickerSvgPath("pin")} fill={STICKERS.pin.color} fill-rule="evenodd" /></svg>}
+                <span>{t.text}</span>
+              </div>
+            );
+          })}
           {r360 && <div class="hint360">360° · 끌어서 방향, 휠로 화각 · yaw {Math.round(player.currentView().yaw)}° pitch {Math.round(player.currentView().pitch)}° 화각 {Math.round(player.currentView().hfov)}°{hitClip?.viewKeys?.length ? " · 키프레임" : ""}{fish ? " · 미리보기는 이음새 맞춤 전 (내보낸 파일에 적용)" : shownSrc?.live ? " · 원본 실시간 스티칭" : ""}</div>}
           {opening && <div class="hint-r info">원본 여는 중…</div>}
           {(lut || ov360) && <div class="hint-r">{lut ? "LUT·색온도는 내보낸 파일에 정확히 반영됩니다" : "360 V2/V3는 내보낸 파일에서 보입니다"}</div>}

@@ -8,11 +8,12 @@ import {
   type Pacing, mergeScenes, searchScenes,
 } from "./edit";
 import { exportAndWait } from "./exporter";
+import { CAPTION_PRESETS, TEXT_KINDS } from "./graphics";
 import { cleanKeys, frameGroup, frameSubject, normView, sampleKeys, snapRanges, type Mark, type Subject } from "./framing";
 import { PLAYBOOK_360 } from "./playbook";
 import { compactBudget, ctxLimit, estTokens, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
 import { activeChat, asset, assetMap, editDraft, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
-import type { Asset, ChatBlock, ChatMsg, ChatSession, Draft, View, ViewKey } from "./types";
+import type { Asset, ChatBlock, ChatMsg, ChatSession, Draft, TextItem, View, ViewKey } from "./types";
 
 export const MODELS = [
   { id: "claude-opus-5-5", label: "Claude Opus 5.5" },
@@ -118,8 +119,17 @@ export const TOOLS = [
   },
   {
     name: "set_captions", description: "받아쓰기로 만든 자막을 켜고 끄거나 모양을 바꿉니다.",
-    input_schema: { type: "object", properties: { draft_id: draftId, enabled: { type: "boolean" }, size: { ...num, description: "화면 높이 대비 % (기본 6)" }, position: { type: "string", enum: ["bottom", "middle", "top"] }, max_chars: num }, required: ["enabled"] },
+    input_schema: { type: "object", properties: { draft_id: draftId, enabled: { type: "boolean" }, style: { type: "string", enum: ["basic", "yellow", "box", "karaoke", "pop", "soft"], description: "자막 모양: 기본, 노란 글자, 검은 상자, 말하는 단어 강조, 강조+톡 튀는 단어(쇼츠), 얇고 차분하게" }, size: { ...num, description: "화면 높이 대비 % (기본 6)" }, position: { type: "string", enum: ["bottom", "middle", "top"] }, max_chars: num }, required: ["enabled"] },
   },
+  {
+    name: "add_text", description: "제목, 작은 제목, 설명 막대(lower), 장소·날짜 핀(pin), 스티커(sticker)를 화면에 올립니다. 내보낸 파일에 그대로 들어갑니다. at=편집본 시각(초), dur=길이. x·y는 화면 비율(0~1), size는 화면 높이 대비 %(비우면 종류별 기본값). 스티커 sticker: heart, star, pin, arrow, bubble, circle. 촬영 날짜는 get_project_overview의 '촬영'에서 읽어 핀 글자에 넣으세요.",
+    input_schema: {
+      type: "object",
+      properties: { draft_id: draftId, items: { type: "array", items: { type: "object", properties: { kind: { type: "string", enum: ["title", "subtitle", "lower", "pin", "sticker"] }, text: str, sticker: str, at: num, dur: num, x: num, y: num, size: num, color: str }, required: ["kind", "at"] } } },
+      required: ["items"],
+    },
+  },
+  { name: "remove_text", description: "add_text로 올린 글자·스티커를 지웁니다. ids가 없으면 전부 지웁니다. 지금 있는 항목은 get_draft에 나옵니다.", input_schema: { type: "object", properties: { draft_id: draftId, ids: { type: "array", items: str } } } },
   { name: "transcribe", description: "미디어를 받아쓰기합니다 (끝날 때까지 기다림).", input_schema: { type: "object", properties: { asset_ids: { type: "array", items: str } }, required: ["asset_ids"] } },
   {
     name: "get_playbook", description: "작업별 단계별 지침을 읽습니다. name=360_auto_edit: 360 영상을 사람 따라가며 자동 편집하는 순서.",
@@ -187,7 +197,7 @@ export const TOOLS = [
   { name: "delete_draft", description: "편집본을 지웁니다 (마지막 하나는 지울 수 없고, Ctrl+Z로 되돌릴 수 있습니다).", input_schema: { type: "object", properties: { draft_id: str }, required: ["draft_id"] } },
   {
     name: "export_draft", description: "편집본을 파일로 내보냅니다 (끝날 때까지 기다림). preset: fhd/4k/hd/sd는 일반 H.264 MP4, shrink_balanced/shrink_small/shrink_archive/shrink_lecture는 크기를 많이 줄이는 고압축(AV1/HEVC), audio는 WAV 소리만.",
-    input_schema: { type: "object", properties: { draft_id: draftId, preset: { type: "string", enum: ["4k", "fhd", "hd", "sd", "shrink_archive", "shrink_balanced", "shrink_small", "shrink_lecture", "audio"] }, file_name: str }, required: ["preset"] },
+    input_schema: { type: "object", properties: { srt: { type: "boolean", description: "자막 파일(SRT)도 같이 저장" }, draft_id: draftId, preset: { type: "string", enum: ["4k", "fhd", "hd", "sd", "shrink_archive", "shrink_balanced", "shrink_small", "shrink_lecture", "audio"] }, file_name: str }, required: ["preset"] },
   },
 ];
 
@@ -233,6 +243,7 @@ function draftInfo(d: Draft): string {
   if (ov.length) lines.push("V2/V3:", ...ov.map((o) => `- ${o.id} | V${o.track} | ${am.get(o.asset)?.info.name} | 원본 ${o.start}–${o.end} | 타임라인 ${o.at}부터 | 변형 ${JSON.stringify(o.transform ?? {})}`));
   if (d.music.length) lines.push("소리 (A1 대사 / A2 음악 / A3 효과음):", ...d.music.map((m) => `- ${m.id} | A${m.track ?? 2} | ${am.get(m.asset)?.info.name} | 원본 ${m.start}–${m.end} | 타임라인 ${m.at}부터 | 음량 ${m.volume}`));
   if (d.markers.length) lines.push("마커:", ...d.markers.map((m) => `- ${r3(m.t)}초 ${m.label}`));
+  if (d.texts?.length) lines.push("글자·스티커:", ...d.texts.map((t) => `- ${t.id} | ${t.kind}${t.sticker ? ` ${t.sticker}` : ""} | ${r3(t.at)}–${r3(t.at + t.dur)}초 | ${t.text}`));
   return lines.join("\n");
 }
 
@@ -572,11 +583,27 @@ async function run(name: string, inp: any): Promise<Out> {
       editDraft("AI: 마커", (d) => ({ ...d, markers: [...d.markers, ...(inp.markers as any[]).map((m) => ({ id: uid(), t: Number(m.time), label: String(m.label), color: m.color || "#FFB020" }))] }), d0.id);
       return `마커 ${inp.markers.length}개를 달았습니다.`;
     }
+    case "add_text": {
+      const d0 = getDraft(inp.draft_id);
+      const add: TextItem[] = (inp.items ?? []).map((m: any) => {
+        const k = TEXT_KINDS.find((x) => x.id === m.kind);
+        return { id: uid(), kind: m.kind, at: Math.max(0, Number(m.at) || 0), dur: Math.max(0.3, Number(m.dur) || k?.dur || 3), text: String(m.text ?? ""), sticker: m.sticker, x: m.x, y: m.y, size: m.size, color: m.color };
+      });
+      editDraft("AI: 글자·스티커", (d) => ({ ...d, texts: [...(d.texts ?? []), ...add] }), d0.id, false);
+      return `${add.length}개를 올렸습니다: ${add.map((t) => `${t.id} ${t.kind} ${r3(t.at)}초`).join(", ")}`;
+    }
+    case "remove_text": {
+      const d0 = getDraft(inp.draft_id);
+      const ids: string[] | undefined = inp.ids;
+      editDraft("AI: 글자 지우기", (d) => ({ ...d, texts: ids?.length ? (d.texts ?? []).filter((t) => !ids.includes(t.id)) : [] }), d0.id, false);
+      return "지웠습니다.";
+    }
     case "set_captions": {
       const d0 = getDraft(inp.draft_id);
+      const look = CAPTION_PRESETS.find((p) => p.id === inp.style)?.style ?? {};
       editDraft("AI: 자막", (d) => ({
         ...d, captions: !!inp.enabled,
-        captionStyle: { ...d.captionStyle, ...(inp.size ? { size: Number(inp.size) } : {}), ...(inp.position ? { position: inp.position } : {}), ...(inp.max_chars ? { maxChars: Number(inp.max_chars) } : {}) },
+        captionStyle: { ...d.captionStyle, ...look, ...(inp.size ? { size: Number(inp.size) } : {}), ...(inp.position ? { position: inp.position } : {}), ...(inp.max_chars ? { maxChars: Number(inp.max_chars) } : {}) },
       }), d0.id);
       const n = draftWords(getDraft(d0.id), assetMap()).length;
       return inp.enabled ? `자막을 켰습니다 (단어 ${n}개 기준).${n ? "" : " 받아쓰기가 없어 자막이 비어 있습니다."}` : "자막을 껐습니다.";
@@ -605,10 +632,10 @@ async function run(name: string, inp: any): Promise<Out> {
       set({ agentStatus: "내보내는 중…" });
       const e = await exportAndWait(d, {
         mode: pr === "audio" ? "audio" : shrink ? "shrink" : "standard", quality: shrink ? "fhd" : pr, preset: shrink ? pr.slice(7) : "balanced",
-        codec: "auto", container: "mkv", dir: "", name: inp.file_name ?? "",
+        codec: "auto", container: "mkv", dir: "", name: inp.file_name ?? "", srt: !!inp.srt,
       });
       if (e.state !== "done") return `내보내기 실패: ${e.message}`;
-      return `내보냈습니다: ${e.result.path} (${(e.result.size / 1048576).toFixed(1)}MB, ${r3(e.result.duration)}초)${e.message ? " 경고: " + e.message : ""}`;
+      return `내보냈습니다: ${e.result.path} (${(e.result.size / 1048576).toFixed(1)}MB, ${r3(e.result.duration)}초)${inp.srt ? ` 자막 파일: ${String(e.result.path).replace(/\.[^.\/]+$/, ".srt")}` : ""}${e.message ? " 경고: " + e.message : ""}`;
     }
   }
   throw new Error(`알 수 없는 도구: ${name}`);
@@ -816,7 +843,7 @@ export const TOOL_LABEL: Record<string, string> = {
   get_project_overview: "프로젝트 살펴보는 중", get_transcript: "대본 읽는 중", search_transcript: "대본 찾는 중", view_frames: "장면 보는 중",
   contact_sheet: "영상 훑어보는 중", create_draft: "편집본 만드는 중", get_draft: "편집본 확인 중", edit_draft: "편집하는 중",
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
-  save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
+  add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
 
