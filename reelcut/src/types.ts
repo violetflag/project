@@ -109,6 +109,8 @@ export type Clip = {
   denoise?: boolean;
   /** Cross-dissolve with the previous clip (seconds, 0 = cut). */
   xin?: number;
+  /** Switched off: stays on the timeline but is black and silent. */
+  disabled?: boolean;
   /** The look of that dissolve (see TRANSITIONS). */
   xtype?: string;
   /** Moves over the clip: zoom, pan, picture fade. */
@@ -121,14 +123,14 @@ export type Clip = {
 /** A clip on track V2/V3, placed at a timeline time over the main track. */
 export type Overlay = {
   id: string; asset: string; track: 2 | 3; at: number; start: number; end: number; speed: number; volume: number;
-  anim?: AnimKey[]; volKeys?: VolKey[];
+  anim?: AnimKey[]; volKeys?: VolKey[]; disabled?: boolean;
   view?: View; viewKeys?: ViewKey[]; transform?: Transform; color?: ColorAdj; fadeIn?: number; fadeOut?: number;
 };
 
 /** Sound on track A1 (sound split from a clip), A2 (music) or A3 (effects). */
 export type MusicClip = {
   id: string; asset: string; start: number; end: number; at: number; volume: number; fadeIn: number; fadeOut: number;
-  volKeys?: VolKey[];
+  volKeys?: VolKey[]; disabled?: boolean;
   track?: 1 | 2 | 3; denoise?: boolean;
 };
 export type Marker = { id: string; t: number; label: string; color: string };
@@ -250,6 +252,8 @@ export type Settings = {
   exportPresets?: SavedExport[];
   /** What the AI should always keep in mind (added to its instructions), e.g. "our children are twins". */
   aiNotes?: string;
+  /** Shortcut changes: command id → keys ("" = none). */
+  keys?: Record<string, string>;
   /** Context limits in tokens (Haiku models / all others) and the compaction rule in percent. */
   ctxHaiku?: number;
   ctxOther?: number;

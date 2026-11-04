@@ -7,6 +7,7 @@ import {
   newClip, newDraft, newGap, newOverlay, r3, removeFillers, removeItem, removeRange, removeSilences, setTransition, splitAt, speechFromWave, speechFromWords, starts, transcriptText, uid, updateClip, updateOverlay, viewAt,
   fitMusic, movePreset, overlays,
   LOOKS, multicamDraft,
+  pasteAttrs,
   type Pacing, mergeScenes, searchScenes,
 } from "./edit";
 import { exportAndWait } from "./exporter";
@@ -99,7 +100,8 @@ export const TOOLS = [
   (x/y: 화면 대비 중심 이동 -1~1, scale 1=원래, exposure 스톱 -2~2, contrast/saturation 1=그대로, temperature 6500=그대로)
 - {op:"set_view_keys", clip_id, keys:[{t,yaw,pitch,roll,hfov},…], merge?}: 360 클립의 시점 키프레임 (t=원본 초, 키 사이는 부드럽게). merge=true면 기존 키에 더하고 같은 시각은 바꿈. 사람 따라가기는 frame_subject가 더 쉽습니다
 - {op:"clear_view_keys", clip_id}: 시점 키프레임 지우기
-- {op:"transition", clip_id, seconds, type}: 이 클립과 앞 클립 사이 전환 (0이면 컷). type: fade(디졸브), fadeblack, fadewhite, fadegrays, wipeleft, slideleft, smoothleft, circleopen, circlecrop, rectcrop, radial, zoomin, pixelize, hblur
+- {op:"transition", clip_id, seconds, type}: 이 클립과 앞 클립 사이 전환 (0이면 컷). type: fade(디졸브), dissolve, fadeblack, fadewhite, fadegrays, distance, wipeleft/right/up/down, slideleft/right/up/down, smoothleft/right, circleopen, circleclose, circlecrop, rectcrop, vertopen, horzopen, radial, diagtl, diagbr, squeezeh, zoomin, pixelize
+- {op:"set_enabled", item_id, enabled}: 클립·V2/V3·소리를 끄고 켭니다. 끈 클립은 자리를 차지한 채 검은 화면과 무음이 됩니다
 - {op:"gap", index, seconds}: 빈칸(검은 화면·무음) 넣기
 - {op:"detach_audio", clip_id}: 클립 소리를 A1으로 분리
 - {op:"rename", name} / {op:"aspect", aspect}
@@ -138,6 +140,10 @@ export const TOOLS = [
   {
     name: "set_look", description: "클립에 색 룩을 입힙니다: warm(따뜻한 필름), cool(시원하게), vivid(생생하게), soft(부드럽게), bw(흑백), none(원래대로). 세부 값은 color로 직접 줄 수 있습니다: exposure, contrast, saturation, temperature, tint, highlights, shadows, vibrance, vignette.",
     input_schema: { type: "object", properties: { draft_id: draftId, clip_ids: { type: "array", items: str }, look: { type: "string", enum: ["warm", "cool", "vivid", "soft", "bw", "none"] }, color: { type: "object", properties: { exposure: num, contrast: num, saturation: num, temperature: num, tint: num, highlights: num, shadows: num, vibrance: num, vignette: num } } } },
+  },
+  {
+    name: "paste_attributes", description: "한 클립의 설정을 다른 클립들로 복사합니다. attrs: color(색), transform(위치·크기), motion(움직임), speed, sound(음량·잡음), fades, transition, view(360 시점). to_clip_ids가 없으면 편집본의 모든 클립.",
+    input_schema: { type: "object", properties: { draft_id: draftId, from_clip_id: str, to_clip_ids: { type: "array", items: str }, attrs: { type: "array", items: str } }, required: ["from_clip_id", "attrs"] },
   },
   {
     name: "set_motion", description: "클립이나 V2/V3 그림에 움직임을 넣습니다. preset: zoom_in(천천히 확대), zoom_out, pan_right, pan_left, none(끄기) — 사진에 생동감을 줄 때 좋습니다. 직접 하려면 keys: [{t(원본 초), scale, x, y(화면 비율 이동), opacity}]. 키 사이는 부드럽게 이어집니다.",
@@ -279,7 +285,7 @@ function draftInfo(d: Draft): string {
   d.clips.forEach((c, i) => {
     if (isGap(c)) { lines.push(`${i} | ${c.id} | (빈칸) | - | ${r3(stt[i])}–${r3(stt[i] + clipDur(c))} | - | - | -`); return; }
     const a = am.get(c.asset);
-    const extra = [c.xin ? `디졸브 ${c.xin}초` : "", c.transform && !isDefaultTransform(c.transform) ? `변형 ${JSON.stringify(c.transform)}` : "", c.color && !isDefaultColor(c.color) ? `색 ${JSON.stringify(c.color)}` : "", c.detached ? "소리 분리됨" : "", c.viewKeys?.length ? `시점 키프레임 ${c.viewKeys.length}개(원본 ${c.viewKeys[0].t}–${c.viewKeys[c.viewKeys.length - 1].t}초)` : ""].filter(Boolean).join(", ");
+    const extra = [c.xin ? `전환 ${c.xtype ?? "fade"} ${c.xin}초` : "", c.disabled ? "꺼짐" : "", c.transform && !isDefaultTransform(c.transform) ? `변형 ${JSON.stringify(c.transform)}` : "", c.color && !isDefaultColor(c.color) ? `색 ${JSON.stringify(c.color)}` : "", c.detached ? "소리 분리됨" : "", c.viewKeys?.length ? `시점 키프레임 ${c.viewKeys.length}개(원본 ${c.viewKeys[0].t}–${c.viewKeys[c.viewKeys.length - 1].t}초)` : ""].filter(Boolean).join(", ");
     lines.push(`${i} | ${c.id} | ${a?.info.name ?? "?"}(${c.asset}) | ${r3(c.start)}–${r3(c.end)} | ${r3(stt[i])}–${r3(stt[i] + clipDur(c))} | ${c.speed}x | ${c.volume} | ${c.view ? `yaw ${c.view.yaw} pitch ${c.view.pitch} hfov ${c.view.hfov}` : "-"}${extra ? ` | ${extra}` : ""}`);
   });
   const ov = d.overlays ?? [];
@@ -355,6 +361,11 @@ function applyOps(d: Draft, ops: any[]): Draft {
         break;
       }
       case "clear_view_keys": d = updateClip(d, o.clip_id, { viewKeys: undefined }); break;
+      case "set_enabled": {
+        const flip = <T extends { id: string; disabled?: boolean }>(x: T) => (x.id === o.item_id ? { ...x, disabled: o.enabled === false } : x);
+        d = { ...d, clips: d.clips.map(flip), overlays: (d.overlays ?? []).map(flip), music: d.music.map(flip) };
+        break;
+      }
       case "transition": d = setTransition(d, o.clip_id, Number(o.seconds ?? 0.5)); if (o.type) d = updateClip(d, o.clip_id, { xtype: String(o.type) }); break;
       case "gap": d = insertClips(d, [newGap(Number(o.seconds ?? 1))], o.index ?? d.clips.length); break;
       case "detach_audio": d = detachAudio(d, o.clip_id); break;
@@ -717,6 +728,18 @@ async function run(name: string, inp: any): Promise<Out> {
       editDraft("AI: 색", () => d, d0.id, false);
       return `클립 ${n}개의 색을 바꿨습니다.`;
     }
+    case "paste_attributes": {
+      const d0 = getDraft(inp.draft_id);
+      const from = d0.clips.find((c) => c.id === inp.from_clip_id);
+      if (!from) throw new Error(`클립 없음: ${inp.from_clip_id}`);
+      let n = 0;
+      editDraft("AI: 속성 붙여넣기", (x) => ({ ...x, clips: x.clips.map((c) => {
+        if (isGap(c) || c.id === from.id || (inp.to_clip_ids?.length && !inp.to_clip_ids.includes(c.id))) return c;
+        n++;
+        return pasteAttrs(c, from, inp.attrs ?? []);
+      }) }), d0.id);
+      return `클립 ${n}개에 붙여 넣었습니다.`;
+    }
     case "set_motion": {
       const d0 = getDraft(inp.draft_id);
       const c = d0.clips.find((x) => x.id === inp.item_id);
@@ -1004,7 +1027,7 @@ export const TOOL_LABEL: Record<string, string> = {
   get_project_overview: "프로젝트 살펴보는 중", get_transcript: "대본 읽는 중", search_transcript: "대본 찾는 중", view_frames: "장면 보는 중",
   contact_sheet: "영상 훑어보는 중", create_draft: "편집본 만드는 중", get_draft: "편집본 확인 중", edit_draft: "편집하는 중",
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
-  sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", show_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
+  paste_attributes: "속성 붙여넣는 중", sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", show_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
 

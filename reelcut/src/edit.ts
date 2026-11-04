@@ -66,11 +66,76 @@ export const is360 = (a?: Asset) => !!a && a.info.layout360 !== "none" && a.info
 
 /** The looks a dissolve can have (the export's xfade names). */
 export const TRANSITIONS: { id: string; label: string }[] = [
-  { id: "fade", label: "디졸브" }, { id: "fadeblack", label: "검은 화면 거쳐" }, { id: "fadewhite", label: "흰 화면 거쳐" }, { id: "fadegrays", label: "흑백 거쳐" },
-  { id: "wipeleft", label: "닦아 내기" }, { id: "slideleft", label: "밀어 내기" }, { id: "smoothleft", label: "부드럽게 밀기" }, { id: "circleopen", label: "원 열기" },
-  { id: "circlecrop", label: "원 닫고 열기" }, { id: "rectcrop", label: "네모 닫고 열기" }, { id: "radial", label: "시계 방향" }, { id: "zoomin", label: "확대하며" },
-  { id: "pixelize", label: "모자이크" }, { id: "hblur", label: "가로 흐림" },
+  { id: "fade", label: "디졸브" }, { id: "dissolve", label: "점점이 녹이기" }, { id: "fadeblack", label: "검은 화면 거쳐" }, { id: "fadewhite", label: "흰 화면 거쳐" },
+  { id: "fadegrays", label: "흑백 거쳐" }, { id: "distance", label: "밝기로 스며들기" }, { id: "wipeleft", label: "닦기 ←" }, { id: "wiperight", label: "닦기 →" },
+  { id: "wipeup", label: "닦기 ↑" }, { id: "wipedown", label: "닦기 ↓" }, { id: "slideleft", label: "밀기 ←" }, { id: "slideright", label: "밀기 →" },
+  { id: "slideup", label: "밀기 ↑" }, { id: "slidedown", label: "밀기 ↓" }, { id: "smoothleft", label: "부드럽게 밀기 ←" }, { id: "smoothright", label: "부드럽게 밀기 →" },
+  { id: "circleopen", label: "원 열기" }, { id: "circleclose", label: "원 닫기" }, { id: "circlecrop", label: "원 닫고 열기" }, { id: "rectcrop", label: "네모 닫고 열기" },
+  { id: "vertopen", label: "좌우로 열기" }, { id: "horzopen", label: "위아래로 열기" }, { id: "radial", label: "시계 방향" }, { id: "diagtl", label: "대각선 ↖" },
+  { id: "diagbr", label: "대각선 ↘" }, { id: "squeezeh", label: "옆으로 눌러 넘기기" }, { id: "zoomin", label: "확대하며" }, { id: "pixelize", label: "모자이크" },
 ];
+
+export type TransitionLook = { opacity?: number; clipPath?: string; transform?: string; filter?: string; mask?: string; veil?: { color: string; opacity: number }; hide?: boolean };
+
+/** How the outgoing picture (laid over the incoming one) looks `p` (0–1) through a transition, for the preview. */
+export function transitionLook(type: string | undefined, p0: number): TransitionLook {
+  const p = Math.max(0, Math.min(1, p0));
+  const n = (v: number) => Math.round(v * 1000) / 10;
+  switch (type) {
+    case "fadeblack": case "fadewhite": return { hide: p >= 0.5, veil: { color: type === "fadeblack" ? "#000" : "#fff", opacity: 1 - Math.abs(2 * p - 1) } };
+    case "fadegrays": return { opacity: 1 - p, filter: `grayscale(${Math.min(1, 2 * p)})` };
+    case "wipeleft": case "smoothleft": return { clipPath: `inset(0 ${n(p)}% 0 0)` };
+    case "wiperight": case "smoothright": return { clipPath: `inset(0 0 0 ${n(p)}%)` };
+    case "wipeup": return { clipPath: `inset(0 0 ${n(p)}% 0)` };
+    case "wipedown": return { clipPath: `inset(${n(p)}% 0 0 0)` };
+    case "slideleft": return { transform: `translateX(${-n(p)}%)` };
+    case "slideright": return { transform: `translateX(${n(p)}%)` };
+    case "slideup": return { transform: `translateY(${-n(p)}%)` };
+    case "slidedown": return { transform: `translateY(${n(p)}%)` };
+    case "circleopen": { const r = n(p * 0.75); return { mask: `radial-gradient(circle at center, transparent ${r}%, #000 ${r}%)` }; }
+    case "circleclose": return { clipPath: `circle(${n((1 - p) * 0.75)}% at center)` };
+    case "circlecrop": return { clipPath: `circle(${n((1 - p) * 0.75)}% at center)`, veil: { color: "#000", opacity: p > 0.5 ? 2 - 2 * p : 2 * p } };
+    case "rectcrop": return { clipPath: `inset(${n(p / 2)}%)`, veil: { color: "#000", opacity: p > 0.5 ? 2 - 2 * p : 2 * p } };
+    case "vertopen": return { mask: `linear-gradient(to right, #000 ${n((1 - p) / 2)}%, transparent ${n((1 - p) / 2)}%, transparent ${n((1 + p) / 2)}%, #000 ${n((1 + p) / 2)}%)` };
+    case "horzopen": return { mask: `linear-gradient(to bottom, #000 ${n((1 - p) / 2)}%, transparent ${n((1 - p) / 2)}%, transparent ${n((1 + p) / 2)}%, #000 ${n((1 + p) / 2)}%)` };
+    case "radial": return { mask: `conic-gradient(transparent ${Math.round(p * 360)}deg, #000 0)` };
+    case "diagtl": return { mask: `linear-gradient(135deg, transparent ${n(p)}%, #000 ${n(p)}%)` };
+    case "diagbr": return { mask: `linear-gradient(315deg, transparent ${n(p)}%, #000 ${n(p)}%)` };
+    case "squeezeh": return { transform: `scaleX(${(1 - p).toFixed(3)})` };
+    case "zoomin": return { opacity: 1 - p, transform: `scale(${(1 + p).toFixed(3)})` };
+    case "pixelize": return { opacity: 1 - p, filter: `blur(${(p * 14).toFixed(1)}px)` };
+    default: return { opacity: 1 - p };
+  }
+}
+
+/** Groups of a clip's settings that can be copied onto other clips. */
+export const CLIP_ATTRS: { id: string; label: string; keys: (keyof Clip)[] }[] = [
+  { id: "color", label: "색", keys: ["color"] },
+  { id: "transform", label: "위치·크기·자르기", keys: ["transform", "fit"] },
+  { id: "motion", label: "움직임", keys: ["anim"] },
+  { id: "speed", label: "속도", keys: ["speed"] },
+  { id: "sound", label: "음량·잡음 줄이기", keys: ["volume", "volKeys", "denoise"] },
+  { id: "fades", label: "페이드", keys: ["fadeIn", "fadeOut"] },
+  { id: "transition", label: "전환", keys: ["xin", "xtype"] },
+  { id: "view", label: "360 시점", keys: ["view"] },
+];
+
+/** The chosen settings of `from` copied onto `to`. Moves keep their shape, moved to the target's own times. */
+export function pasteAttrs(to: Clip, from: Clip, attrs: string[]): Clip {
+  const out: Clip = { ...to };
+  for (const g of CLIP_ATTRS) {
+    if (!attrs.includes(g.id)) continue;
+    for (const k of g.keys) (out as any)[k] = (from as any)[k];
+  }
+  const retime = <K extends { t: number }>(ks: K[] | undefined): K[] | undefined => {
+    if (!ks?.length) return ks;
+    const f = (from.end - from.start) || 1, tl = to.end - to.start;
+    return ks.map((k) => ({ ...k, t: r3(to.start + ((k.t - from.start) / f) * tl) }));
+  };
+  if (attrs.includes("motion")) out.anim = retime(from.anim);
+  if (attrs.includes("sound")) out.volKeys = retime(from.volKeys);
+  return out;
+}
 
 const ease = (a: number, b: number, f: number) => a + (b - a) * (0.5 - 0.5 * Math.cos(Math.PI * f));
 function keyAt<K extends { t: number }>(keys: K[], t: number, mix: (a: K, b: K, f: number) => K): K {
@@ -683,6 +748,8 @@ export function toSegs(d: Draft, assets: Map<string, Asset>): Seg[] {
     const a = assets.get(c.asset);
     const gap = (dur: number): Seg => ({ path: "", kind: "gap", start: 0, dur: r3(dur), speed: 1, volume: 0, has_audio: false, lens: null, view: null, fit: "fit", fade_in: 0, fade_out: 0, xin });
     if (isGap(c)) return [gap(c.end - c.start)];
+    // A switched-off clip keeps its place on the timeline: black and silent.
+    if (c.disabled) return [gap(clipDur(c))];
     if (!a) return [];
     // A hidden main track keeps its timing and sound; its pictures become black ("audio" segments render black).
     if (hideV1 && a.info.kind === "image") return [gap(clipDur(c))];
@@ -704,7 +771,7 @@ export function toOverlays(d: Draft, assets: Map<string, Asset>): PlanOverlay[] 
   return overlays(d).flatMap((o) => {
     const a = assets.get(o.asset);
     const t = trackState(d, o.track === 3 ? "V3" : "V2");
-    if (!a || t.hide || a.info.kind === "audio") return [];
+    if (!a || t.hide || o.disabled || a.info.kind === "audio") return [];
     const sp = o.speed || 1;
     const len = Math.min(timedDur(o), total - o.at);
     if (len <= 0.05) return [];
@@ -757,7 +824,7 @@ export function toPlan(d0: Draft, assets: Map<string, Asset>, o: ExportOpts): Pl
     music: d.music.flatMap((m) => {
       const a = assets.get(m.asset);
       const dur = Math.min(m.end - m.start, total - m.at);
-      return a && dur > 0.05 && !muted(m) ? [{ path: a.info.path, start: r3(m.start), dur: r3(dur), at: r3(m.at), volume: m.volume, vol_keys: planTimed(m.volKeys, m.start, 1), fade_in: m.fadeIn, fade_out: m.fadeOut, denoise: !!m.denoise }] : [];
+      return a && dur > 0.05 && !muted(m) && !m.disabled ? [{ path: a.info.path, start: r3(m.start), dur: r3(dur), at: r3(m.at), volume: m.volume, vol_keys: planTimed(m.volKeys, m.start, 1), fade_in: m.fadeIn, fade_out: m.fadeOut, denoise: !!m.denoise }] : [];
     }),
     width, height, fps: d.fps || 30, ass: o.ass, mode: o.mode, vbitrate: o.vbitrate, settings: o.shrink, out: o.out,
     loudnorm: !!o.loudnorm, duck: !!o.duck, abr: o.abr ?? 256,

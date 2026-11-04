@@ -472,3 +472,10 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .choice { flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; white-space: normal; }
 .skill-row { border-top: 1px solid var(--line); padding: 8px 0; display: flex; flex-direction: column; gap: 4px; }
 .skill-row textarea { width: 100%; min-height: 110px; }
+
+/* Transition preview and shortcut editing */
+.screen canvas.xf { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
+.xf-veil { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.clip.off { opacity: .35; filter: grayscale(1); }
+.key-btn { background: transparent; border-color: transparent; padding: 1px 4px; }
+.key-btn.on { border-color: var(--accent); background: var(--accent-bg); }

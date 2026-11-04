@@ -9,7 +9,7 @@ import { api, fileSrc } from "../api";
 import { captionLines } from "../captions";
 import {
   animAt, audioTrack, clipAt, clipDur, DEFAULT_TRANSFORM, DEFAULT_VIEW, draftDuration, draftWords, fmtTCF, insertClips, is360, isDefaultColor, isGap, newClip, newOverlay, overlays,
-  parseTC, playableInWebView, previewSource, setViewKey, starts, timedDur, trackState, updateClip, viewAt, volAt,
+  parseTC, transitionLook, xinOf, playableInWebView, previewSource, setViewKey, starts, timedDur, trackState, updateClip, viewAt, volAt,
 } from "../edit";
 import { Flat360, type Proj } from "../gl360";
 import { STICKERS, stickerSvgPath, textLook } from "../graphics";
@@ -291,7 +291,7 @@ class Player {
     if (st.sourceId) return asset(st.sourceId);
     const d = draft();
     const hit = d && d.clips.length ? clipAt(d, st.playhead) : null;
-    return hit && !isGap(hit.clip) && !trackState(d!, "V1").hide ? asset(hit.clip.asset) : null;
+    return hit && !isGap(hit.clip) && !hit.clip.disabled && !trackState(d!, "V1").hide ? asset(hit.clip.asset) : null;
   }
   currentView(): View {
     if (this.drag) return this.drag;
@@ -325,10 +325,33 @@ class Player {
     }
   }
 
+  /** The outgoing picture at a transition, frozen over the incoming clip for the preview. */
+  xf: { type?: string; at: number; dur: number } | null = null;
+  xfCanvas: HTMLCanvasElement | null = null;
+  private snapshot(c: Clip) {
+    const d = draft();
+    const prevId = this.lastClip;
+    this.lastClip = c.id;
+    if (!d || !this.playing || !c.xin || !prevId || !this.xfCanvas || !this.video) return;
+    const i = d.clips.findIndex((x) => x.id === c.id);
+    if (i <= 0 || d.clips[i - 1].id !== prevId) return;
+    const cv = this.xfCanvas;
+    const src = ([this.still, this.gl?.canvas, this.img, this.video] as (HTMLElement & CanvasImageSource)[]).find((p) => p && !p.classList.contains("hidden")) ?? this.video;
+    try {
+      const box = cv.parentElement!.getBoundingClientRect();
+      cv.width = Math.max(2, Math.round(box.width));
+      cv.height = Math.max(2, Math.round(box.height));
+      cv.getContext("2d")!.drawImage(src as CanvasImageSource, 0, 0, cv.width, cv.height);
+      this.xf = { type: c.xtype, at: starts(d)[i], dur: xinOf(d, i) };
+    } catch { this.xf = null; }
+  }
+  private lastClip: string | null = null;
+
   private loadClip(c: Clip, src: number) {
     const d = draft();
     this.clipId = c.id;
-    if (isGap(c) || (d && trackState(d, "V1").hide)) { this.stopLive(); this.stillOn = false; this.video?.pause(); this.video?.removeAttribute("src"); this.url = ""; if (this.img) this.img.src = ""; return; }
+    this.snapshot(c);
+    if (isGap(c) || c.disabled || (d && trackState(d, "V1").hide)) { this.stopLive(); this.stillOn = false; this.video?.pause(); this.video?.removeAttribute("src"); this.url = ""; if (this.img) this.img.src = ""; return; }
     const a = asset(c.asset);
     if (!a) return;
     const muted = c.detached || (d && trackState(d, "A1").mute);
@@ -430,7 +453,7 @@ class Player {
       }
       const hit = clipAt(d, st.playhead)!;
       const c = hit.clip;
-      const ca = isGap(c) ? null : asset(c.asset);
+      const ca = isGap(c) || c.disabled ? null : asset(c.asset);
       let t = st.playhead;
       if (this.clipId !== c.id) this.loadClip(c, hit.src);
       if (!ca || ca.info.kind === "image" || !this.url) {
@@ -472,7 +495,7 @@ class Player {
     for (const tr of [2, 3] as const) {
       const el = this.ov[tr];
       const hidden = trackState(d, tr === 3 ? "V3" : "V2").hide;
-      const o = hidden ? null : overlays(d).find((x) => x.track === tr && t >= x.at && t < x.at + timedDur(x)) ?? null;
+      const o = hidden ? null : overlays(d).find((x) => x.track === tr && !x.disabled && t >= x.at && t < x.at + timedDur(x)) ?? null;
       const a = o ? asset(o.asset) : null;
       const url = a && a.info.kind !== "audio" && !is360(a) ? mediaUrl(a) : null;
       if (!o || !a || !url) {
@@ -504,7 +527,7 @@ class Player {
     const solo = (["A1", "A2", "A3"] as const).filter((k) => trackState(d, k).solo);
     const active = this.playing && this.rate > 0 ? d.music.filter((m) => {
       const k = `A${audioTrack(m)}` as "A1" | "A2" | "A3";
-      if (trackState(d, k).mute || (solo.length && !solo.includes(k))) return false;
+      if (m.disabled || trackState(d, k).mute || (solo.length && !solo.includes(k))) return false;
       return t >= m.at && t < m.at + (m.end - m.start);
     }) : [];
     for (const [id, el] of this.sounds) if (!active.some((m) => m.id === id)) { el.pause(); this.sounds.delete(id); }
@@ -569,12 +592,14 @@ export function Viewer() {
   const vref = useRef<HTMLVideoElement>(null);
   const iref = useRef<HTMLImageElement>(null);
   const sref = useRef<HTMLImageElement>(null);
+  const xref = useRef<HTMLCanvasElement>(null);
   const cref = useRef<HTMLCanvasElement>(null);
   const o2v = useRef<HTMLVideoElement>(null), o2i = useRef<HTMLImageElement>(null), o3v = useRef<HTMLVideoElement>(null), o3i = useRef<HTMLImageElement>(null);
   const dragRef = useRef<{ x: number; y: number; v: View } | null>(null);
   const [, bump] = useState(0);
 
   useEffect(() => {
+    player.xfCanvas = xref.current;
     player.attach(vref.current!, iref.current!, sref.current!, cref.current!, {
       2: { v: o2v.current!, i: o2i.current!, id: null, url: "" },
       3: { v: o3v.current!, i: o3i.current!, id: null, url: "" },
@@ -610,7 +635,9 @@ export function Viewer() {
   const total = src ? src.info.duration : d ? draftDuration(d) : 0;
   const now = src ? player.srcT : s.playhead;
   const hit = !src && d && d.clips.length ? clipAt(d, s.playhead) : null;
-  const hitClip = hit && !isGap(hit.clip) ? hit.clip : null;
+  const hitClip = hit && !isGap(hit.clip) && !hit.clip.disabled ? hit.clip : null;
+  const xfNow = !src && player.playing && player.xf && s.playhead >= player.xf.at && s.playhead < player.xf.at + player.xf.dur ? player.xf : null;
+  const xfLook = xfNow ? transitionLook(xfNow.type, (s.playhead - xfNow.at) / xfNow.dur) : null;
   const shown = src ?? (hitClip && !trackState(d!, "V1").hide ? asset(hitClip.asset) : null);
   const r360 = !!shown && is360(shown);
   const isImg = shown?.info.kind === "image";
@@ -735,7 +762,9 @@ export function Viewer() {
           {r360 && <div class="hint360">360° · 끌어서 방향, 휠로 화각 · yaw {Math.round(player.currentView().yaw)}° pitch {Math.round(player.currentView().pitch)}° 화각 {Math.round(player.currentView().hfov)}°{hitClip?.viewKeys?.length ? " · 키프레임" : ""}{fish ? " · 미리보기는 이음새 맞춤 전 (내보낸 파일에 적용)" : shownSrc?.live ? " · 원본 실시간 스티칭" : ""}</div>}
           {opening && <div class="hint-r info">원본 여는 중…</div>}
           {(lut || ov360) && <div class="hint-r">{lut ? "LUT·색온도는 내보낸 파일에 정확히 반영됩니다" : "360 V2/V3는 내보낸 파일에서 보입니다"}</div>}
-          {hit && hitClip?.xin && Math.abs(s.playhead - hit.at) < (hitClip.xin ?? 0) && <div class="hint-r">디졸브 구간 (미리보기는 컷, 내보내기에 반영)</div>}
+          <canvas ref={xref} class="xf" style={xfLook && !xfLook.hide ? { display: "block", opacity: xfLook.opacity, clipPath: xfLook.clipPath, transform: xfLook.transform, filter: xfLook.filter, WebkitMaskImage: xfLook.mask, maskImage: xfLook.mask } : { display: "none" }} />
+          {xfLook?.veil && <div class="xf-veil" style={{ background: xfLook.veil.color, opacity: xfLook.veil.opacity }} />}
+          {!player.playing && hit && hitClip?.xin && s.playhead - hit.at < (hitClip.xin ?? 0) && <div class="hint-r info">전환 구간: 재생하면 보입니다</div>}
           {safe}
         </div>
       </div>

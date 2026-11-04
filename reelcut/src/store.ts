@@ -55,7 +55,7 @@ type S = {
   exportQueue: { draftId: string; choice: any }[];
   aiRuns: AiRun[];
   savedAt: number;
-  dialog: "" | "shortcuts" | "export" | "newProject";
+  dialog: "" | "shortcuts" | "export" | "newProject" | "pasteAttrs";
   showSafe: boolean;
   /** Timeline shows where silence removal would cut. */
   showSilence: boolean;

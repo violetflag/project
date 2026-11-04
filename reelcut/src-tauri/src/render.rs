@@ -670,7 +670,7 @@ fn volume_filter(steady: f64, keys: &[VolKey]) -> String {
     format!("volume=eval=frame:volume='{}'", key_expr(&k, "t"))
 }
 
-const XFADES: [&str; 15] = ["fade", "dissolve", "fadeblack", "fadewhite", "fadegrays", "wipeleft", "slideleft", "smoothleft", "circleopen", "circlecrop", "rectcrop", "radial", "zoomin", "pixelize", "hblur"];
+const XFADES: [&str; 28] = ["fade", "dissolve", "fadeblack", "fadewhite", "fadegrays", "distance", "wipeleft", "wiperight", "wipeup", "wipedown", "slideleft", "slideright", "slideup", "slidedown", "smoothleft", "smoothright", "circleopen", "circleclose", "circlecrop", "rectcrop", "vertopen", "horzopen", "radial", "diagtl", "diagbr", "squeezeh", "zoomin", "pixelize"];
 
 /// overlay position: the picture's centre moved by x/y of the frame.
 fn place(t: &Transform, w: u32, h: u32) -> String {

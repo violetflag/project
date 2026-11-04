@@ -9,6 +9,8 @@ import { MenuBar } from "./MenuBar";
 import { ProjectView } from "./Project";
 import { SettingsView } from "./Settings";
 import { ShortcutsDialog } from "./Shortcuts";
+import { PasteAttrsDialog } from "./PasteAttrs";
+import { applyKeymap } from "../commands";
 import { StatusBar } from "./StatusBar";
 import { applyWorkspace } from "./layout";
 import { draft } from "../store";
@@ -19,6 +21,7 @@ async function boot() {
   booted = true;
   await initJobs();
   await loadSettings();
+  applyKeymap(st.settings.keys);
   await loadProjects();
   loadPrompts();
   loadSkills();
@@ -84,6 +87,7 @@ export function App() {
       </main>
       <StatusBar />
       {s.dialog === "shortcuts" && <ShortcutsDialog onClose={() => set({ dialog: "" })} />}
+      {s.dialog === "pasteAttrs" && <PasteAttrsDialog onClose={() => set({ dialog: "" })} />}
       {s.dialog === "newProject" && <NewProjectDialog onClose={() => set({ dialog: "" })} />}
       {s.dialog === "export" && d && <ExportDialog draft={d} onClose={() => set({ dialog: "" })} />}
       {s.toast && <div class="toast" role="status">{s.toast}</div>}

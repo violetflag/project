@@ -3,7 +3,7 @@ import { promptName } from "../src/chats";
 import { captionLines, toAss } from "../src/captions";
 import { STICKERS, stickerSvgPath, textEvent, textLook } from "../src/graphics";
 import { BUILTIN_SKILLS, cleanSkillName, findSkill, skillCatalog, upsertSkill } from "../src/skills";
-import { multicamDraft, isDefaultColor, LOOKS, animAt, DEFAULT_CAPTION, fitMusic, mergeScenes, movePreset, volAt, newDraft, playableInWebView, previewSource, searchScenes } from "../src/edit";
+import { CLIP_ATTRS, pasteAttrs, toSegs, transitionLook, TRANSITIONS, multicamDraft, isDefaultColor, LOOKS, animAt, DEFAULT_CAPTION, fitMusic, mergeScenes, movePreset, volAt, newDraft, playableInWebView, previewSource, searchScenes } from "../src/edit";
 import { dirToDfisheye } from "../src/gl360";
 import type { Asset, MediaInfo } from "../src/types";
 
@@ -184,5 +184,35 @@ describe("skills", () => {
     expect(text.indexOf("쌍둥이_쇼츠")).toBeLessThan(text.indexOf(BUILTIN_SKILLS[0].name));
     expect(text).not.toContain("두 아이를 함께");
     for (const k of BUILTIN_SKILLS) expect(text).toContain(k.name);
+  });
+});
+
+describe("transitions, attributes and switched-off clips", () => {
+  it("has 28 looks, each with its own preview", () => {
+    expect(TRANSITIONS).toHaveLength(28);
+    expect(new Set(TRANSITIONS.map((t) => t.id)).size).toBe(28);
+    expect(transitionLook("wipeleft", 0.25).clipPath).toBe("inset(0 25% 0 0)");
+    expect(transitionLook("slideup", 0.5).transform).toBe("translateY(-50%)");
+    expect(transitionLook("fadeblack", 0.25).veil).toEqual({ color: "#000", opacity: 0.5 });
+    expect(transitionLook("fadeblack", 0.75).hide).toBe(true);
+    expect(transitionLook(undefined, 0.3).opacity).toBeCloseTo(0.7);
+    for (const t of TRANSITIONS) expect(Object.keys(transitionLook(t.id, 0.5)).length).toBeGreaterThan(0);
+  });
+  it("pastes only what was chosen and moves keys to the target's own times", () => {
+    const from: any = { id: "a", asset: "x", start: 10, end: 20, speed: 2, volume: 0.5, color: { exposure: 1 }, anim: [{ t: 10, scale: 1, x: 0, y: 0, opacity: 1 }, { t: 20, scale: 1.2, x: 0, y: 0, opacity: 1 }] };
+    const to: any = { id: "b", asset: "y", start: 100, end: 104, speed: 1, volume: 1 };
+    const a = pasteAttrs(to, from, ["color"]);
+    expect(a.color).toEqual({ exposure: 1 });
+    expect(a.speed).toBe(1);
+    const b = pasteAttrs(to, from, ["motion"]);
+    expect(b.anim!.map((k) => k.t)).toEqual([100, 104]);
+    expect(CLIP_ATTRS.length).toBeGreaterThan(5);
+  });
+  it("keeps a switched-off clip's place as black and silence", () => {
+    const a = asset({ duration: 30 });
+    const d = { ...newDraft("t"), clips: [{ id: "c", asset: a.id, start: 0, end: 5, speed: 1, volume: 1, disabled: true } as any] };
+    const [seg] = toSegs(d, new Map([[a.id, a]]));
+    expect(seg.kind).toBe("gap");
+    expect(seg.dur).toBe(5);
   });
 });

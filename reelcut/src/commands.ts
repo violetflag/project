@@ -5,6 +5,7 @@ import {
   clipAt, deleteClip, detachAudio, draftDuration, liftClip, nudgeClip, removeFillers, removeItem, removeSilences, setTransition, splitAt, splitItem, starts, uid, type Pacing,
 } from "./edit";
 import { asset, assetMap, canRedo, canUndo, draft, editDraft, importPaths, loadWave, redo, saveNow, set, st, toast, undo, waves, type Tool, type Workspace } from "./store";
+import type { Clip } from "./types";
 import { player } from "./ui/Viewer";
 import { applyWorkspace, togglePanel } from "./ui/layout";
 
@@ -29,6 +30,18 @@ const hasDraft = () => inProject() && !!draft();
 const hasClips = () => !!draft()?.clips.length;
 const draftMode = () => hasDraft() && !st.sourceId;
 const selClip = () => (st.selClip ? draft()?.clips.find((c) => c.id === st.selClip) ?? null : null);
+
+/** The clip "copy" last took its settings from. */
+export let attrSource: Clip | null = null;
+
+function toggleSelected() {
+  const d = draft();
+  if (!d) return;
+  const id = st.selClip ?? st.selItem;
+  const flip = <T extends { id: string; disabled?: boolean }>(x: T) => (x.id === id ? { ...x, disabled: !x.disabled } : x);
+  editDraft("클립 켜기·끄기", (x) => ({ ...x, clips: x.clips.map(flip), overlays: (x.overlays ?? []).map(flip), music: x.music.map(flip) }), st.draftId, false);
+  player.refresh();
+}
 
 let pacing: Pacing = "normal";
 export const setPacing = (p: Pacing) => { pacing = p; };
@@ -134,6 +147,9 @@ export const COMMANDS: Cmd[] = [
     run: () => { const c = selClip(); if (!c) return; if (c.speed !== 1) return toast("소리 분리는 1x 속도 클립에서만 됩니다"); editDraft("소리 분리", (d) => detachAudio(d, c.id)); toast("소리를 A1 트랙으로 분리했습니다. 따로 늘이거나 줄여 J·L컷을 만드세요"); } },
   { id: "dissolve", label: "디졸브 넣기 (앞 클립과)", menu: "클립", keys: "Ctrl+D", term: "Cross Dissolve", enabled: () => draftMode() && !!selClip(),
     run: () => { const d = draft(), c = selClip(); if (!d || !c) return; const i = d.clips.findIndex((x) => x.id === c.id); if (i <= 0) return toast("첫 클립에는 앞 클립이 없습니다"); editDraft("디졸브", (x) => setTransition(x, c.id, c.xin ? 0 : 0.5)); } },
+  { id: "toggle-clip", label: "클립 켜기 / 끄기", menu: "클립", keys: "Shift+E", term: "Enable / Disable", enabled: () => draftMode() && !!(st.selClip || st.selItem), run: toggleSelected },
+  { id: "copy-attrs", label: "클립 속성 복사", menu: "클립", keys: "Ctrl+C", term: "Copy", enabled: () => draftMode() && !!st.selClip, run: () => { attrSource = selClip(); toast("클립 속성을 복사했습니다"); } },
+  { id: "paste-attrs", label: "속성 붙여넣기…", menu: "클립", keys: "Ctrl+Alt+V", term: "Paste Attributes", enabled: () => draftMode() && !!attrSource && !!st.selClip, run: () => set({ dialog: "pasteAttrs" }) },
   { id: "left", label: "클립을 왼쪽으로", menu: "클립", keys: "Alt+ArrowLeft", sep: true, enabled: () => draftMode() && !!st.selClip, run: () => editDraft("클립 옮기기", (d) => nudgeClip(d, st.selClip!, -1)) },
   { id: "right", label: "클립을 오른쪽으로", menu: "클립", keys: "Alt+ArrowRight", enabled: () => draftMode() && !!st.selClip, run: () => editDraft("클립 옮기기", (d) => nudgeClip(d, st.selClip!, 1)) },
   { id: "marker", label: "마커 달기", menu: "클립", keys: "M", sep: true, enabled: draftMode,
@@ -187,11 +203,30 @@ export const COMMANDS: Cmd[] = [
 
 // ---------------------------------------------------------------- key matching
 
+/** The bindings the app ships with, so changes can be undone. */
+const DEFAULT_KEYS = new Map(COMMANDS.map((c) => [c.id, c.keys ?? ""]));
+
+/** Key layouts of other editors, as changes over the defaults. */
+export const KEY_LAYOUTS: { id: string; label: string; keys: Record<string, string> }[] = [
+  { id: "default", label: "Reelcut 기본", keys: {} },
+  { id: "premiere", label: "Premiere Pro", keys: { split: "Ctrl+K", delete: "Alt+Backspace|Shift+Delete", lift: "Delete|Backspace", dissolve: "Ctrl+D", "toggle-clip": "Shift+E", "paste-attrs": "Ctrl+Alt+V", marker: "M" } },
+  { id: "finalcut", label: "Final Cut Pro", keys: { split: "Ctrl+B", delete: "Delete|Backspace", lift: "Shift+Backspace", dissolve: "Ctrl+T", "toggle-clip": "V", "paste-attrs": "Ctrl+Shift+V", marker: "M" } },
+  { id: "resolve", label: "DaVinci Resolve", keys: { split: "Ctrl+B", delete: "Delete|Backspace", lift: "Backspace", dissolve: "Ctrl+T", "toggle-clip": "D", "paste-attrs": "Alt+V", marker: "M" } },
+];
+
+/** Puts the user's changes over the default keys; every list and the matcher read `keys`. */
+export function applyKeymap(over: Record<string, string> | undefined) {
+  for (const c of COMMANDS) {
+    const k = over && c.id in over ? over[c.id] : DEFAULT_KEYS.get(c.id) ?? "";
+    c.keys = k || undefined;
+  }
+}
+
 const KEY_NAME: Record<string, string> = { " ": "Space", Esc: "Escape", Del: "Delete" };
 export const keyLabel = (k: string) => k.replace("ArrowLeft", "←").replace("ArrowRight", "→").replace("ArrowUp", "↑").replace("ArrowDown", "↓").replace("Escape", "Esc").replace("Delete", "Del");
 export const firstKey = (c: Cmd) => (c.keys ? keyLabel(c.keys.split("|")[0]) : "");
 
-function eventKey(e: KeyboardEvent): string {
+export function eventKey(e: KeyboardEvent): string {
   let k = KEY_NAME[e.key] ?? e.key;
   // Letters and digits by physical key, so shortcuts also work while the Korean IME is on (S → ㄴ).
   if (/^Key[A-Z]$/.test(e.code)) k = e.code.slice(3);
@@ -210,6 +245,8 @@ export function handleKey(e: KeyboardEvent): boolean {
   if (!c) return false;
   // While typing only Ctrl shortcuts work (and Escape leaves the field alone).
   if (typing && !k.startsWith("Ctrl+")) return false;
+  // Copy stays the system's while typing or with text selected.
+  if (k === "Ctrl+C" && (typing || String(window.getSelection() ?? ""))) return false;
   if (!c.global && !inProject()) return false;
   if (c.enabled && !c.enabled()) return false;
   e.preventDefault();

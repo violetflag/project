@@ -179,6 +179,7 @@ function ClipView({ d, c }: { d: Draft; c: Clip }) {
     <div class="inspector">
       <Section id="clip" title="클립" term="Clip">
         <p class="muted">{a?.info.name} · {a?.info.width ? `${a.info.width}×${a.info.height} · ` : ""}타임라인 {fmtTCF(starts(d)[i], fps)}부터</p>
+        <label class="check"><input type="checkbox" checked={!c.disabled} onChange={() => set1("클립 켜기·끄기", { disabled: !c.disabled })} /> 클립 켜기 <span class="muted">(끄면 자리를 지키며 검은 화면·무음)</span></label>
         <div class="row">
           <TCField label="원본 시작" value={c.start} fps={fps} onChange={(v) => set1("다듬기", { start: r3(Math.max(0, Math.min(c.end - 0.1, v))) })} />
           <TCField label="원본 끝" value={c.end} fps={fps} onChange={(v) => set1("다듬기", { end: r3(Math.min(a?.info.duration || 1e9, Math.max(c.start + 0.1, v))) })} />
@@ -246,7 +247,7 @@ function ClipView({ d, c }: { d: Draft; c: Clip }) {
               {TRANSITIONS.map((x) => <option value={x.id}>{x.label}</option>)}
             </select>
           </label>
-          <p class="muted tip">0이면 바로 넘어갑니다. 미리보기는 컷으로 보이고, 내보낸 파일에서 겹쳐집니다.</p>
+          <p class="muted tip">0이면 바로 넘어갑니다. 재생하면 미리보기로 보이고, 내보낸 파일에는 정확히 겹쳐집니다.</p>
         </Section>
       )}
       {a && is360(a) && (

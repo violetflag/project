@@ -94,6 +94,9 @@ export function SettingsView() {
             onChange={(e) => saveSettings({ aiNotes: (e.target as HTMLTextAreaElement).value })} />
         </label>
         <p class="muted">새 대화에서도 AI가 항상 이 내용을 지킵니다.</p>
+        <h3 class="sub">단축키</h3>
+        <p class="muted">기능마다 키를 바꾸거나 Premiere Pro, Final Cut Pro, DaVinci Resolve 배열로 바꿀 수 있습니다.</p>
+        <button class="small" onClick={() => set({ dialog: "shortcuts" })}>단축키 바꾸기…</button>
         <h3 class="sub">AI 스킬 (작업 안내)</h3>
         <p class="muted">AI가 일을 시작하기 전에 읽는 안내입니다. "다음에도 이렇게 해 줘"라고 말하면 AI가 여기에 저장합니다. 앱에 들어 있는 것: {BUILTIN_SKILLS.map((b) => b.name).join(", ")}</p>
         {!s.skills.length && <p class="muted">내가 만든 스킬이 아직 없습니다.</p>}

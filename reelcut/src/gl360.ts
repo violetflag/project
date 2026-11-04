@@ -84,7 +84,7 @@ export class Flat360 {
   prog: WebGLProgram;
   tex: WebGLTexture;
   constructor(public canvas: HTMLCanvasElement) {
-    const gl = canvas.getContext("webgl", { preserveDrawingBuffer: false, antialias: false });
+    const gl = canvas.getContext("webgl", { preserveDrawingBuffer: true, antialias: false });
     if (!gl) throw new Error("WebGL을 쓸 수 없습니다");
     this.gl = gl;
     const sh = (type: number, src: string) => {

@@ -316,7 +316,7 @@ export function Timeline() {
     const fullW = a ? (a.info.duration / cc.speed) * zoom : 0;
     const bg = strip ? { backgroundImage: `url("${strip}")`, backgroundSize: `${fullW}px 100%`, backgroundPosition: `${-(cc.start / cc.speed) * zoom}px 0` }
       : a?.poster ? { backgroundImage: `url("${fileSrc(a.poster)}")` } : {};
-    const cls = `clip ${isGap(c) ? "gap" : ""} ${s.selClip === c.id ? "sel" : ""} ${g && !g.patch && g.to != null ? "dragging" : ""} ${a && is360(a) ? "c360" : ""} ${s.tool}`;
+    const cls = `clip ${isGap(c) ? "gap" : ""} ${s.selClip === c.id ? "sel" : ""} ${g && !g.patch && g.to != null ? "dragging" : ""} ${a && is360(a) ? "c360" : ""} ${c.disabled ? "off" : ""} ${s.tool}`;
     return (
       <div key={c.id} class={cls} tabIndex={0} role="button" aria-label={`${isGap(c) ? "빈칸" : a?.info.name ?? "없는 미디어"} ${fmtTCF(clipDur(c), fps)}`}
         style={{ left: `${left}px`, width: `${w}px`, transform: g && !g.patch && g.to != null ? `translateX(${g.dx}px)` : undefined, ...(isGap(c) ? {} : bg) }}
@@ -345,7 +345,7 @@ export function Timeline() {
     const bg = strip ? { backgroundImage: `url("${strip}")`, backgroundSize: `${(a!.info.duration / sp) * zoom}px 100%`, backgroundPosition: `${-(xx.start / sp) * zoom}px 0` }
       : isV && a?.poster ? { backgroundImage: `url("${fileSrc(a.poster)}")` } : {};
     return (
-      <div key={x.id} class={`item ${isV ? "vitem" : "aitem"} lane-${lane} ${s.selItem === x.id ? "sel" : ""} ${s.tool}`} tabIndex={0} role="button"
+      <div key={x.id} class={`item ${isV ? "vitem" : "aitem"} lane-${lane} ${s.selItem === x.id ? "sel" : ""} ${x.disabled ? "off" : ""} ${s.tool}`} tabIndex={0} role="button"
         aria-label={`${NAME[lane]} ${a?.info.name ?? ""}`}
         style={{ left: `${left}px`, width: `${w}px`, ...bg }}
         onPointerDown={(e) => onDown(e as any, "imove", x.id)} onPointerMove={onMove as any} onPointerUp={onUp as any}
