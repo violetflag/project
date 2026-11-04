@@ -332,7 +332,7 @@ describe("run_script", () => {
     const js = await transpileScript("const n: number = 2;\nreturn n + 1;");
     expect(js).toContain("return n + 1");
     expect(js).not.toContain(": number");
-    expect(new (Object.getPrototypeOf(async function () {}).constructor)(js)()).resolves.toBe(3);
+    await expect(new (Object.getPrototypeOf(async function () {}).constructor)(js)()).resolves.toBe(3);
   });
   it("refuses imports and reports errors by the script's own line", async () => {
     await expect(transpileScript('import x from "fs";')).rejects.toThrow("import");
