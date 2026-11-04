@@ -1,10 +1,10 @@
 import { Bookmark, BookmarkPlus, LoaderCircle, Pencil, Plus, Send, Sparkles, Trash2, Undo2 } from "lucide-preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { ask, EFFORTS, MODELS, newChat, stopAgent, TOOL_LABEL } from "../agent";
+import { answerCard, answerCardText, ask, EFFORTS, isWaitingCard, MODELS, newChat, stopAgent, TOOL_LABEL, waitingCardOf } from "../agent";
 import { ctxLimit, fmtK, newSession, sessionsNewestFirst } from "../chats";
 import { draftDuration, fmtTC, overlays, starts } from "../edit";
 import { activeChat, addPrompt, deletePrompt, mutate, mutateChat, promptName, set, setDrafts, st, toast, updatePrompt, useStore, type AiRun } from "../store";
-import type { ChatBlock, ChatSession, Draft, SavedPrompt } from "../types";
+import type { ChatBlock, ChatSession, ChoiceCard, Draft, SavedPrompt } from "../types";
 import { player } from "./Viewer";
 
 const SUGGEST = [
@@ -134,6 +134,30 @@ function Meter({ c }: { c: ChatSession }) {
 }
 
 /** One saved prompt in the list: insert, send now, rename/edit, delete. */
+/** A question from the AI. It waits for the pick; on an older card a pick starts a new request. */
+function Card({ k, busy, send }: { k: ChoiceCard; busy: boolean; send: (t: string) => void }) {
+  const [on, setOn] = useState<number[]>([]);
+  const waits = isWaitingCard(k.id);
+  const go = (picks: number[]) => {
+    if (answerCard(k, picks)) return;
+    mutateChat((x) => ({ ...x, cards: (x.cards ?? []).map((y) => (y.id === k.id ? { ...y, used: true } : y)) }));
+    send(picks.map((i) => k.options[i].meaning || k.options[i].prompt || k.options[i].label).join("\n"));
+  };
+  return (
+    <div class="choice-card">
+      <div class="choice-q">{k.question}</div>
+      {k.options.map((o, i) => (
+        <button class={`choice ${on.includes(i) ? "on" : ""}`} disabled={busy && !waits} aria-pressed={k.multi ? on.includes(i) : undefined}
+          onClick={() => (k.multi ? setOn(on.includes(i) ? on.filter((x) => x !== i) : [...on, i]) : go([i]))}>
+          <b>{o.label}{k.recommended && i === 0 && <span class="choice-rec">추천</span>}</b>{o.detail && <span class="muted">{o.detail}</span>}
+        </button>
+      ))}
+      {k.multi && <button class="small primary" disabled={!on.length || (busy && !waits)} onClick={() => go(on)}>{on.length}개 고르기</button>}
+      {waits && <p class="muted tip">아래 입력칸에 직접 답해도 됩니다.</p>}
+    </div>
+  );
+}
+
 function PromptRow({ p, busy, onInsert, onSend }: { p: SavedPrompt; busy: boolean; onInsert: () => void; onSend: () => void }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(p.name);
@@ -211,6 +235,7 @@ export function AgentPanel() {
   // Another project or conversation: show its own unsent prompt.
   useEffect(() => { setTextState(loadPrompt(projectId, chatId)); setErr(""); }, [projectId, chatId]);
 
+  const waitCard = waitingCardOf(c);
   const send = async (t = text) => {
     if (!t.trim() || s.agentBusy) return;
     if (s.settings.aiMode === "api" && !s.settings.apiKey) { setErr("설정에서 Anthropic API 키를 먼저 넣어 주세요."); return; }
@@ -289,16 +314,7 @@ export function AgentPanel() {
             </div>
           )
           : <div class={`msg ${it.kind}`}>{it.kind === "ai" ? <Md text={it.text} /> : it.text}</div>)}
-        {(c?.cards ?? []).filter((k) => !k.used).map((k) => (
-          <div class="choice-card" key={k.id}>
-            <div class="choice-q">{k.question}</div>
-            {k.options.map((o) => (
-              <button class="choice" disabled={s.agentBusy} onClick={() => { mutateChat((x) => ({ ...x, cards: (x.cards ?? []).map((y) => (y.id === k.id ? { ...y, used: true } : y)) })); send(o.prompt || o.label); }}>
-                <b>{o.label}</b>{o.detail && <span class="muted">{o.detail}</span>}
-              </button>
-            ))}
-          </div>
-        ))}
+        {(c?.cards ?? []).filter((k) => !k.used).map((k) => <Card key={k.id} k={k} busy={s.agentBusy} send={send} />)}
         {runs.length > 0 && <RunCard r={runs[runs.length - 1]} last={st.aiRuns[st.aiRuns.length - 1]?.id === runs[runs.length - 1].id} />}
         {s.agentBusy && <div class="msg status"><LoaderCircle size={13} class="spin-i" aria-hidden="true" /> {s.agentStatus}</div>}
         {err && <div class="msg err">{err} <a onClick={() => set({ route: "settings" })}>설정 열기</a></div>}
@@ -311,6 +327,7 @@ export function AgentPanel() {
         <textarea ref={box} rows={3} placeholder="예: 인트로를 짧게 줄이고 자막 넣어 줘 (Enter 보내기, Shift+Enter 줄바꿈)" value={text} aria-label="AI에게 편집 요청"
           onInput={(e) => setText((e.target as HTMLTextAreaElement).value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } }} />
+        {waitCard && <button class="primary" disabled={!text.trim()} onClick={() => { answerCardText(waitCard, text.trim()); setText(""); }}>이대로 답하기</button>}
         {s.agentBusy ? <button onClick={stopAgent}>멈추기</button> : <button class="primary" disabled={!text.trim()} onClick={() => send()}>보내기</button>}
       </div>
     </div>

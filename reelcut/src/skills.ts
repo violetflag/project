@@ -10,7 +10,7 @@ const VLOG = `# 브이로그 편집 순서
 
 ## 시작하기 전에
 - get_project_overview로 무엇이 있는지 봅니다. 촬영 시각이 있으면 시간순으로 정리합니다. 카메라가 여럿이면 시계가 다를 수 있으니, 같은 순간을 찍었으면 sync_media로 맞춥니다.
-- 길이와 올릴 곳(유튜브, 쇼츠, 가족 공유)을 모르면 show_options로 한 번만 묻습니다. 대답이 없어도 되도록 기본값을 정해 둡니다(원본의 1/4, 최대 5분).
+- 길이와 올릴 곳(유튜브, 쇼츠, 가족 공유)을 모르면 ask_options로 한 번만 묻고, 고른 대로 이어 갑니다. 맨 앞에 기본값을 둡니다(원본의 1/4, 최대 5분).
 - 받아쓰기가 없고 말소리가 있으면 transcribe를 먼저 합니다.
 
 ## 고르기
@@ -38,8 +38,8 @@ const HIGHLIGHTS = `# 하이라이트·쇼츠 후보 고르기
 1. 받아쓰기(get_transcript)와 장면 설명(search_scenes, contact_sheet)으로 재미있거나 감동적인 순간을 찾습니다. 말이 있으면 앞뒤 맥락 없이도 이해되는 구간을 고릅니다.
 2. scan_bad_shots로 흔들리거나 흐린 구간은 뺍니다.
 3. 후보를 세 개 고릅니다(각 15~60초, 서로 다른 순간). 각각 제목과 고른 이유를 한 줄로 적습니다.
-4. show_options로 후보를 보여 주고 차례를 끝냅니다. 각 선택지의 prompt에 시작·끝 시각과 만들 내용을 적어 두면, 사용자가 누르는 대로 그 요청이 옵니다.
-5. 고른 후보로 create_draft(aspect 9:16)를 하고, 첫 3초에 가장 눈길을 끄는 순간이 오게 합니다. 자막은 set_captions의 style "pop", 360 영상이면 frame_subject로 사람을 따라갑니다.
+4. ask_options로 후보를 보여 줍니다. 각 선택지의 meaning에 시작·끝 시각과 만들 내용을 적어 두면, 고른 것이 그대로 돌아옵니다.
+5. 돌아온 후보로 create_draft(aspect 9:16)를 하고, 첫 3초에 가장 눈길을 끄는 순간이 오게 합니다. 자막은 set_captions의 style "pop", 360 영상이면 frame_subject로 사람을 따라갑니다.
 `;
 
 const TALK = `# 말하는 영상 다듬기
@@ -99,4 +99,4 @@ export function skillCatalog(user: Skill[]): string {
 export type Step = { tool: string; input?: Record<string, unknown> };
 
 /** Tools a batch may not call: itself, and those that wait for the user or read a guide. */
-export const NOT_IN_BATCH = new Set(["run_steps", "show_options", "get_playbook"]);
+export const NOT_IN_BATCH = new Set(["run_steps", "ask_options", "get_playbook"]);

@@ -8,6 +8,7 @@ import { layout, setLayout, Splitter, togglePanel } from "./layout";
 import { MediaBin } from "./MediaBin";
 import { Timeline } from "./Timeline";
 import { Transcript } from "./Transcript";
+import { CaptionsPanel } from "./CaptionsPanel";
 import { Viewer } from "./Viewer";
 
 const TOOLS: { id: Tool; label: string; key: string; term: string; Icon: any }[] = [
@@ -50,8 +51,9 @@ export function ProjectView() {
           <div class="tabs" role="tablist">
             <button role="tab" aria-selected={s.leftTab === "media"} class={s.leftTab === "media" ? "on" : ""} onClick={() => set({ leftTab: "media" })}>미디어</button>
             <button role="tab" aria-selected={s.leftTab === "transcript"} class={s.leftTab === "transcript" ? "on" : ""} onClick={() => set({ leftTab: "transcript" })}>대본</button>
+            <button role="tab" aria-selected={s.leftTab === "captions"} class={s.leftTab === "captions" ? "on" : ""} onClick={() => set({ leftTab: "captions" })}>자막</button>
           </div>
-          {s.leftTab === "media" ? <MediaBin /> : <Transcript />}
+          {s.leftTab === "media" ? <MediaBin /> : s.leftTab === "captions" ? <CaptionsPanel /> : <Transcript />}
         </aside>
         {l.leftOpen ? <Splitter axis="x" label="왼쪽 패널 너비" value={l.left} min={200} max={760} onChange={(v) => setLayout({ left: v })} /> : <span />}
         <section class="center" aria-label="미리보기">

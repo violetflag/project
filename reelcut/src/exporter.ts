@@ -1,7 +1,7 @@
 // Starts an export of a draft (used by the export dialog and the agent), runs a queue of
 // exports one after another, and tells the user when each one ends.
 import { api } from "./api";
-import { captionLines, toAss, toSrt } from "./captions";
+import { draftCaptions, toAss, toSrt } from "./captions";
 import { draftDuration, draftWords, outSize, rangeDraft, toPlan, uid } from "./edit";
 import { pickCodec, QUALITIES, SHRINK, shrinkSettings } from "./presets";
 import { assetMap, set, st, toast } from "./store";
@@ -55,8 +55,9 @@ export function outPath(d: Draft, c: ExportChoice): string {
 }
 
 export function captionFiles(d: Draft, width: number, height: number) {
-  const lines = captionLines(draftWords(d, assetMap()), d.captionStyle.maxChars);
-  return { lines, ass: toAss(d.captions ? lines : [], d.captionStyle, width, height, d.texts ?? []), srt: toSrt(lines) };
+  const { lines: all, tr } = draftCaptions(d, draftWords(d, assetMap()));
+  const lines = all.filter((l) => !l.hidden);
+  return { lines, tr, ass: toAss(d.captions ? lines : [], d.captionStyle, width, height, d.texts ?? [], d.captions ? tr : [], d.capShow ?? "orig"), srt: toSrt(lines), trSrt: tr.length ? toSrt(tr) : "" };
 }
 
 /** The timeline range this choice exports (null = all). */
@@ -80,7 +81,7 @@ export async function startExport(d: Draft, c: ExportChoice): Promise<string> {
   const range = exportRange(d, c);
   const dd = { ...(range ? rangeDraft(d, range[0], range[1]) : d), fps: c.fps || d.fps };
   const ass = (dd.captions || dd.texts?.length) && c.mode !== "audio" ? captionFiles(dd, w, h).ass : "";
-  const srt = c.srt && dd.captions ? captionFiles(dd, w, h).srt : "";
+  const srts = c.srt && dd.captions ? captionFiles(dd, w, h) : null;
   const shrink = c.mode === "shrink" ? shrinkSettings(p, pickCodec(c.codec, st.info?.hw ?? null), c.container) : null;
   const plan = toPlan(dd, assetMap(), { mode: c.mode, short, vbitrate: c.kbps || q.kbps, shrink, out: outPath(d, c), ass, loudnorm: c.loudnorm, duck: c.duck, abr: c.abr || 256 });
   const id = uid();
@@ -88,7 +89,9 @@ export async function startExport(d: Draft, c: ExportChoice): Promise<string> {
   try {
     const out = await api.export(id, plan);
     set({ exportJob: { ...st.exportJob!, out } });
-    if (srt) await api.saveSrt(out, srt).catch((e) => toast(`자막 파일을 저장하지 못했습니다: ${e}`));
+    if (srts) await api.saveSrt(out, srts.srt).catch((e) => toast(`자막 파일을 저장하지 못했습니다: ${e}`));
+    // The translation goes beside it, named by its language (video.영어.srt).
+    if (srts?.trSrt) await api.saveSrt(out.replace(/(\.[^.\\/]+)$/, `.${cleanName(dd.translation?.lang ?? "번역")}$1`), srts.trSrt).catch((e) => toast(`번역 자막을 저장하지 못했습니다: ${e}`));
     return id;
   } catch (e) {
     set({ exportJob: { ...st.exportJob!, state: "error", message: String(e) } });

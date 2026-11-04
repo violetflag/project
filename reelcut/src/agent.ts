@@ -16,6 +16,7 @@ import { cleanKeys, frameGroup, frameSubject, normView, sampleKeys, snapRanges, 
 import { BUILTIN_SKILLS, cleanSkillName, findSkill, NOT_IN_BATCH, skillCatalog, upsertSkill, type Step } from "./skills";
 import { compactBudget, ctxLimit, estTokens, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
 import { activeChat, asset, assetMap, editDraft, saveSkills, syncAssets, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
+import { captionLines, draftCaptions, joinNext, moveWordPrev, setBreak, setHidden, setLineText, wordKey } from "./captions";
 import type { AnimKey, Asset, ChatBlock, ChoiceCard, ChatMsg, ChatSession, Draft, TextItem, View, ViewKey, VolKey } from "./types";
 
 export const MODELS = [
@@ -122,8 +123,24 @@ export const TOOLS = [
     input_schema: { type: "object", properties: { draft_id: draftId, markers: { type: "array", items: { type: "object", properties: { time: num, label: str, color: str }, required: ["time", "label"] } } }, required: ["markers"] },
   },
   {
-    name: "set_captions", description: "받아쓰기로 만든 자막을 켜고 끄거나 모양을 바꿉니다.",
-    input_schema: { type: "object", properties: { draft_id: draftId, enabled: { type: "boolean" }, style: { type: "string", enum: ["basic", "yellow", "box", "karaoke", "pop", "soft"], description: "자막 모양: 기본, 노란 글자, 검은 상자, 말하는 단어 강조, 강조+톡 튀는 단어(쇼츠), 얇고 차분하게" }, size: { ...num, description: "화면 높이 대비 % (기본 6)" }, position: { type: "string", enum: ["bottom", "middle", "top"] }, max_chars: num }, required: ["enabled"] },
+    name: "get_captions", description: "편집본의 자막을 줄마다 읽습니다. 줄마다 key(첫 단어), 시간, 글, 단어별 key, 번역이 나옵니다. edit_captions와 set_translation은 이 key를 씁니다.",
+    input_schema: { type: "object", properties: { draft_id: draftId, from: { ...num, description: "타임라인 초부터" }, to: { ...num, description: "타임라인 초까지" } } },
+  },
+  {
+    name: "edit_captions", description: "이 편집본의 자막만 고칩니다(대본은 그대로). ops를 차례로 적용합니다: {op:\"fix_word\", key, text} 단어 고치기, {op:\"set_line\", key, text} 줄 전체 글, {op:\"break_before\", key} 이 단어부터 새 줄, {op:\"join_next\", key} 이 줄과 다음 줄 합치기(key는 줄 key), {op:\"move_word_prev\", key} 이 줄의 첫 단어를 앞 줄로, {op:\"hide\", key}, {op:\"show\", key}.",
+    input_schema: { type: "object", properties: { draft_id: draftId, ops: { type: "array", items: { type: "object", properties: { op: str, key: str, text: str }, required: ["op", "key"] } } }, required: ["ops"] },
+  },
+  {
+    name: "fix_words", description: "받아쓰기의 단어를 고칩니다. 모든 편집본의 대본과 자막에 반영됩니다. 잘못 들은 이름처럼 어디서나 틀린 말에 쓰세요. replace: 찾을 말과 바꿀 말, 또는 words: 단어 key와 글.",
+    input_schema: { type: "object", properties: { asset_id: { ...str, description: "없으면 모든 미디어" }, replace: { type: "array", items: { type: "object", properties: { from: str, to: str }, required: ["from", "to"] } }, words: { type: "array", items: { type: "object", properties: { key: str, text: str }, required: ["key", "text"] } } } },
+  },
+  {
+    name: "set_translation", description: "자막의 번역을 넣습니다. lang은 언어 이름, items는 get_captions의 줄 key와 번역 글. 여러 번 나눠 넣어도 합쳐집니다. show: orig(원문만), tr(번역만), both(둘 다). 내보낼 때 SRT를 켜면 번역 자막 파일도 따로 저장됩니다.",
+    input_schema: { type: "object", properties: { draft_id: draftId, lang: str, show: { type: "string", enum: ["orig", "tr", "both"] }, items: { type: "array", items: { type: "object", properties: { key: str, text: str }, required: ["key", "text"] } } }, required: ["lang", "items"] },
+  },
+  {
+    name: "set_captions", description: "받아쓰기로 만든 자막을 켜고 끄거나 모양을 바꿉니다. style의 값 뒤에 anim, keyword, lines 같은 항목을 주면 그 항목만 바뀝니다.",
+    input_schema: { type: "object", properties: { draft_id: draftId, enabled: { type: "boolean" }, style: { type: "string", enum: CAPTION_PRESETS.map((p) => p.id), description: CAPTION_PRESETS.map((p) => `${p.id}: ${p.label}`).join(", ") }, anim: { type: "string", enum: ["none", "fade", "rise", "drop", "pop", "type"], description: "나타나는 방식 (type: 말하는 대로 한 단어씩)" }, anim_by: { type: "string", enum: ["line", "word"] }, lines: { type: "number", enum: [1, 2] }, break_by: { type: "string", enum: ["smart", "chars", "sentence"], description: "줄 끝: 말이 끊기는 곳, 글자 수, 문장" }, keyword: { type: "string", enum: ["none", "first", "last", "number", "longest"], description: "따로 강조할 단어" }, key_color: str, highlight: { ...str, description: "말하는 단어 색 (#RRGGBB, 빈 글이면 끔)" }, align: { type: "string", enum: ["left", "center", "right"] }, size: { ...num, description: "화면 높이 대비 % (기본 6)" }, position: { type: "string", enum: ["bottom", "middle", "top"] }, max_chars: num }, required: ["enabled"] },
   },
   {
     name: "sync_media", description: "같은 순간을 찍은 영상들(휴대폰, 360 카메라, 마이크)을 소리로 맞춥니다. 첫 번째가 기준입니다. 각 미디어가 기준보다 몇 초 뒤에 시작했는지와 확실한 정도(0~1)를 돌려주고 저장합니다.",
@@ -177,11 +194,11 @@ export const TOOLS = [
   },
   { name: "delete_skill", description: "사용자가 만든 스킬을 지웁니다.", input_schema: { type: "object", properties: { name: str }, required: ["name"] } },
   {
-    name: "show_options", description: "사용자에게 고를 수 있는 카드를 보여 줍니다(하이라이트 후보, 길이 선택 등). 부른 뒤에는 차례를 끝내고 기다리세요. 사용자가 고르면 그 선택지의 prompt(없으면 label)가 다음 요청으로 옵니다. prompt에는 이어서 할 일을 시각까지 구체적으로 적으세요.",
-    input_schema: { type: "object", properties: { question: str, options: { type: "array", items: { type: "object", properties: { label: str, detail: str, prompt: str }, required: ["label"] } } }, required: ["question", "options"] },
+    name: "ask_options", description: "사용자에게 고를 수 있는 카드를 보여 주고, 고를 때까지 기다렸다가 고른 것을 돌려줍니다(하이라이트 후보, 길이 선택, 대상이 애매할 때). 차례를 끝내지 말고 결과를 받아 이어서 작업하세요. 추천하는 것을 맨 앞에 두면 추천으로 표시됩니다. 선택지마다 meaning에 고르면 무엇을 할지(시각까지 구체적으로) 적으세요. 그 글이 그대로 돌아옵니다. multi_select를 켜면 여러 개를 고를 수 있습니다.",
+    input_schema: { type: "object", properties: { question: str, multi_select: { type: "boolean" }, recommended: { type: "boolean", description: "첫 번째를 추천으로 표시 (기본 켬)" }, options: { type: "array", items: { type: "object", properties: { label: str, detail: str, meaning: str }, required: ["label", "meaning"] } } }, required: ["question", "options"] },
   },
   {
-    name: "run_steps", description: "여러 도구를 한 번에 차례로 실행합니다(예: 클립마다 같은 작업). steps: [{tool, input}], 앞 단계가 실패하면 멈춥니다(stop_on_error 기본 켬). 그림을 돌려주는 도구의 그림은 빠지고 글만 돌아옵니다. 그림을 봐야 하면 따로 부르세요. show_options, get_playbook은 넣을 수 없습니다.",
+    name: "run_steps", description: "여러 도구를 한 번에 차례로 실행합니다(예: 클립마다 같은 작업). steps: [{tool, input}], 앞 단계가 실패하면 멈춥니다(stop_on_error 기본 켬). 그림을 돌려주는 도구의 그림은 빠지고 글만 돌아옵니다. 그림을 봐야 하면 따로 부르세요. ask_options, get_playbook은 넣을 수 없습니다.",
     input_schema: { type: "object", properties: { stop_on_error: { type: "boolean" }, steps: { type: "array", items: { type: "object", properties: { tool: str, input: { type: "object" } }, required: ["tool"] } } }, required: ["steps"] },
   },
   {
@@ -492,12 +509,13 @@ async function run(name: string, inp: any): Promise<Out> {
       await saveSkills(st.skills.filter((s) => s.name !== n));
       return `스킬 "${n}"을 지웠습니다.`;
     }
-    case "show_options": {
-      const card: ChoiceCard = { id: uid(), question: String(inp.question ?? ""), options: (inp.options ?? []).slice(0, 6).map((o: any) => ({ label: String(o.label), detail: o.detail ? String(o.detail) : undefined, prompt: o.prompt ? String(o.prompt) : undefined })), at: Date.now() };
+    case "ask_options": {
+      const card: ChoiceCard = { id: uid(), question: String(inp.question ?? ""), multi: !!inp.multi_select, recommended: inp.recommended !== false, options: (inp.options ?? []).slice(0, 8).map((o: any) => ({ label: String(o.label), detail: o.detail ? String(o.detail) : undefined, meaning: o.meaning ? String(o.meaning) : undefined })), at: Date.now() };
       if (!card.options.length) throw new Error("options가 비었습니다");
       const sid = activeChat()?.id;
       mutateChat((c) => ({ ...c, cards: [...(c.cards ?? []), card] }), sid);
-      return "카드를 보여 줬습니다. 여기서 차례를 끝내고 사용자의 선택을 기다리세요.";
+      set({ agentStatus: "고르기를 기다리는 중…" });
+      return await new Promise<string>((res) => waiting.set(card.id, res));
     }
     case "run_steps": {
       const steps: Step[] = inp.steps ?? [];
@@ -782,12 +800,71 @@ async function run(name: string, inp: any): Promise<Out> {
       editDraft("AI: 글자 지우기", (d) => ({ ...d, texts: ids?.length ? (d.texts ?? []).filter((t) => !ids.includes(t.id)) : [] }), d0.id, false);
       return "지웠습니다.";
     }
+    case "get_captions": {
+      const d = getDraft(inp.draft_id);
+      const { lines } = draftCaptions(d, draftWords(d, assetMap()));
+      const use = lines.filter((l) => l.t1 > (inp.from ?? 0) && l.t0 < (inp.to ?? Infinity));
+      if (!use.length) return "자막으로 쓸 말이 없습니다. 받아쓰기를 먼저 하세요.";
+      const tr = new Map((d.translation?.items ?? []).map((i) => [i.from, i.text]));
+      return [`자막 ${d.captions ? "켬" : "끔"}, ${use.length}줄${d.translation ? `, 번역 ${d.translation.lang}` : ""}`, ...use.map((l) => `${l.key} | ${r3(l.t0)}-${r3(l.t1)} | ${l.hidden ? "(숨김) " : ""}${l.text.replace(/\n/g, " / ")}${tr.has(l.key ?? "") ? ` | 번역: ${tr.get(l.key ?? "")}` : ""}${l.words && l.words.length > 1 ? ` | 단어: ${l.words.map((w) => `${wordKey(w)}=${w.t}`).join(" ")}` : ""}`)].join("\n");
+    }
+    case "edit_captions": {
+      const d0 = getDraft(inp.draft_id);
+      let e = d0.capEdits;
+      for (const o of inp.ops ?? []) {
+        const lines = captionLines(draftWords(d0, assetMap()), d0.captionStyle.maxChars, { lines: d0.captionStyle.lines, breakBy: d0.captionStyle.breakBy, edits: e });
+        const i = lines.findIndex((l) => l.key === o.key), l = lines[i];
+        switch (o.op) {
+          case "fix_word": e = { ...e, words: { ...e?.words, [o.key]: String(o.text) } }; break;
+          case "break_before": e = setBreak(e, o.key, "break"); break;
+          case "set_line": if (!l) throw new Error(`줄 없음: ${o.key}`); e = setLineText(e, l, String(o.text)); break;
+          case "join_next": if (!lines[i + 1]) throw new Error(`다음 줄 없음: ${o.key}`); e = joinNext(e, lines[i + 1]); break;
+          case "move_word_prev": if (!l) throw new Error(`줄 없음: ${o.key}`); e = moveWordPrev(e, l); break;
+          case "hide": e = setHidden(e, o.key, true); break;
+          case "show": e = setHidden(e, o.key, false); break;
+          default: throw new Error(`모르는 op: ${o.op}`);
+        }
+      }
+      editDraft("AI: 자막 고치기", (x) => ({ ...x, capEdits: e }), d0.id);
+      return `자막을 ${(inp.ops ?? []).length}군데 고쳤습니다.`;
+    }
+    case "fix_words": {
+      const pairs: { from: string; to: string }[] = inp.replace ?? [];
+      const byKey = new Map<string, string>((inp.words ?? []).map((w: any) => [String(w.key), String(w.text)]));
+      let n = 0;
+      for (const a of st.project?.assets ?? []) {
+        if (!a.words || (inp.asset_id && a.id !== inp.asset_id)) continue;
+        const words = a.words.map((w, i) => {
+          let t = byKey.get(`${a.id}:${i}`) ?? w.t;
+          for (const p of pairs) t = t.split(p.from).join(p.to);
+          if (t !== w.t) n++;
+          return t === w.t ? w : { ...w, t };
+        });
+        patchAsset(a.id, { words });
+      }
+      return `단어 ${n}개를 고쳤습니다.`;
+    }
+    case "set_translation": {
+      const d0 = getDraft(inp.draft_id);
+      const { lines } = draftCaptions(d0, draftWords(d0, assetMap()));
+      const at = new Map(lines.map((l) => [l.key, l]));
+      const old = d0.translation?.lang === inp.lang ? d0.translation!.items : [];
+      const items = new Map(old.map((i) => [i.from, i]));
+      const missing: string[] = [];
+      for (const it of inp.items ?? []) {
+        const l = at.get(String(it.key));
+        if (!l?.words?.length) { missing.push(String(it.key)); continue; }
+        items.set(String(it.key), { from: String(it.key), to: wordKey(l.words[l.words.length - 1]), text: String(it.text) });
+      }
+      editDraft("AI: 번역", (x) => ({ ...x, translation: { lang: String(inp.lang), items: [...items.values()] }, capShow: inp.show ?? x.capShow ?? "both", captions: true }), d0.id);
+      return `${inp.lang} 번역 ${items.size}줄을 넣었습니다 (전체 ${lines.length}줄).${missing.length ? ` 줄을 찾지 못한 key: ${missing.join(", ")}` : ""}`;
+    }
     case "set_captions": {
       const d0 = getDraft(inp.draft_id);
       const look = CAPTION_PRESETS.find((p) => p.id === inp.style)?.style ?? {};
       editDraft("AI: 자막", (d) => ({
         ...d, captions: !!inp.enabled,
-        captionStyle: { ...d.captionStyle, ...look, ...(inp.size ? { size: Number(inp.size) } : {}), ...(inp.position ? { position: inp.position } : {}), ...(inp.max_chars ? { maxChars: Number(inp.max_chars) } : {}) },
+        captionStyle: { ...d.captionStyle, ...look, ...(inp.anim ? { anim: inp.anim } : {}), ...(inp.anim_by ? { animBy: inp.anim_by } : {}), ...(inp.lines ? { lines: Number(inp.lines) as 1 | 2 } : {}), ...(inp.break_by ? { breakBy: inp.break_by } : {}), ...(inp.keyword ? { keyword: inp.keyword, keyColor: inp.key_color ?? d.captionStyle.keyColor ?? "#FFE14D" } : {}), ...(inp.highlight != null ? { highlight: inp.highlight } : {}), ...(inp.align ? { align: inp.align } : {}), ...(inp.size ? { size: Number(inp.size) } : {}), ...(inp.position ? { position: inp.position } : {}), ...(inp.max_chars ? { maxChars: Number(inp.max_chars) } : {}) },
       }), d0.id);
       const n = draftWords(getDraft(d0.id), assetMap()).length;
       return inp.enabled ? `자막을 켰습니다 (단어 ${n}개 기준).${n ? "" : " 받아쓰기가 없어 자막이 비어 있습니다."}` : "자막을 껐습니다.";
@@ -828,8 +905,29 @@ async function run(name: string, inp: any): Promise<Out> {
 // ---------------------------------------------------------------- loop
 
 let stopFlag = false;
+/** Cards the AI is waiting on; an answer ends the wait and comes back as the tool's result. */
+const waiting = new Map<string, (answer: string) => void>();
+export const isWaitingCard = (id: string) => waiting.has(id);
+export const waitingCardOf = (c: ChatSession | null | undefined) => c?.cards?.find((k) => !k.used && waiting.has(k.id)) ?? null;
+function endWait(id: string, answer: string) {
+  const res = waiting.get(id);
+  if (!res) return false;
+  waiting.delete(id);
+  mutateChat((c) => ({ ...c, cards: (c.cards ?? []).map((k) => (k.id === id ? { ...k, used: true } : k)) }));
+  set({ agentStatus: "생각하는 중…" });
+  res(answer);
+  return true;
+}
+/** The user picked: the AI gets what each pick means. Returns false when the AI is no longer waiting. */
+export function answerCard(card: ChoiceCard, picks: number[]): boolean {
+  const lines = picks.map((i) => card.options[i]).map((o) => `- ${o.label}${o.meaning ? `: ${o.meaning}` : ""}`);
+  return endWait(card.id, `사용자가 고른 것:\n${lines.join("\n")}`);
+}
+export const answerCardText = (card: ChoiceCard, text: string) => endWait(card.id, `사용자가 카드에서 고르지 않고 이렇게 답했습니다: ${text}`);
+
 export const stopAgent = () => {
   stopFlag = true;
+  for (const id of [...waiting.keys()]) endWait(id, "사용자가 작업을 멈췄습니다. 여기서 끝내세요.");
   if (ccRunning) api.ccStop().catch(() => {});
 };
 
@@ -1027,7 +1125,7 @@ export const TOOL_LABEL: Record<string, string> = {
   get_project_overview: "프로젝트 살펴보는 중", get_transcript: "대본 읽는 중", search_transcript: "대본 찾는 중", view_frames: "장면 보는 중",
   contact_sheet: "영상 훑어보는 중", create_draft: "편집본 만드는 중", get_draft: "편집본 확인 중", edit_draft: "편집하는 중",
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
-  paste_attributes: "속성 붙여넣는 중", sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", show_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
+  get_captions: "자막 읽는 중", edit_captions: "자막 고치는 중", fix_words: "받아쓰기 고치는 중", set_translation: "번역 넣는 중", paste_attributes: "속성 붙여넣는 중", sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", ask_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
 

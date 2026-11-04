@@ -10,7 +10,7 @@ import {
   MOVE_PRESETS, movePreset, TRANSITIONS, timedDur, uid, updateAudio, updateClip, updateOverlay, viewAt, volAt,
 } from "../edit";
 import { CAPTION_PRESETS, STICKERS, TEXT_KINDS, textLook } from "../graphics";
-import { asset, draft, editDraft, patchAsset, prepare360, st, toast, useStore } from "../store";
+import { asset, draft, editDraft, patchAsset, prepare360, set, st, toast, useStore } from "../store";
 import type { Clip, ColorAdj, Draft, MusicClip, Overlay, TextItem, Transform, View, VolKey } from "../types";
 import { player } from "./Viewer";
 import { Stab360 } from "./Stab360";
@@ -414,6 +414,45 @@ function DraftView({ d }: { d: Draft }) {
                 {CAPTION_PRESETS.map((p) => <option value={p.id}>{p.label}</option>)}
               </select>
             </label>
+            <div class="row">
+              <label>나타나기
+                <select value={d.captionStyle.anim ?? "none"} onChange={(e) => editDraft("자막 나타나기", (x) => ({ ...x, captionStyle: { ...x.captionStyle, anim: (e.target as HTMLSelectElement).value as any } }), st.draftId, false)}>
+                  <option value="none">그냥</option><option value="fade">서서히</option><option value="rise">아래에서 위로</option><option value="drop">위에서 아래로</option><option value="pop">톡 튀게</option><option value="type">말하는 대로 한 단어씩</option>
+                </select>
+              </label>
+              <label>단위
+                <select value={d.captionStyle.animBy ?? "line"} onChange={(e) => editDraft("자막 단위", (x) => ({ ...x, captionStyle: { ...x.captionStyle, animBy: (e.target as HTMLSelectElement).value as any } }), st.draftId, false)}>
+                  <option value="line">줄마다</option><option value="word">단어마다</option>
+                </select>
+              </label>
+            </div>
+            <div class="row">
+              <label>줄 나누기
+                <select value={d.captionStyle.breakBy ?? "smart"} onChange={(e) => editDraft("자막 줄 나누기", (x) => ({ ...x, captionStyle: { ...x.captionStyle, breakBy: (e.target as HTMLSelectElement).value as any } }), st.draftId, false)}>
+                  <option value="smart">말 끊기는 곳에서</option><option value="chars">글자 수대로</option><option value="sentence">문장 단위</option>
+                </select>
+              </label>
+              <label>줄 수
+                <select value={String(d.captionStyle.lines ?? 1)} onChange={(e) => editDraft("자막 줄 수", (x) => ({ ...x, captionStyle: { ...x.captionStyle, lines: Number((e.target as HTMLSelectElement).value) as 1 | 2 } }), st.draftId, false)}>
+                  <option value="1">1줄</option><option value="2">2줄</option>
+                </select>
+              </label>
+              <label>정렬
+                <select value={d.captionStyle.align ?? "center"} onChange={(e) => editDraft("자막 정렬", (x) => ({ ...x, captionStyle: { ...x.captionStyle, align: (e.target as HTMLSelectElement).value as any } }), st.draftId, false)}>
+                  <option value="left">왼쪽</option><option value="center">가운데</option><option value="right">오른쪽</option>
+                </select>
+              </label>
+            </div>
+            <div class="row">
+              <label>강조 단어
+                <select value={d.captionStyle.keyword ?? "none"} onChange={(e) => editDraft("자막 강조 단어", (x) => ({ ...x, captionStyle: { ...x.captionStyle, keyword: (e.target as HTMLSelectElement).value as any, keyColor: x.captionStyle.keyColor || "#FFE14D" } }), st.draftId, false)}>
+                  <option value="none">없음</option><option value="first">첫 단어</option><option value="last">끝 단어</option><option value="number">숫자</option><option value="longest">가장 긴 단어</option>
+                </select>
+              </label>
+              <label>말하는 단어<input type="color" value={d.captionStyle.highlight || "#FFE14D"} onChange={(e) => editDraft("말하는 단어 색", (x) => ({ ...x, captionStyle: { ...x.captionStyle, highlight: (e.target as HTMLInputElement).value } }), st.draftId, false)} /></label>
+              <label>강조 단어 색<input type="color" value={d.captionStyle.keyColor || "#FFE14D"} onChange={(e) => editDraft("강조 단어 색", (x) => ({ ...x, captionStyle: { ...x.captionStyle, keyColor: (e.target as HTMLInputElement).value } }), st.draftId, false)} /></label>
+            </div>
+            <button class="small" onClick={() => set({ leftTab: "captions" })}>줄마다 고치기·번역…</button>
             <Num label="크기" value={d.captionStyle.size} min={2} max={14} step={0.5} def={6} unit="%" onChange={(v) => editDraft("자막 크기", (x) => ({ ...x, captionStyle: { ...x.captionStyle, size: v } }), st.draftId, false)} />
             <Num label="한 줄 글자" value={d.captionStyle.maxChars} min={6} max={40} step={1} def={18} onChange={(v) => editDraft("자막 줄 길이", (x) => ({ ...x, captionStyle: { ...x.captionStyle, maxChars: v } }), st.draftId, false)} />
             <div class="row">

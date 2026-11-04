@@ -479,3 +479,19 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .clip.off { opacity: .35; filter: grayscale(1); }
 .key-btn { background: transparent; border-color: transparent; padding: 1px 4px; }
 .key-btn.on { border-color: var(--accent); background: var(--accent-bg); }
+
+/* Captions tab and question cards */
+.caps-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; gap: 6px; padding: 8px; }
+.caps-head, .caps-ai { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.caps-list { overflow: auto; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+.cap-row { display: grid; grid-template-columns: auto 1fr; gap: 3px 6px; padding: 5px; border-radius: 4px; border: 1px solid transparent; }
+.cap-row.on { border-color: var(--accent); }
+.cap-row.off { opacity: .5; }
+.cap-time { font-variant-numeric: tabular-nums; font-size: 11px; align-self: center; }
+.cap-row input { min-width: 0; width: 100%; }
+.cap-row .cap-tr { grid-column: 2; }
+.cap-acts { grid-column: 2; display: flex; gap: 2px; flex-wrap: wrap; }
+.choice.on { border-color: var(--accent); background: var(--accent-bg); }
+.choice-rec { margin-left: 6px; font-size: 10px; padding: 0 5px; border-radius: 8px; background: var(--accent-bg); color: var(--accent); font-weight: 600; }
+.caption-tr { margin-top: .15em; }
+.cap-acts .tb { width: auto; min-width: 0; padding: 0 6px; font-size: 11px; white-space: nowrap; }

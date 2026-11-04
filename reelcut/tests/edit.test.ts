@@ -100,7 +100,7 @@ describe("captions", () => {
     expect(lines.map((l) => l.text)).toEqual(["하나 둘", "셋."]);
     const ass = toAss(lines, { size: 6, color: "#FFFFFF", outline: "#000000", position: "bottom", maxChars: 18, font: "Malgun Gothic" }, 1920, 1080);
     expect(ass).toContain("PlayResY: 1080");
-    expect(ass).toContain("Dialogue: 0,0:00:00.00,0:00:00.90,Default,,0,0,0,,하나 둘");
+    expect(ass).toMatch(/Dialogue: 0,0:00:00\.00,0:00:00\.90,Default,,0,0,0,,\{[^}]*\}하나 둘/);
   });
 });
 

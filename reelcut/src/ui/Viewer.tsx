@@ -6,7 +6,8 @@
 import { Grid3x3, Layers, Maximize, Pause, Play, Rewind, FastForward, SkipBack, SkipForward } from "lucide-preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api, fileSrc } from "../api";
-import { captionLines } from "../captions";
+import { draftCaptions } from "../captions";
+import { CaptionView } from "./CaptionView";
 import {
   animAt, audioTrack, clipAt, clipDur, DEFAULT_TRANSFORM, DEFAULT_VIEW, draftDuration, draftWords, fmtTCF, insertClips, is360, isDefaultColor, isGap, newClip, newOverlay, overlays,
   parseTC, transitionLook, xinOf, playableInWebView, previewSource, setViewKey, starts, timedDur, trackState, updateClip, viewAt, volAt,
@@ -629,8 +630,10 @@ export function Viewer() {
     player.refresh();
   }, [d?.updated]);
 
-  const lines = useMemo(() => (d?.captions ? captionLines(draftWords(d, assetMap()), d.captionStyle.maxChars) : []), [d?.updated, d?.captions, s.project?.assets]);
-  const line = !src && d?.captions && !trackState(d, "C1").hide ? lines.find((l) => s.playhead >= l.t0 && s.playhead < l.t1) : null;
+  const caps = useMemo(() => (d?.captions ? draftCaptions(d, draftWords(d, assetMap())) : null), [d?.updated, d?.captions, s.project?.assets]);
+  const capOn = !src && d?.captions && !trackState(d, "C1").hide;
+  const line = capOn ? caps?.lines.find((l) => !l.hidden && s.playhead >= l.t0 && s.playhead < l.t1) : null;
+  const trLine = capOn ? caps?.tr.find((l) => s.playhead >= l.t0 && s.playhead < l.t1) : null;
 
   const total = src ? src.info.duration : d ? draftDuration(d) : 0;
   const now = src ? player.srcT : s.playhead;
@@ -735,16 +738,7 @@ export function Viewer() {
           <img ref={o3i} class="ov ov3" alt="" style={{ display: "none" }} />
           {noPreview && <div class="overlay no-preview" role="note">{NO_PREVIEW}</div>}
           {!shown && !hitClip && <div class="overlay muted">{d && !d.clips.length ? "미디어를 타임라인에 끌어다 놓거나, 미디어를 두 번 눌러 구간을 골라 넣으세요." : ""}</div>}
-          {line && (
-            <div class={`caption ${d!.captionStyle.position} ${d!.captionStyle.box ? "boxed" : ""}`} style={{ fontSize: `${d!.captionStyle.size * 0.9}cqh`, color: d!.captionStyle.color, fontWeight: d!.captionStyle.bold === false ? 400 : 700 }}>
-              <span>{d!.captionStyle.highlight && line.words?.length
-                ? line.words.map((w, i) => {
-                    const on = s.playhead >= w.t0 && (i + 1 < line.words!.length ? s.playhead < line.words![i + 1].t0 : s.playhead < line.t1);
-                    return <>{i ? " " : ""}<span style={on ? { color: d!.captionStyle.highlight, display: "inline-block", transform: d!.captionStyle.pop ? "scale(1.12)" : undefined } : undefined}>{w.t}</span></>;
-                  })
-                : line.text}</span>
-            </div>
-          )}
+          {d && (line || trLine) && <CaptionView line={line ?? null} tr={trLine ?? null} st={d.captionStyle} show={d.capShow ?? "orig"} t={s.playhead} />}
           {!src && (d?.texts ?? []).filter((t) => s.playhead >= t.at && s.playhead < t.at + t.dur && !trackState(d!, "C1").hide).map((t) => {
             const l = textLook(t);
             const pos = { left: `${l.x * 100}%`, top: `${l.y * 100}%`, transform: l.align === "left" ? "translateY(-50%)" : "translate(-50%, -50%)" };

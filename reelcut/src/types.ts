@@ -149,7 +149,36 @@ export type CaptionStyle = {
   /** The spoken word also grows a little. */
   pop?: boolean;
   bold?: boolean;
+  /** Colour behind the words when `box` is on. */
+  boxColor?: string;
+  /** A block of colour behind the spoken word. */
+  markColor?: string;
+  /** A word picked out on its own, in `keyColor`. */
+  keyword?: "none" | "first" | "last" | "number" | "longest";
+  keyColor?: string;
+  /** How a line (or each word) comes on screen; "type" shows words as they are spoken. */
+  anim?: "none" | "fade" | "rise" | "drop" | "pop" | "type";
+  animBy?: "line" | "word";
+  /** Rows per line, and where lines end: natural places, by length, or at the end of sentences. */
+  lines?: 1 | 2;
+  breakBy?: "smart" | "chars" | "sentence";
+  align?: "left" | "center" | "right";
+  italic?: boolean;
+  spacing?: number;
+  glow?: boolean;
 };
+
+/** Caption changes of one draft, against the spoken words ("asset:word number"). */
+export type CapEdits = {
+  words?: Record<string, string>;
+  /** Before this word: always a new line, or never. */
+  breaks?: Record<string, "break" | "join">;
+  /** A whole line's own text, by its first word. */
+  lineText?: Record<string, string>;
+  hidden?: string[];
+};
+/** A translation of the captions; each item runs from one spoken word to another. */
+export type Translation = { lang: string; items: { from: string; to: string; text: string }[] };
 
 export type TextKind = "title" | "subtitle" | "lower" | "pin" | "sticker";
 /** A title, place/date pin or sticker on screen from `at` for `dur` seconds (x, y: fractions of the frame; size: % of its height). */
@@ -170,6 +199,10 @@ export type Draft = {
   markers: Marker[];
   captions: boolean;
   captionStyle: CaptionStyle;
+  capEdits?: CapEdits;
+  translation?: Translation;
+  /** What the captions show when there is a translation. */
+  capShow?: "orig" | "tr" | "both";
   /** Titles, pins and stickers. */
   texts?: TextItem[];
   /** Output aspect: 16:9 | 9:16 | 1:1 | 4:5 */
@@ -186,7 +219,7 @@ export type Draft = {
 /** A guide the AI reads before a kind of job. */
 export type Skill = { name: string; description: string; triggers?: string[]; body: string };
 /** A choice the AI offers: pressing it sends `prompt` (or the label) as the next request. */
-export type ChoiceCard = { id: string; question: string; options: { label: string; detail?: string; prompt?: string }[]; at: number; used?: boolean };
+export type ChoiceCard = { id: string; question: string; options: { label: string; detail?: string; meaning?: string; prompt?: string }[]; at: number; used?: boolean; multi?: boolean; recommended?: boolean };
 
 export type ChatBlock = Record<string, unknown> & { type: string };
 export type ChatMsg = { role: "user" | "assistant"; content: ChatBlock[] | string };

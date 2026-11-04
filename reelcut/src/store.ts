@@ -44,7 +44,7 @@ type S = {
   agentBusy: boolean;
   agentStatus: string;
   rightTab: "inspect" | "agent";
-  leftTab: "media" | "transcript";
+  leftTab: "media" | "transcript" | "captions";
   /** Selected item on V2/V3 or A1–A3. */
   selItem: string | null;
   tool: Tool;

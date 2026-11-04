@@ -4,7 +4,7 @@
 import { Captions, Eye, EyeOff, Headphones, Lock, LockOpen, Volume2, VolumeX } from "lucide-preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { fileSrc } from "../api";
-import { captionLines } from "../captions";
+import { draftCaptions } from "../captions";
 import { doFillers, doSilence, getPacing, setPacing } from "../commands";
 import {
   audioTrack, clipDur, deleteClip, detachAudio, draftDuration, draftWords, fmtTCF, insertClips, is360, isGap, liftClip, moveClip, newClip, newOverlay, overlays, PACING,
@@ -86,7 +86,7 @@ export function Timeline() {
     if (x < el.scrollLeft || x > el.scrollLeft + el.clientWidth - 40) el.scrollLeft = x - 60;
   }, [s.playhead]);
 
-  const caps = useMemo(() => (d?.captions ? captionLines(draftWords(d, assetMap()), d.captionStyle.maxChars) : []), [d?.updated, d?.captions, s.project?.assets]);
+  const caps = useMemo(() => (d?.captions ? draftCaptions(d, draftWords(d, assetMap())).lines.filter((l) => !l.hidden) : []), [d?.updated, d?.captions, s.project?.assets]);
 
   // Where silence removal would cut (grey bands), for the "잘릴 무음 미리 보기" view.
   const silence = useMemo(() => {

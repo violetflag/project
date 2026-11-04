@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
-import { captionLines, toAss } from "../src/captions";
-import { STICKERS, stickerSvgPath, textEvent, textLook } from "../src/graphics";
+import { captionLines, draftCaptions, keyWordIndex, moveWordPrev, setHidden, setLineText, spokenIndex, toAss, toSrt, wordKey } from "../src/captions";
+import { CAPTION_PRESETS, STICKERS, stickerSvgPath, textEvent, textLook } from "../src/graphics";
 import { BUILTIN_SKILLS, cleanSkillName, findSkill, skillCatalog, upsertSkill } from "../src/skills";
 import { CLIP_ATTRS, pasteAttrs, toSegs, transitionLook, TRANSITIONS, multicamDraft, isDefaultColor, LOOKS, animAt, DEFAULT_CAPTION, fitMusic, mergeScenes, movePreset, volAt, newDraft, playableInWebView, previewSource, searchScenes } from "../src/edit";
 import { dirToDfisheye } from "../src/gl360";
@@ -97,8 +97,8 @@ describe("titles, stickers and caption looks", () => {
     const ass = toAss(lines, { ...DEFAULT_CAPTION, highlight: "#FFE14D" }, 1280, 720);
     const ev = ass.split("\n").filter((l) => l.startsWith("Dialogue"));
     expect(ev).toHaveLength(2);
-    expect(ev[0]).toContain("{\\c&H004DE1FF&}안녕{\\r} 하세요");
-    expect(ev[1]).toContain("안녕 {\\c&H004DE1FF&}하세요{\\r}");
+    expect(ev[0]).toMatch(/\{\\c&H004DE1FF&[^}]*\}안녕 \{\\c&H00FFFFFF&[^}]*\}하세요/);
+    expect(ev[1]).toMatch(/\{\\c&H00FFFFFF&[^}]*\}안녕 \{\\c&H004DE1FF&[^}]*\}하세요/);
     const plain = toAss(lines, DEFAULT_CAPTION, 1280, 720).split("\n").filter((l) => l.startsWith("Dialogue"));
     expect(plain).toHaveLength(1);
   });
@@ -214,5 +214,72 @@ describe("transitions, attributes and switched-off clips", () => {
     const [seg] = toSegs(d, new Map([[a.id, a]]));
     expect(seg.kind).toBe("gap");
     expect(seg.dur).toBe(5);
+  });
+});
+
+describe("caption lines, styles and translation", () => {
+  const w = (t: string, t0: number, wi = 0) => ({ t, s: t0, e: t0 + 0.3, clip: "c", ci: 0, wi, asset: "a", t0, t1: t0 + 0.3 } as any);
+  const run = (list: string[]) => list.map((t, i) => w(t, i * 0.35, i));
+  it("ends a long line at a natural place and keeps a lone short word with the line before", () => {
+    const ws = run(["오늘은", "날씨가", "좋아서", "아이들과", "공원에", "다녀왔어요"]);
+    const smart = captionLines(ws, 14);
+    expect(smart[0].text).toBe("오늘은 날씨가 좋아서");
+    const chars = captionLines(ws, 14, { breakBy: "chars" });
+    expect(chars[0].text).not.toBe(smart[1].text);
+  });
+  it("makes two rows of similar length", () => {
+    const [l] = captionLines(run(["첫번째줄에", "들어갈", "말과", "두번째줄에", "들어갈", "말"]), 14, { lines: 2 });
+    expect(l.text.split("\n")).toHaveLength(2);
+    const [a, b] = l.text.split("\n");
+    expect(Math.abs(a.length - b.length)).toBeLessThan(6);
+  });
+  it("keeps hand changes against the spoken words", () => {
+    const ws = run(["하나", "둘이", "셋이", "넷이"]);
+    const [l] = captionLines(ws, 40);
+    const fixed = setLineText(undefined, l, "하나 둘 셋이 넷이");
+    expect(fixed.words).toEqual({ "a:1": "둘" });
+    expect(captionLines(ws, 40, { edits: fixed })[0].text).toBe("하나 둘 셋이 넷이");
+    const custom = setLineText(undefined, l, "전혀 다른 글");
+    const [c] = captionLines(ws, 40, { edits: custom });
+    expect([c.text, c.custom]).toEqual(["전혀 다른 글", true]);
+    const split = captionLines(ws, 40, { edits: { breaks: { "a:2": "break" } } });
+    expect(split.map((x) => x.text)).toEqual(["하나 둘이", "셋이 넷이"]);
+    const moved = captionLines(ws, 40, { edits: moveWordPrev({ breaks: { "a:2": "break" } }, split[1]) });
+    expect(moved.map((x) => x.text)).toEqual(["하나 둘이 셋이", "넷이"]);
+    expect(captionLines(ws, 40, { edits: setHidden(undefined, "a:0", true) })[0].hidden).toBe(true);
+  });
+  it("picks key words and the spoken word", () => {
+    const ws = [{ t: "오늘" }, { t: "3시에" }, { t: "만나기로했어요" }];
+    expect(keyWordIndex(ws, "number")).toBe(1);
+    expect(keyWordIndex(ws, "longest")).toBe(2);
+    expect(keyWordIndex(ws, "none")).toBe(-1);
+    const [l] = captionLines(run(["하나", "둘"]), 40);
+    expect(spokenIndex(l, 0.1)).toBe(0);
+    expect(spokenIndex(l, 0.4)).toBe(1);
+  });
+  it("writes entrances, marks and translation into the ASS", () => {
+    const ws = run(["안녕", "하세요"]);
+    const lines = captionLines(ws, 40);
+    const st = { ...DEFAULT_CAPTION };
+    expect(toAss(lines, { ...st, anim: "fade" }, 1920, 1080)).toContain("\\fad(180,0)");
+    expect(toAss(lines, { ...st, anim: "rise" }, 1920, 1080)).toContain("\\move(960,");
+    expect(toAss(lines, { ...st, markColor: "#7C4DFF" }, 1920, 1080)).toContain("\\3c&H00FF4D7C&");
+    const typed = toAss(lines, { ...st, anim: "type" }, 1920, 1080);
+    expect(typed).toContain("\\alpha&HFF&");
+    expect((typed.match(/^Dialogue/gm) ?? []).length).toBe(2);
+    const d = { ...newDraft("t"), captionStyle: st, translation: { lang: "영어", items: [{ from: "a:0", to: "a:1", text: "Hello" }] } };
+    const c = draftCaptions(d, ws);
+    expect(c.tr[0].text).toBe("Hello");
+    const bothAss = toAss(c.lines, st, 1920, 1080, [], c.tr, "both");
+    expect(bothAss).toContain(",Trans,,0,0,0,,");
+    expect(bothAss).toContain("안녕");
+    const trOnly = toAss(c.lines, st, 1920, 1080, [], c.tr, "tr");
+    expect(trOnly).not.toContain("안녕");
+    expect(toSrt(c.tr)).toContain("Hello");
+    expect(wordKey(ws[1])).toBe("a:1");
+  });
+  it("has 15 distinct looks", () => {
+    expect(CAPTION_PRESETS).toHaveLength(15);
+    expect(new Set(CAPTION_PRESETS.map((p) => p.id)).size).toBe(15);
   });
 });

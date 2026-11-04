@@ -80,11 +80,23 @@ export function textEvent(t: TextItem, width: number, height: number): string {
 }
 
 /** Caption looks to choose from (style values applied over the current ones). */
+const PLAIN: Partial<CaptionStyle> = { font: "Malgun Gothic", color: "#FFFFFF", outline: "#000000", box: false, boxColor: "", highlight: "", markColor: "", keyword: "none", keyColor: "", pop: false, anim: "none", animBy: "line", italic: false, spacing: 0, glow: false, bold: true, size: 6 };
+const look = (id: string, label: string, style: Partial<CaptionStyle>) => ({ id, label, style: { ...PLAIN, ...style } });
+
 export const CAPTION_PRESETS: { id: string; label: string; style: Partial<CaptionStyle> }[] = [
-  { id: "basic", label: "기본 (흰 글자 + 테두리)", style: { color: "#FFFFFF", outline: "#000000", box: false, highlight: "", bold: true, pop: false, size: 6 } },
-  { id: "yellow", label: "노란 글자", style: { color: "#FFE14D", outline: "#000000", box: false, highlight: "", bold: true, pop: false, size: 6 } },
-  { id: "box", label: "검은 상자", style: { color: "#FFFFFF", outline: "#000000", box: true, highlight: "", bold: true, pop: false, size: 5.5 } },
-  { id: "karaoke", label: "말하는 단어 강조", style: { color: "#FFFFFF", outline: "#000000", box: false, highlight: "#FFE14D", bold: true, pop: false, size: 6 } },
-  { id: "pop", label: "강조 + 톡 튀는 단어 (쇼츠)", style: { color: "#FFFFFF", outline: "#000000", box: false, highlight: "#5BE7A9", bold: true, pop: true, size: 8, maxChars: 12, position: "middle" } },
-  { id: "soft", label: "얇고 차분하게", style: { color: "#F2F2F2", outline: "#333333", box: false, highlight: "", bold: false, pop: false, size: 5 } },
+  look("basic", "기본 (흰 글자 + 테두리)", {}),
+  look("soft", "얇고 차분하게", { color: "#F2F2F2", outline: "#333333", bold: false, size: 5 }),
+  look("fade_in", "부드럽게 나타나기", { anim: "fade", size: 5.5 }),
+  look("serif_bar", "명조체 + 어두운 띠", { font: "Noto Serif KR", box: true, boxColor: "#14161A", size: 5, bold: false }),
+  look("box", "검은 상자", { box: true, size: 5.5 }),
+  look("yellow", "노란 글자", { color: "#FFE14D" }),
+  look("key_green", "핵심 단어 초록", { keyword: "longest", keyColor: "#5BE7A9" }),
+  look("key_yellow", "숫자·핵심 단어 노랑", { keyword: "number", keyColor: "#FFE14D" }),
+  look("karaoke", "말하는 단어 강조", { highlight: "#FFE14D" }),
+  look("mark_purple", "말하는 단어에 보라 형광펜", { markColor: "#7C4DFF", size: 6.5 }),
+  look("mark_orange", "말하는 단어에 주황 형광펜", { markColor: "#FF7A1A", color: "#FFFFFF", size: 6.5 }),
+  look("red_edge", "빨간 테두리", { outline: "#D81E2C", size: 7 }),
+  look("yellow_block", "노란 상자 + 검은 글자", { box: true, boxColor: "#FFD400", color: "#111111", size: 5.5 }),
+  look("neon", "푸른 네온", { color: "#BFEFFF", outline: "#1E7BFF", glow: true, size: 6.5 }),
+  look("pop", "강조 + 톡 튀는 단어 (쇼츠)", { highlight: "#5BE7A9", pop: true, anim: "pop", animBy: "word", size: 8, maxChars: 12, position: "middle" }),
 ];
