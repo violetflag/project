@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
 import { captionLines, draftCaptions, keyWordIndex, moveWordPrev, setHidden, setLineText, spokenIndex, toAss, toSrt, wordKey } from "../src/captions";
-import { BUILTIN_SKILLS, expandSkillCommand, skillFromText, skillToText } from "../src/skills";
+import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, mergeSkills, parseSkillCommand, runChainSteps, skillFromText, skillToText, upsertSkill } from "../src/skills";
 import { TOOLS } from "../src/agent";
 import { NOT_IN_SCRIPT, SDK, transpileScript } from "../src/script";
 import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
@@ -304,9 +304,9 @@ describe("skills and gaze", () => {
     const k = { name: "twins", description: "쌍둥이 쇼츠", triggers: ["쇼츠", "쌍둥이"], body: "1. 세로\n2. 15초" };
     expect(skillFromText(skillToText(k))).toEqual(k);
     expect(() => skillFromText("그냥 글")).toThrow();
-    expect(expandSkillCommand("/twins 4분부터", [k])).toContain('"twins"');
-    expect(expandSkillCommand("/twins 4분부터", [k])).toContain("4분부터");
-    expect(expandSkillCommand("/없는것 해줘", [k])).toBe("/없는것 해줘");
+    expect(parseSkillCommand("/twins 4분부터", [k])).toEqual({ names: ["twins"], rest: "4분부터" });
+    expect(parseSkillCommand("/twins /vlog_edit 4분부터 /없음", [k])).toEqual({ names: ["twins", "vlog_edit"], rest: "4분부터 /없음" });
+    expect(parseSkillCommand("/없는것 해줘", [k])).toEqual({ names: [], rest: "/없는것 해줘" });
   });
   it("joins looks facing the camera into stretches", () => {
     const f = (front: number) => ({ front });
@@ -357,5 +357,89 @@ describe("export file names", () => {
     expect(splitOutName("clip.v2.mp4")).toEqual({ dir: "", name: "clip.v2" });
     expect(splitOutName("sub/out.mp4")).toEqual({ dir: "", name: "out" });
     expect(splitOutName("")).toEqual({ dir: "", name: "" });
+  });
+});
+
+describe("merged skills", () => {
+  const a = { name: "find", description: "찾기", body: "찾는다" }, b = { name: "make", description: "만들기", body: "만든다" };
+  it("keeps the order, opens merged steps and needs at least two", () => {
+    const m = mergeSkills({ name: "Twins Short", steps: [{ skill: "find", label: "쌍둥이 찾기" }, { skill: "make" }] }, [a, b]);
+    expect(m.name).toBe("twins_short");
+    expect(m.steps).toEqual([{ skill: "find", label: "쌍둥이 찾기" }, { skill: "make" }]);
+    expect(m.description).toBe("쌍둥이 찾기 → make");
+    const m2 = mergeSkills({ name: "more", steps: [{ skill: "twins_short" }, { skill: "find" }] }, [a, b, m]);
+    expect(m2.steps!.map((x) => x.skill)).toEqual(["find", "make", "find"]);
+    expect(() => mergeSkills({ name: "x", steps: [{ skill: "find" }] }, [a])).toThrow("두 개");
+    expect(() => mergeSkills({ name: "x", steps: [{ skill: "find" }, { skill: "nope" }] }, [a])).toThrow("nope");
+    expect(() => mergeSkills({ name: "find", steps: [{ skill: "find" }, { skill: "make" }] }, [a, b])).toThrow("자기");
+  });
+  it("survives saving and text, and names a step that has gone", () => {
+    const m = mergeSkills({ name: "t", steps: [{ skill: "find", label: "쌍둥이 찾기" }, { skill: "make" }] }, [a, b]);
+    expect(upsertSkill([], m)[0].steps).toEqual(m.steps);
+    expect(skillFromText(skillToText(m)).steps).toEqual(m.steps);
+    expect(chainSkills(m, [a, b]).map((x) => x.skill.name)).toEqual(["find", "make"]);
+    expect(() => chainSkills(m, [a])).toThrow('2단계 스킬 "make"');
+  });
+  it("runs steps in order, passing each result on", async () => {
+    const seen: string[] = [], shown: string[][] = [];
+    const r = await runChainSteps(["가", "나", "다"], async (i, prev) => { seen.push(`${i}:${prev}`); return { ok: true, summary: `결과${i}` }; }, (s) => shown.push(s.map((x) => x.state)));
+    expect(r.ok).toBe(true);
+    expect(seen).toEqual(["0:", "1:결과0", "2:결과1"]);
+    expect(shown[0]).toEqual(["run", "wait", "wait"]);
+    expect(shown[shown.length - 1]).toEqual(["done", "done", "done"]);
+  });
+  it("stops at the step that fails and says which", async () => {
+    const seen: number[] = [];
+    let last: string[] = [];
+    const fails = await runChainSteps(["가", "나", "다"], async (i) => { seen.push(i); return { ok: i !== 1, summary: i === 1 ? "장면 없음" : "됨" }; }, (s) => { last = s.map((x) => x.state); });
+    expect(seen).toEqual([0, 1]);
+    expect(last).toEqual(["done", "fail", "skip"]);
+    expect(fails).toMatchObject({ ok: false, failed: 1 });
+    expect(fails.message).toContain('2/3단계 "나"');
+    expect(fails.message).toContain("장면 없음");
+    const thrown = await runChainSteps(["가", "나"], async () => { throw new Error("끊김"); }, () => {});
+    expect(thrown).toMatchObject({ ok: false, failed: 0 });
+  });
+  it("tells the AI to do only this step, from the last result", () => {
+    const n = chainStepNote("t", ["찾기", "만들기"], 0, "find", "쌍둥이", "");
+    expect(n).toContain("1/2단계");
+    expect(n).toContain('"find"');
+    expect(n).toContain("미리 하지 마세요");
+    expect(chainStepNote("t", ["찾기", "만들기"], 1, "make", "", "편집본 x")).toContain("편집본 x");
+  });
+});
+
+describe("skills in force together", () => {
+  const a = { name: "a", description: "", body: "에이 규칙" }, b = { name: "b", description: "", body: "비 규칙" };
+  it("puts the later pick last, even when picked again", () => {
+    expect(addActive(["a", "b"], "a")).toEqual(["b", "a"]);
+    expect(addActive(undefined, "a")).toEqual(["a"]);
+  });
+  it("says the later pick wins, and gives each text only once", () => {
+    const one = activeNote([a, b], ["a"], []);
+    expect(one.note).toContain("에이 규칙");
+    expect(one.note).not.toContain("나중에 고른");
+    const two = activeNote([a, b], ["a", "b"], one.sent);
+    expect(two.note).toContain("a, b");
+    expect(two.note).toContain("나중에 고른 스킬을 따르세요");
+    expect(two.note).not.toContain("에이 규칙");
+    expect(two.note).toContain("비 규칙");
+    expect(two.sent).toEqual(["a", "b"]);
+    // Nothing is sent again until a compaction clears the record.
+    expect(activeNote([a, b], ["a", "b"], two.sent).note).not.toContain("비 규칙");
+    expect(activeNote([a, b], ["a", "b"], []).note).toContain("에이 규칙");
+  });
+  it("tells the AI when a skill is taken off, then says nothing", () => {
+    const off = activeNote([a, b], ["b"], ["a", "b"]);
+    expect(off.note).toContain("꺼졌습니다");
+    expect(off.note).toContain("a");
+    expect(off.sent).toEqual(["b"]);
+    expect(activeNote([a, b], [], []).note).toBe("");
+  });
+  it("leaves a merged skill's steps out of the note and caps the share of context", () => {
+    const m = mergeSkills({ name: "m", steps: [{ skill: "a" }, { skill: "b" }] }, [a, b]);
+    expect(activeNote([a, b, m], ["m"], []).note).toBe("");
+    expect(activeBudget(90000)).toBe(9000);
+    expect(activeBudget(950000)).toBe(20000);
   });
 });

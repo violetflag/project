@@ -16,13 +16,13 @@ import {
 import { exportAndWait } from "./exporter";
 import { CAPTION_PRESETS, TEXT_KINDS } from "./graphics";
 import { cleanKeys, frameGroup, frameSubject, normView, sampleKeys, snapRanges, type Mark, type Subject } from "./framing";
-import { BUILTIN_SKILLS, cleanSkillName, findSkill, NOT_IN_BATCH, skillCatalog, upsertSkill, type Step } from "./skills";
-import { compactBudget, ctxLimit, estTokens, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
+import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSkillName, findSkill, isChain, mergeSkills, NOT_IN_BATCH, parseSkillCommand, runChainSteps, skillCatalog, stepLabel, upsertSkill, type Step } from "./skills";
+import { compactBudget, ctxLimit, estTokens, fmtK, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
 import { activeChat, asset, assetMap, editDraft, saveSkills, syncAssets, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
 import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
 import { runScript, stopScript } from "./script";
 import { captionLines, draftCaptions, joinNext, moveWordPrev, setBreak, setHidden, setLineText, wordKey } from "./captions";
-import type { AnimKey, Asset, ChatBlock, ChoiceCard, ChatMsg, ChatSession, Draft, TextItem, View, ViewKey, VolKey } from "./types";
+import type { AnimKey, Asset, ChatBlock, ChoiceCard, ChatMsg, ChatSession, Draft, Skill, TextItem, View, ViewKey, VolKey } from "./types";
 
 export const MODELS = [
   { id: "claude-opus-5-5", label: "Claude Opus 5.5" },
@@ -196,6 +196,18 @@ export const TOOLS = [
   {
     name: "save_skill", description: "사용자의 규칙이나 작업 순서를 스킬로 저장합니다. 모든 프로젝트와 새 대화에서 쓸 수 있습니다. 사용자가 '다음에도 이렇게', '이 규칙 기억해'라고 할 때 씁니다. body는 앞으로의 자신이 따를 수 있게 구체적으로 적으세요. 같은 이름이면 고칩니다.",
     input_schema: { type: "object", properties: { name: { ...str, description: "짧은 이름(영문·한글, 띄어쓰기 없이)" }, description: { ...str, description: "무엇을 하는 스킬인지 한 줄" }, triggers: { type: "array", items: str, description: "이 스킬을 떠올릴 말" }, body: str }, required: ["name", "description", "body"] },
+  },
+  {
+    name: "merge_skills", description: "스킬 둘 이상을 차례로 하는 병합 스킬 하나로 합쳐 저장합니다. steps는 순서대로, label은 단계 이름(없으면 스킬 이름).",
+    input_schema: { type: "object", properties: { name: str, description: str, triggers: { type: "array", items: str }, steps: { type: "array", items: { type: "object", properties: { skill: str, label: str }, required: ["skill"] } } }, required: ["name", "steps"] },
+  },
+  {
+    name: "run_merged_skill", description: "병합 스킬을 실행합니다. 이 도구를 부른 뒤 바로 차례를 끝내세요. 그러면 앱이 단계마다 하나씩 차례로 시킵니다. request에는 사용자의 요청을 그대로 적습니다.",
+    input_schema: { type: "object", properties: { name: str, request: str }, required: ["name"] },
+  },
+  {
+    name: "finish_step", description: "병합 스킬의 지금 단계를 끝내고 결과를 알립니다. ok는 해냈는지, summary는 다음 단계가 이어 쓸 내용(편집본 id, 시각 등)이나 못 한 이유입니다. 부른 뒤 차례를 끝내세요.",
+    input_schema: { type: "object", properties: { ok: { type: "boolean" }, summary: str }, required: ["ok", "summary"] },
   },
   { name: "delete_skill", description: "사용자가 만든 스킬을 지웁니다.", input_schema: { type: "object", properties: { name: str }, required: ["name"] } },
   {
@@ -536,6 +548,23 @@ async function run(name: string, inp: any): Promise<Out> {
       const next = upsertSkill(st.skills, { name: String(inp.name ?? ""), description: String(inp.description ?? ""), triggers: inp.triggers, body: String(inp.body ?? "") });
       await saveSkills(next);
       return `스킬 "${next[0].name}"을 저장했습니다. 사용자가 설정 > AI 편집에서 보고 고칠 수 있습니다.`;
+    }
+    case "merge_skills": {
+      const k = mergeSkills({ name: String(inp.name ?? ""), description: inp.description, triggers: inp.triggers, steps: inp.steps ?? [] }, st.skills);
+      await saveSkills(upsertSkill(st.skills, k));
+      return `병합 스킬 "${k.name}"을 저장했습니다: ${k.steps!.map(stepLabel).join(" → ")}. 실행하려면 run_merged_skill을 부르세요.`;
+    }
+    case "run_merged_skill": {
+      const k = findSkill(st.skills, String(inp.name ?? ""));
+      if (!isChain(k)) throw new Error(`병합 스킬이 아닙니다: ${inp.name}`);
+      chainSkills(k!, st.skills);
+      pendingChain = { skill: k!, request: String(inp.request ?? "") };
+      return `"${k!.name}"을 준비했습니다. 지금 바로 차례를 끝내세요. 앱이 ${k!.steps!.length}단계를 차례로 시킵니다.`;
+    }
+    case "finish_step": {
+      if (!chainRunning) return "지금은 병합 스킬을 실행하는 중이 아닙니다.";
+      stepReport = { ok: inp.ok !== false, summary: String(inp.summary ?? "") };
+      return "기록했습니다. 차례를 끝내세요.";
     }
     case "delete_skill": {
       const n = cleanSkillName(String(inp.name ?? ""));
@@ -1023,9 +1052,77 @@ export const stopAgent = () => {
   if (ccRunning) api.ccStop().catch(() => {});
 };
 
+// ---------------------------------------------------------------- skills in force, merged skills
+
+/** Said to the AI with the next request only, and not shown in the conversation. */
+let nextNote = "";
+let turnNote = "";
+let chainRunning = false;
+let stepReport: { ok: boolean; summary: string } | null = null;
+let pendingChain: { skill: Skill; request: string } | null = null;
+
+/** Tokens the skills in force will add to the next request. */
+export function pendingSkillTokens(c: ChatSession | null | undefined): number {
+  return c ? estTokens(activeNote(st.skills, c.activeSkills, c.skillsSent).note) : 0;
+}
+
+/** Puts a skill in force in this conversation, if it fits the context budget. */
+export function addActiveSkill(name: string): boolean {
+  const k = findSkill(st.skills, name);
+  if (!k) return false;
+  const c = activeChat() ?? chatById(newChat())!;
+  const next = addActive(c.activeSkills, k.name);
+  if (isChain(k) && next.some((n) => n !== k.name && isChain(findSkill(st.skills, n)))) { toast("병합 스킬은 한 번에 하나만 켤 수 있습니다"); return false; }
+  const budget = activeBudget(ctxLimit(c.model ?? st.settings.model, st.settings));
+  const size = estTokens(activeNote(st.skills, next, []).note);
+  if (size > budget) { toast(`스킬이 너무 많습니다: 약 ${fmtK(size)} 토큰으로 한도 ${fmtK(budget)}를 넘습니다. 하나를 빼 주세요`); return false; }
+  mutateChat((x) => ({ ...x, activeSkills: next }), c.id);
+  return true;
+}
+export const removeActiveSkill = (name: string) => mutateChat((x) => ({ ...x, activeSkills: (x.activeSkills ?? []).filter((n) => n !== name) }));
+
+/** What the chat box sends: skills named at the start go in force, and a merged skill in force runs. */
+export async function askWithSkills(text: string) {
+  const { names, rest } = parseSkillCommand(text, st.skills);
+  for (const n of names) addActiveSkill(n);
+  const chain = (activeChat()?.activeSkills ?? []).map((n) => findSkill(st.skills, n)).find(isChain);
+  if (chain) {
+    removeActiveSkill(chain.name);
+    return runChain(chain, rest);
+  }
+  if (rest) await ask(rest);
+}
+
+/** Runs a merged skill: one request per step, in order, stopping at the first that fails. */
+export async function runChain(chain: Skill, request: string) {
+  const parts = chainSkills(chain, st.skills);
+  const labels = parts.map((p) => stepLabel(p.step));
+  const sid = (activeChat() ?? chatById(newChat())!).id;
+  chainRunning = true;
+  try {
+    const end = await runChainSteps(labels, async (i, prev) => {
+      stepReport = null;
+      const head = `[${i + 1}/${labels.length}] ${labels[i]}`;
+      nextNote = chainStepNote(chain.name, labels, i, parts[i].skill.name, request, prev);
+      await ask(head);
+      if (stopFlag) return { ok: false, summary: "사용자가 멈췄습니다" };
+      if (!stepReport) {
+        nextNote = "<merged-skill>이 단계의 결과를 finish_step으로 알려 주세요. 다른 일은 하지 마세요.</merged-skill>";
+        await ask(`${head}: 결과 확인`);
+        if (stopFlag) return { ok: false, summary: "사용자가 멈췄습니다" };
+      }
+      return stepReport ?? { ok: false, summary: "AI가 이 단계의 결과를 알리지 않았습니다" };
+    }, (steps) => mutateChat((x) => ({ ...x, chain: { name: chain.name, request, steps } }), sid));
+    toast(`${chain.name}: ${end.message}`);
+  } finally {
+    chainRunning = false;
+    nextNote = "";
+  }
+}
+
 function stateNote(): string {
   const d = st.project?.drafts.find((x) => x.id === st.draftId);
-  return `<project-state>열린 편집본: ${d ? `${d.id} "${d.name}" (클립 ${d.clips.length}개, ${r3(draftDuration(d))}초)` : "없음"} | 미디어 ${st.project?.assets.length ?? 0}개 | 재생 위치 ${r3(st.playhead)}초${st.selClip ? ` | 선택한 클립 ${st.selClip}` : ""}</project-state>`;
+  return `<project-state>열린 편집본: ${d ? `${d.id} "${d.name}" (클립 ${d.clips.length}개, ${r3(draftDuration(d))}초)` : "없음"} | 미디어 ${st.project?.assets.length ?? 0}개 | 재생 위치 ${r3(st.playhead)}초${st.selClip ? ` | 선택한 클립 ${st.selClip}` : ""}</project-state>` + (turnNote ? `\n\n${turnNote}` : "");
 }
 
 const chatById = (sid: string) => st.project?.chats?.find((c) => c.id === sid) ?? null;
@@ -1072,12 +1169,22 @@ export async function ask(text: string) {
   set({ aiRuns: [...st.aiRuns, run], agentBusy: true, agentStatus: "생각하는 중…" });
   try {
     await compactIfNeeded(sid, mode);
+    // Skills are told after any compaction above, which forgets what was told before.
+    const cur = chatById(sid)!;
+    const skills = activeNote(st.skills, cur.activeSkills, cur.skillsSent);
+    turnNote = [skills.note, nextNote].filter(Boolean).join("\n");
+    nextNote = "";
     if (mode === "account") await askAccount(sid, text);
     else await askApi(sid, text);
+    mutateChat((x) => ({ ...x, skillsSent: skills.sent }), sid);
   } finally {
+    turnNote = "";
     set({ agentBusy: false, agentStatus: "", aiRuns: st.aiRuns.map((r) => (r.id === run.id ? { ...r, done: true, after: st.project?.drafts } : r)) });
     await saveNow();
   }
+  const next = pendingChain;
+  pendingChain = null;
+  if (next && !stopFlag && !chainRunning) await runChain(next.skill, next.request);
 }
 
 async function askApi(sid: string, text: string) {
@@ -1144,7 +1251,7 @@ export async function compactIfNeeded(sid: string, mode: "account" | "api", forc
   if (!c) return;
   const s = st.settings;
   const limit = ctxLimit(c.model ?? s.model, s);
-  if (!force && !needsCompaction(c.ctxTokens, limit, s)) return;
+  if (!force && !needsCompaction(c.ctxTokens && c.ctxTokens + pendingSkillTokens(c), limit, s)) return;
   const since = c.marks?.length ? c.marks[c.marks.length - 1].at : 0;
   if (c.messages.length - since < 2) return;
   set({ agentStatus: "대화가 길어 요약하는 중…" });
@@ -1167,7 +1274,7 @@ export async function compactIfNeeded(sid: string, mode: "account" | "api", forc
       context: [{ role: "user", content: [{ type: "text", text: seed }] }, { role: "assistant", content: [{ type: "text", text: "요약과 최근 대화를 이어받았습니다. 계속하겠습니다." }] }],
     }), sid);
   } else {
-    mutateChat((x) => ({ ...x, ctxTokens: to, marks: [...(x.marks ?? []), mark], ccSession: undefined, seed }), sid);
+    mutateChat((x) => ({ ...x, ctxTokens: to, marks: [...(x.marks ?? []), mark], ccSession: undefined, seed, skillsSent: [] }), sid);
   }
   set({ agentStatus: "생각하는 중…" });
 }
@@ -1217,7 +1324,7 @@ export const TOOL_LABEL: Record<string, string> = {
   get_project_overview: "프로젝트 살펴보는 중", get_transcript: "대본 읽는 중", search_transcript: "대본 찾는 중", view_frames: "장면 보는 중",
   contact_sheet: "영상 훑어보는 중", create_draft: "편집본 만드는 중", get_draft: "편집본 확인 중", edit_draft: "편집하는 중",
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
-  run_script: "스크립트 실행 중", get_sdk_types: "스크립트 API 읽는 중", measure_loudness: "소리 크기 재는 중", find_beats: "박자 찾는 중", find_scene_cuts: "장면 바뀌는 곳 찾는 중", find_audio_events: "소리 구간 찾는 중", scan_gaze: "카메라 보는 구간 찾는 중", organize_media: "미디어 정리하는 중", get_captions: "자막 읽는 중", edit_captions: "자막 고치는 중", fix_words: "받아쓰기 고치는 중", set_translation: "번역 넣는 중", paste_attributes: "속성 붙여넣는 중", sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", ask_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
+  run_script: "스크립트 실행 중", get_sdk_types: "스크립트 API 읽는 중", measure_loudness: "소리 크기 재는 중", find_beats: "박자 찾는 중", find_scene_cuts: "장면 바뀌는 곳 찾는 중", find_audio_events: "소리 구간 찾는 중", scan_gaze: "카메라 보는 구간 찾는 중", organize_media: "미디어 정리하는 중", merge_skills: "스킬 합치는 중", run_merged_skill: "병합 스킬 준비 중", finish_step: "단계 마치는 중", get_captions: "자막 읽는 중", edit_captions: "자막 고치는 중", fix_words: "받아쓰기 고치는 중", set_translation: "번역 넣는 중", paste_attributes: "속성 붙여넣는 중", sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", ask_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
 

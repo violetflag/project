@@ -3,7 +3,7 @@
 // only the list (name, description, trigger words) in its instructions and reads a guide when needed.
 import { PLAYBOOK_360 } from "./playbook";
 import { LIBRARY } from "./skills-lib";
-import type { Skill } from "./types";
+import type { ChainRun, ChainStep, Skill } from "./types";
 
 const VLOG = `# 브이로그 편집 순서
 
@@ -88,19 +88,19 @@ export function upsertSkill(user: Skill[], s: Skill): Skill[] {
   if (!name) throw new Error("스킬 이름이 비었습니다");
   if (BUILTIN_SKILLS.some((b) => b.name === name)) throw new Error(`"${name}"은 앱에 들어 있는 이름입니다. 다른 이름을 쓰세요`);
   if (!s.body.trim()) throw new Error("스킬 내용이 비었습니다");
-  const next: Skill = { name, description: s.description.replace(/<\/?[a-z_]+>/g, "").trim().slice(0, 200), triggers: (s.triggers ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 16), body: s.body };
+  const next: Skill = { name, description: s.description.replace(/<\/?[a-z_]+>/g, "").trim().slice(0, 200), triggers: (s.triggers ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 16), body: s.body, ...(s.steps?.length ? { steps: s.steps } : {}) };
   return [next, ...user.filter((x) => x.name !== name)];
 }
 
 /** The list the AI sees in its instructions; the user's come first so they win over a similar built-in. */
 export function skillCatalog(user: Skill[]): string {
-  const line = (s: Skill) => `- ${s.name}: ${s.description}${s.triggers?.length ? ` (${s.triggers.join(", ")})` : ""}`;
+  const line = (s: Skill) => `- ${s.name}: ${s.description}${s.steps?.length ? ` [병합 스킬: ${s.steps.map(stepLabel).join(" → ")}. run_merged_skill로 실행]` : ""}${s.triggers?.length ? ` (${s.triggers.join(", ")})` : ""}`;
   return ["## 작업 안내(스킬)", "요청이 아래 작업에 맞으면 시작하기 전에 get_playbook으로 그 안내를 읽고 따르세요. 사용자가 만든 것이 우선입니다.", ...(user.length ? ["사용자가 만든 것:", ...user.map(line)] : []), "앱에 들어 있는 것:", ...BUILTIN_SKILLS.map(line), "사용자가 \"다음에도 이렇게\", \"이 규칙을 기억해\"처럼 말하면 save_skill로 저장합니다."].join("\n");
 }
 
 /** A skill as one piece of text, to hand to someone or keep. */
 export function skillToText(s: Skill): string {
-  return ["---", `name: ${s.name}`, `description: ${s.description}`, `triggers: ${(s.triggers ?? []).join(", ")}`, "---", "", s.body].join("\n");
+  return ["---", `name: ${s.name}`, `description: ${s.description}`, `triggers: ${(s.triggers ?? []).join(", ")}`, ...(s.steps?.length ? [`steps: ${s.steps.map((x) => (x.label ? `${x.skill} | ${x.label}` : x.skill)).join(", ")}`] : []), "---", "", s.body].join("\n");
 }
 export function skillFromText(text: string): Skill {
   const m = /^\s*---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
@@ -108,17 +108,110 @@ export function skillFromText(text: string): Skill {
   const field = (k: string) => new RegExp(`^${k}:[ \\t]*(.*)$`, "m").exec(m[1])?.[1].trim() ?? "";
   const name = cleanSkillName(field("name"));
   if (!name) throw new Error("머리말에 name이 없습니다");
-  return { name, description: field("description"), triggers: field("triggers").split(",").map((t) => t.trim()).filter(Boolean), body: m[2].trim() };
+  const steps = field("steps").split(",").map((t) => t.trim()).filter(Boolean).map((t) => { const [skill, label] = t.split("|").map((x) => x.trim()); return { skill: cleanSkillName(skill), ...(label ? { label } : {}) }; });
+  return { name, description: field("description"), triggers: field("triggers").split(",").map((t) => t.trim()).filter(Boolean), body: m[2].trim(), ...(steps.length ? { steps } : {}) };
 }
 
-/** "/name what to do" in the chat box asks for that skill. */
-export function expandSkillCommand(text: string, user: Skill[]): string {
-  const m = /^\/(\S+)\s*([\s\S]*)$/.exec(text.trim());
-  const s = m && findSkill(user, m[1]);
-  return s ? `get_playbook으로 "${s.name}" 안내를 읽고 그대로 따라 주세요.${m![2] ? `\n\n요청: ${m![2]}` : ""}` : text;
+/** "/a /b what to do" in the chat box: the skills named at the start, and the rest of the text. */
+export function parseSkillCommand(text: string, user: Skill[]): { names: string[]; rest: string } {
+  const names: string[] = [];
+  let rest = text.trim();
+  for (;;) {
+    const m = /^\/(\S+)\s*([\s\S]*)$/.exec(rest);
+    const k = m && findSkill(user, m[1]);
+    if (!k) return { names, rest };
+    names.push(k.name);
+    rest = m![2];
+  }
+}
+
+// ---------------------------------------------------------------- merged skills
+
+export const isChain = (s: Skill | null | undefined) => !!s?.steps?.length;
+export const stepLabel = (st: ChainStep) => st.label?.trim() || st.skill;
+
+/** A merged skill from two or more others; a merged skill among them is opened into its own steps. */
+export function mergeSkills(o: { name: string; description?: string; triggers?: string[]; steps: ChainStep[] }, user: Skill[]): Skill {
+  const steps: ChainStep[] = o.steps.flatMap((x) => {
+    const k = findSkill(user, x.skill);
+    if (!k) throw new Error(`없는 스킬: ${x.skill}`);
+    return k.steps?.length ? k.steps : [{ skill: k.name, ...(x.label?.trim() ? { label: x.label.trim() } : {}) }];
+  });
+  if (steps.length < 2) throw new Error("합치려면 스킬이 두 개 이상 있어야 합니다");
+  const name = cleanSkillName(o.name);
+  if (!name) throw new Error("합친 스킬의 이름이 비었습니다");
+  if (steps.some((x) => x.skill === name)) throw new Error(`"${name}"은 자기 자신을 단계로 넣을 수 없습니다`);
+  const order = steps.map(stepLabel).join(" → ");
+  return { name, description: o.description?.trim() || order, triggers: o.triggers ?? [], steps, body: `# ${name}\n\n병합 스킬입니다. run_merged_skill로 실행하면 앱이 차례대로 시킵니다: ${order}` };
+}
+
+/** The skills a merged skill runs; a step whose skill has since been removed is an error by name. */
+export function chainSkills(chain: Skill, user: Skill[]): { step: ChainStep; skill: Skill }[] {
+  return (chain.steps ?? []).map((step, i) => {
+    const skill = findSkill(user, step.skill);
+    if (!skill) throw new Error(`${i + 1}단계 스킬 "${step.skill}"이 없습니다. 병합 스킬 "${chain.name}"을 고쳐 주세요`);
+    return { step, skill };
+  });
+}
+
+/** Runs steps in order, each given the summary of the one before; the first failure stops the rest. */
+export async function runChainSteps(labels: string[], runStep: (i: number, prev: string) => Promise<{ ok: boolean; summary: string }>, onChange: (states: ChainRun["steps"]) => void): Promise<{ ok: boolean; failed?: number; message: string }> {
+  const states: ChainRun["steps"] = labels.map((label) => ({ label, state: "wait" }));
+  const show = () => onChange(states.map((x) => ({ ...x })));
+  let prev = "";
+  for (let i = 0; i < labels.length; i++) {
+    states[i].state = "run";
+    show();
+    let r: { ok: boolean; summary: string };
+    try { r = await runStep(i, prev); } catch (e) { r = { ok: false, summary: String((e as Error)?.message ?? e) }; }
+    states[i] = { ...states[i], state: r.ok ? "done" : "fail", note: r.summary };
+    if (!r.ok) {
+      for (let j = i + 1; j < labels.length; j++) states[j].state = "skip";
+      show();
+      return { ok: false, failed: i, message: `${i + 1}/${labels.length}단계 "${labels[i]}"에서 멈췄습니다: ${r.summary}` };
+    }
+    prev = r.summary;
+    show();
+  }
+  return { ok: true, message: `${labels.length}단계를 모두 마쳤습니다.` };
+}
+
+/** What the AI is told for one step of a merged skill. */
+export function chainStepNote(chainName: string, labels: string[], i: number, skillName: string, request: string, prev: string): string {
+  return [
+    `<merged-skill>병합 스킬 "${chainName}"의 ${i + 1}/${labels.length}단계 "${labels[i]}"입니다. 이번 차례에는 이 단계만 끝까지 합니다.`,
+    `1. get_playbook으로 "${skillName}" 안내를 읽고 따릅니다.`,
+    `2. 이번 단계에서 할 일은 "${labels[i]}"뿐입니다. 사용자의 전체 요청은 참고만 하고, 그중 다른 단계에 속하는 일은 하지 않습니다: ${request || "(따로 없음)"}`,
+    prev ? `3. 앞 단계의 결과입니다. 여기에 이어서 합니다: ${prev}` : "",
+    labels[i + 1] ? `다음 단계 "${labels[i + 1]}"는 앱이 이어서 시킵니다. 미리 하지 마세요.` : "이것이 마지막 단계입니다.",
+    `끝나면 finish_step을 부르세요. ok는 해냈는지, summary에는 다음 단계가 이어 쓸 편집본 id와 시각을 적습니다. 할 수 없으면 ok를 false로 하고 이유를 적습니다.</merged-skill>`,
+  ].filter(Boolean).join("\n");
+}
+
+// ---------------------------------------------------------------- skills in force together
+
+/** A picked skill goes last, since the later pick wins. */
+export const addActive = (list: string[] | undefined, name: string) => [...(list ?? []).filter((x) => x !== name), name];
+
+/** The share of the context skills in force may take, in tokens. */
+export const activeBudget = (limit: number) => Math.min(20000, Math.round(limit * 0.1));
+
+/** What the AI needs to be told about the skills in force: the full text only of those it has not read. */
+export function activeNote(user: Skill[], active: string[] | undefined, sent: string[] | undefined): { note: string; sent: string[] } {
+  const on = (active ?? []).map((n) => findSkill(user, n)).filter((k): k is Skill => !!k && !isChain(k));
+  const names = on.map((k) => k.name);
+  const off = (sent ?? []).filter((n) => !names.includes(n));
+  if (!on.length && !off.length) return { note: "", sent: [] };
+  const fresh = on.filter((k) => !sent?.includes(k.name));
+  const lines = ["<active-skills>"];
+  if (on.length) lines.push(`이 대화에 켜 둔 스킬입니다(고른 순서): ${names.join(", ")}. ${on.length > 1 ? "모두 함께 지킵니다. 규칙이 서로 맞지 않으면 어떤 규칙이 부딪히는지 사용자에게 한 줄로 말하고, 나중에 고른 스킬을 따르세요." : "이 스킬을 지킵니다."}`);
+  if (off.length) lines.push(`다음 스킬은 꺼졌습니다. 더는 따르지 마세요: ${off.join(", ")}`);
+  for (const k of fresh) lines.push(`## ${k.name}\n${k.body}`);
+  lines.push("</active-skills>");
+  return { note: lines.join("\n"), sent: names };
 }
 
 export type Step = { tool: string; input?: Record<string, unknown> };
 
 /** Tools a batch may not call: itself, and those that wait for the user or read a guide. */
-export const NOT_IN_BATCH = new Set(["run_steps", "run_script", "ask_options", "get_playbook"]);
+export const NOT_IN_BATCH = new Set(["run_steps", "run_script", "ask_options", "get_playbook", "finish_step", "run_merged_skill"]);

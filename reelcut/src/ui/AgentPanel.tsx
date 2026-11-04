@@ -1,11 +1,11 @@
 import { Bookmark, BookmarkPlus, LoaderCircle, Pencil, Plus, Send, Sparkles, Trash2, Undo2 } from "lucide-preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { BUILTIN_SKILLS, expandSkillCommand } from "../skills";
-import { answerCard, answerCardText, ask, EFFORTS, isWaitingCard, MODELS, newChat, stopAgent, TOOL_LABEL, waitingCardOf } from "../agent";
+import { BUILTIN_SKILLS, isChain, findSkill } from "../skills";
+import { addActiveSkill, answerCard, answerCardText, askWithSkills, EFFORTS, isWaitingCard, MODELS, newChat, pendingSkillTokens, removeActiveSkill, stopAgent, TOOL_LABEL, waitingCardOf } from "../agent";
 import { ctxLimit, fmtK, newSession, sessionsNewestFirst } from "../chats";
 import { draftDuration, fmtTC, overlays, starts } from "../edit";
 import { activeChat, addPrompt, deletePrompt, mutate, mutateChat, promptName, set, setDrafts, st, toast, updatePrompt, useStore, type AiRun } from "../store";
-import type { ChatBlock, ChatSession, ChoiceCard, Draft, SavedPrompt } from "../types";
+import type { ChainRun, ChatBlock, ChatSession, ChoiceCard, Draft, SavedPrompt } from "../types";
 import { player } from "./Viewer";
 
 const SUGGEST = [
@@ -119,7 +119,8 @@ const when = (ms: number) => {
 function Meter({ c }: { c: ChatSession }) {
   const s = st.settings;
   const limit = ctxLimit(c.model ?? s.model, s);
-  const used = c.ctxTokens ?? 0;
+  // What the skills in force will add to the next request counts too.
+  const used = (c.ctxTokens ?? 0) + pendingSkillTokens(c);
   const pct = Math.min(100, (used / limit) * 100);
   const at = s.compactAt || 90;
   const cls = pct >= at ? "hot" : pct >= at - 15 ? "warm" : "";
@@ -135,6 +136,23 @@ function Meter({ c }: { c: ChatSession }) {
 }
 
 /** One saved prompt in the list: insert, send now, rename/edit, delete. */
+/** A merged skill's steps and how far it has got. */
+function ChainCard({ run }: { run: ChainRun }) {
+  const at = run.steps.findIndex((x) => x.state === "run");
+  const done = run.steps.filter((x) => x.state === "done").length;
+  const failed = run.steps.findIndex((x) => x.state === "fail");
+  const mark = { wait: "·", run: "…", done: "✓", fail: "✕", skip: "–" } as const;
+  return (
+    <div class="chain-card" role="status">
+      <div class="chain-head"><b>{run.name}</b> <span class="muted">{at >= 0 ? `${at + 1}/${run.steps.length} 진행 중` : failed >= 0 ? `${failed + 1}/${run.steps.length}단계에서 멈춤` : `${done}/${run.steps.length} 완료`}</span></div>
+      {run.request && <div class="muted chain-req">{run.request}</div>}
+      {run.steps.map((x, i) => (
+        <div class={`chain-step ${x.state}`} key={i}><span class="chain-mark" aria-hidden="true">{mark[x.state]}</span> {i + 1}. {x.label}{x.note && (x.state === "fail" || x.state === "done") && <span class="muted"> {x.note.slice(0, 160)}</span>}{x.state === "skip" && <span class="muted"> 하지 않음</span>}</div>
+      ))}
+    </div>
+  );
+}
+
 /** A question from the AI. It waits for the pick; on an older card a pick starts a new request. */
 function Card({ k, busy, send }: { k: ChoiceCard; busy: boolean; send: (t: string) => void }) {
   const [on, setOn] = useState<number[]>([]);
@@ -236,13 +254,14 @@ export function AgentPanel() {
   // Another project or conversation: show its own unsent prompt.
   useEffect(() => { setTextState(loadPrompt(projectId, chatId)); setErr(""); }, [projectId, chatId]);
 
+  const [pick, setPick] = useState(false);
   const waitCard = waitingCardOf(c);
   const send = async (t = text) => {
     if (!t.trim() || s.agentBusy) return;
     if (s.settings.aiMode === "api" && !s.settings.apiKey) { setErr("설정에서 Anthropic API 키를 먼저 넣어 주세요."); return; }
     setText(""); setErr("");
     // A request that fails gives the text back, so nothing typed is lost.
-    try { await ask(expandSkillCommand(t.trim(), st.skills)); } catch (e) { setErr(String((e as Error)?.message ?? e)); if (!loadPrompt(projectId, chatId)) setText(t); }
+    try { await askWithSkills(t.trim()); } catch (e) { setErr(String((e as Error)?.message ?? e)); if (!loadPrompt(projectId, chatId)) setText(t); }
   };
   const open = (id: string) => { if (!s.agentBusy) mutate((x) => ({ ...x, activeChat: id })); };
   const remove = () => {
@@ -316,6 +335,7 @@ export function AgentPanel() {
           )
           : <div class={`msg ${it.kind}`}>{it.kind === "ai" ? <Md text={it.text} /> : it.text}</div>)}
         {(c?.cards ?? []).filter((k) => !k.used).map((k) => <Card key={k.id} k={k} busy={s.agentBusy} send={send} />)}
+        {c?.chain && <ChainCard run={c.chain} />}
         {runs.length > 0 && <RunCard r={runs[runs.length - 1]} last={st.aiRuns[st.aiRuns.length - 1]?.id === runs[runs.length - 1].id} />}
         {s.agentBusy && <div class="msg status"><LoaderCircle size={13} class="spin-i" aria-hidden="true" /> {s.agentStatus}</div>}
         {err && <div class="msg err">{err} <a onClick={() => set({ route: "settings" })}>설정 열기</a></div>}
@@ -323,12 +343,19 @@ export function AgentPanel() {
       {lib && <PromptLibrary text={text} busy={s.agentBusy}
         onInsert={(t) => { setText(t); setLib(false); setTimeout(() => box.current?.focus(), 0); }}
         onSend={(t) => { setLib(false); send(t); }} onClose={() => setLib(false)} />}
+      <div class="skill-chips" aria-label="켜 둔 스킬">
+        {(c?.activeSkills ?? []).map((n) => (
+          <span class={`skill-chip ${isChain(findSkill(s.skills, n)) ? "chain" : ""}`} key={n}>/{n}<button aria-label={`${n} 스킬 빼기`} title="빼기" onClick={() => removeActiveSkill(n)}>×</button></span>
+        ))}
+        <button class="small skill-add" aria-expanded={pick} onClick={() => setPick(!pick)}>+ 스킬</button>
+        {(c?.activeSkills?.length ?? 0) > 1 && <span class="muted tip">함께 적용, 어긋나면 나중에 고른 것 우선</span>}
+      </div>
       <div class="composer">
         <button class={`icon-btn ${lib ? "on" : ""}`} onClick={() => setLib(!lib)} aria-pressed={lib} aria-label="저장한 프롬프트" title="저장한 프롬프트"><Bookmark size={16} /></button>
-        {/^\/\S*$/.test(text) && (
+        {(pick || /^\/\S*$/.test(text)) && (
           <div class="skill-pick" role="listbox" aria-label="스킬 고르기">
-            {[...s.skills, ...BUILTIN_SKILLS].filter((k) => k.name.includes(text.slice(1).toLowerCase())).slice(0, 8).map((k) => (
-              <button role="option" onClick={() => { setText(`/${k.name} `); box.current?.focus(); }}><b>/{k.name}</b> <span class="muted">{k.description}</span></button>
+            {[...s.skills, ...BUILTIN_SKILLS].filter((k) => !c?.activeSkills?.includes(k.name) && k.name.includes(text.startsWith("/") ? text.slice(1).toLowerCase() : "")).slice(0, 40).map((k) => (
+              <button role="option" onClick={() => { if (addActiveSkill(k.name)) { if (text.startsWith("/")) setText(""); setPick(false); box.current?.focus(); } }}><b>/{k.name}</b>{isChain(k) && <span class="choice-rec">병합</span>} <span class="muted">{k.description}</span></button>
             ))}
           </div>
         )}

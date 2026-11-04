@@ -217,7 +217,14 @@ export type Draft = {
 };
 
 /** A guide the AI reads before a kind of job. */
-export type Skill = { name: string; description: string; triggers?: string[]; body: string };
+export type Skill = {
+  name: string; description: string; triggers?: string[]; body: string;
+  /** A merged skill: these skills, done one after another. */
+  steps?: ChainStep[];
+};
+export type ChainStep = { skill: string; label?: string };
+/** A merged skill being run, or the last one run, in a conversation. */
+export type ChainRun = { name: string; request?: string; steps: { label: string; state: "wait" | "run" | "done" | "fail" | "skip"; note?: string }[] };
 /** A choice the AI offers: pressing it sends `prompt` (or the label) as the next request. */
 export type ChoiceCard = { id: string; question: string; options: { label: string; detail?: string; meaning?: string; prompt?: string }[]; at: number; used?: boolean; multi?: boolean; recommended?: boolean };
 
@@ -247,6 +254,11 @@ export type ChatSession = {
   chatMode?: "account" | "api";
   /** Model of the last request (sets the context limit). */
   model?: string;
+  /** Skills in force, in the order they were picked; a later one wins over an earlier one. */
+  activeSkills?: string[];
+  /** Those whose text the AI has already been given (given again after a compaction). */
+  skillsSent?: string[];
+  chain?: ChainRun;
   /** Context size after the last turn, in tokens. */
   ctxTokens?: number;
   marks?: CompactMark[];

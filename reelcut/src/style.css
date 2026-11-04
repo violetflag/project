@@ -504,3 +504,22 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .skill-pick { position: absolute; bottom: 100%; left: 8px; right: 8px; max-height: 220px; overflow: auto; background: var(--panel, #1a1c20); border: 1px solid var(--line, #333); border-radius: 6px; z-index: 20; display: flex; flex-direction: column; }
 .skill-pick button { justify-content: flex-start; text-align: left; background: transparent; border: 0; border-radius: 0; }
 .composer { position: relative; }
+
+/* Skills in force and merged skills */
+.skill-chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 6px 8px 0; border-top: 1px solid var(--line); }
+.skill-chip { display: inline-flex; align-items: center; gap: 2px; padding: 1px 2px 1px 8px; border-radius: 10px; background: var(--accent-bg); color: var(--accent); font-size: 12px; }
+.skill-chip.chain { outline: 1px solid var(--accent); }
+.skill-chip button { background: transparent; border: 0; padding: 0 5px; color: inherit; min-height: 0; }
+.skill-chips + .composer { border-top: 0; }
+.chain-card { border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin: 6px 0; }
+.chain-head { margin-bottom: 4px; }
+.chain-step { font-size: 12px; padding: 1px 0; }
+.chain-step.run { color: var(--accent); }
+.chain-step.fail { color: var(--warn, #e66); }
+.chain-step.skip { opacity: .55; }
+.chain-mark { display: inline-block; width: 1em; text-align: center; }
+.steps-editor { display: flex; flex-direction: column; gap: 4px; }
+.step-row { align-items: center; gap: 4px; }
+.step-row input { flex: 1; min-width: 0; }
+.step-no { font-variant-numeric: tabular-nums; width: 1.2em; text-align: right; }
+.step-skill { font-size: 11px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

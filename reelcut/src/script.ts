@@ -12,7 +12,7 @@ export type CallTool = (name: string, input: Record<string, unknown>) => Promise
 type Ctx = { call: CallTool };
 
 /** Tools a script may not call: those that publish, delete, ask the user or change skills. */
-export const NOT_IN_SCRIPT = new Set(["run_script", "ask_options", "export_draft", "delete_draft", "save_skill", "delete_skill", "run_steps"]);
+export const NOT_IN_SCRIPT = new Set(["run_script", "ask_options", "export_draft", "delete_draft", "save_skill", "delete_skill", "merge_skills", "run_merged_skill", "finish_step", "run_steps"]);
 
 const need = (id: string): Asset => {
   const a = asset(id);
