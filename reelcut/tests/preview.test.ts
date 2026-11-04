@@ -7,7 +7,7 @@ import { NOT_IN_SCRIPT, SDK, transpileScript } from "../src/script";
 import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
 import { CAPTION_PRESETS, STICKERS, stickerSvgPath, textEvent, textLook } from "../src/graphics";
 import { BUILTIN_SKILLS, cleanSkillName, findSkill, skillCatalog, upsertSkill } from "../src/skills";
-import { gazeSpans, CLIP_ATTRS, pasteAttrs, toSegs, transitionLook, TRANSITIONS, multicamDraft, isDefaultColor, LOOKS, animAt, DEFAULT_CAPTION, fitMusic, mergeScenes, movePreset, volAt, newDraft, playableInWebView, previewSource, searchScenes } from "../src/edit";
+import { splitOutName, gazeSpans, CLIP_ATTRS, pasteAttrs, toSegs, transitionLook, TRANSITIONS, multicamDraft, isDefaultColor, LOOKS, animAt, DEFAULT_CAPTION, fitMusic, mergeScenes, movePreset, volAt, newDraft, playableInWebView, previewSource, searchScenes } from "../src/edit";
 import { dirToDfisheye } from "../src/gl360";
 import type { Asset, MediaInfo } from "../src/types";
 
@@ -341,5 +341,21 @@ describe("run_script", () => {
   });
   it("keeps exporting, deleting and asking out of scripts", () => {
     for (const n of ["export_draft", "delete_draft", "ask_options", "run_script"]) expect(NOT_IN_SCRIPT.has(n)).toBe(true);
+  });
+});
+
+describe("export file names", () => {
+  it("keeps the folder of a full path and a bare name", () => {
+    expect(splitOutName("C:/claude-notebook/fx/out.mp4")).toEqual({ dir: "C:/claude-notebook/fx", name: "out" });
+    expect(splitOutName("C:\\Users\\pc\\Videos\\내 영상.MP4")).toEqual({ dir: "C:\\Users\\pc\\Videos", name: "내 영상" });
+    expect(splitOutName("C:/out.mkv")).toEqual({ dir: "C:\\", name: "out" });
+    expect(splitOutName("\\\\nas\\share\\out")).toEqual({ dir: "\\\\nas\\share", name: "out" });
+    expect(splitOutName("/home/x/out.mp4")).toEqual({ dir: "/home/x", name: "out" });
+  });
+  it("treats everything else as a name for the export folder", () => {
+    expect(splitOutName("cap_test")).toEqual({ dir: "", name: "cap_test" });
+    expect(splitOutName("clip.v2.mp4")).toEqual({ dir: "", name: "clip.v2" });
+    expect(splitOutName("sub/out.mp4")).toEqual({ dir: "", name: "out" });
+    expect(splitOutName("")).toEqual({ dir: "", name: "" });
   });
 });

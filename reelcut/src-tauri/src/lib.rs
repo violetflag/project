@@ -374,6 +374,11 @@ async fn find_faces(app: St<'_>, req: FindFaces) -> Result<Vec<Value>, String> {
     .await
 }
 
+#[tauri::command]
+fn dir_exists(path: String) -> bool {
+    Path::new(&path).is_dir()
+}
+
 #[derive(serde::Deserialize)]
 struct ScriptFiles {
     op: String,
@@ -1214,6 +1219,7 @@ pub fn run() {
             scan_gaze,
             measure,
             script_files,
+            dir_exists,
             track_people,
             face_check,
             live_stop,

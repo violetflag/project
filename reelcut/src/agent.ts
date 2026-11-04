@@ -8,6 +8,7 @@ import {
   fitMusic, movePreset, overlays,
   LOOKS, multicamDraft,
   GAZE_MIN_FACE_360,
+  splitOutName,
   gazeSpans,
   pasteAttrs,
   type Pacing, mergeScenes, searchScenes,
@@ -296,7 +297,7 @@ export const TOOLS = [
   { name: "delete_draft", description: "편집본을 지웁니다 (마지막 하나는 지울 수 없고, Ctrl+Z로 되돌릴 수 있습니다).", input_schema: { type: "object", properties: { draft_id: str }, required: ["draft_id"] } },
   {
     name: "export_draft", description: "편집본을 파일로 내보냅니다 (끝날 때까지 기다림). preset: fhd/4k/hd/sd는 일반 H.264 MP4, shrink_balanced/shrink_small/shrink_archive/shrink_lecture는 크기를 많이 줄이는 고압축(AV1/HEVC), audio는 WAV 소리만.",
-    input_schema: { type: "object", properties: { srt: { type: "boolean", description: "자막 파일(SRT)도 같이 저장" }, draft_id: draftId, preset: { type: "string", enum: ["4k", "fhd", "hd", "sd", "shrink_archive", "shrink_balanced", "shrink_small", "shrink_lecture", "audio"] }, file_name: str }, required: ["preset"] },
+    input_schema: { type: "object", properties: { srt: { type: "boolean", description: "자막 파일(SRT)도 같이 저장" }, draft_id: draftId, preset: { type: "string", enum: ["4k", "fhd", "hd", "sd", "shrink_archive", "shrink_balanced", "shrink_small", "shrink_lecture", "audio"] }, file_name: { ...str, description: "파일 이름이나 전체 경로. 전체 경로의 폴더가 있으면 거기에, 없으면 내보내기 폴더에 저장합니다. 같은 이름이 있으면 덮어쓰지 않고 번호를 붙입니다." } }, required: ["preset"] },
   },
 ];
 
@@ -978,13 +979,15 @@ async function run(name: string, inp: any): Promise<Out> {
       const d = getDraft(inp.draft_id);
       const pr = String(inp.preset);
       const shrink = pr.startsWith("shrink_");
+      const given = splitOutName(String(inp.file_name ?? ""));
+      const noFolder = given.dir && !(await api.dirExists(given.dir)) ? given.dir : "";
       set({ agentStatus: "내보내는 중…" });
       const e = await exportAndWait(d, {
         mode: pr === "audio" ? "audio" : shrink ? "shrink" : "standard", quality: shrink ? "fhd" : pr, preset: shrink ? pr.slice(7) : "balanced",
-        codec: "auto", container: "mkv", dir: "", name: inp.file_name ?? "", srt: !!inp.srt,
+        codec: "auto", container: "mkv", dir: noFolder ? "" : given.dir, name: given.name, srt: !!inp.srt,
       });
       if (e.state !== "done") return `내보내기 실패: ${e.message}`;
-      return `내보냈습니다: ${e.result.path} (${(e.result.size / 1048576).toFixed(1)}MB, ${r3(e.result.duration)}초)${inp.srt ? ` 자막 파일: ${String(e.result.path).replace(/\.[^.\/]+$/, ".srt")}` : ""}${e.message ? " 경고: " + e.message : ""}`;
+      return `${noFolder ? `폴더 ${noFolder}이 없어 내보내기 폴더에 저장했습니다. ` : ""}내보냈습니다: ${e.result.path} (${(e.result.size / 1048576).toFixed(1)}MB, ${r3(e.result.duration)}초)${inp.srt ? ` 자막 파일: ${String(e.result.path).replace(/\.[^.\/]+$/, ".srt")}` : ""}${e.message ? " 경고: " + e.message : ""}`;
     }
   }
   throw new Error(`알 수 없는 도구: ${name}`);

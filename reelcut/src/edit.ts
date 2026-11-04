@@ -108,6 +108,16 @@ export function transitionLook(type: string | undefined, p0: number): Transition
   }
 }
 
+/** A file name that may be a whole path: its folder (only when the path is absolute) and the bare name, without a media extension. */
+export function splitOutName(given: string): { dir: string; name: string } {
+  const t = given.trim();
+  const i = Math.max(t.lastIndexOf("/"), t.lastIndexOf("\\"));
+  const name = t.slice(i + 1).replace(/\.(mp4|m4v|mov|mkv|webm|avi|wav|mp3|m4a)$/i, "");
+  if (!/^([a-zA-Z]:[\\/]|[\\/])/.test(t)) return { dir: "", name };
+  const folder = t.slice(0, i);
+  return { dir: /^[a-zA-Z]:$/.test(folder) ? `${folder}\\` : folder || t[0], name };
+}
+
 /** Stretches where a face points at the camera, from looks taken every `step` seconds. */
 export function gazeSpans(looks: { t: number; faces: { front: number; w?: number }[] }[], step: number, minWidth = 0, min = 0.55): { from: number; to: number; faces: number }[] {
   const out: { from: number; to: number; faces: number }[] = [];
