@@ -108,6 +108,21 @@ export function transitionLook(type: string | undefined, p0: number): Transition
   }
 }
 
+/** Stretches where a face points at the camera, from looks taken every `step` seconds. */
+export function gazeSpans(looks: { t: number; faces: { front: number; w?: number }[] }[], step: number, minWidth = 0, min = 0.55): { from: number; to: number; faces: number }[] {
+  const out: { from: number; to: number; faces: number }[] = [];
+  for (const l of [...looks].sort((a, b) => a.t - b.t)) {
+    const n = l.faces.filter((f) => f.front >= min && (f.w ?? Infinity) >= minWidth).length;
+    if (!n) continue;
+    const last = out[out.length - 1];
+    if (last && l.t - last.to <= step * 0.5) { last.to = r3(l.t + step); last.faces = Math.max(last.faces, n); } else out.push({ from: r3(l.t), to: r3(l.t + step), faces: n });
+  }
+  return out;
+}
+
+/** On a 360 sheet (960 wide) a passer-by's face is tiny; the people being filmed are at least this wide. */
+export const GAZE_MIN_FACE_360 = 22;
+
 /** Groups of a clip's settings that can be copied onto other clips. */
 export const CLIP_ATTRS: { id: string; label: string; keys: (keyof Clip)[] }[] = [
   { id: "color", label: "색", keys: ["color"] },

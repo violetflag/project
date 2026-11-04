@@ -7,6 +7,8 @@ import {
   newClip, newDraft, newGap, newOverlay, r3, removeFillers, removeItem, removeRange, removeSilences, setTransition, splitAt, speechFromWave, speechFromWords, starts, transcriptText, uid, updateClip, updateOverlay, viewAt,
   fitMusic, movePreset, overlays,
   LOOKS, multicamDraft,
+  GAZE_MIN_FACE_360,
+  gazeSpans,
   pasteAttrs,
   type Pacing, mergeScenes, searchScenes,
 } from "./edit";
@@ -239,6 +241,30 @@ export const TOOLS = [
   {
     name: "scan_bad_shots", description: "흐리거나 흔들리거나 너무 어두운 구간을 자동으로 찾습니다(그 녹화 자체와 비교해서 판단). 결과는 미디어에 저장되어 원본 보기의 재생 막대에 표시됩니다. 하이라이트를 고를 때 이 구간을 피하세요. 긴 영상은 from·to로 범위를 줄이면 빠릅니다.",
     input_schema: { type: "object", properties: { asset_id: str, from: num, to: num }, required: ["asset_id"] },
+  },
+  {
+    name: "scan_gaze", description: "구간에서 얼굴이 카메라 쪽을 향한 구간을 찾습니다(일반 영상과 360 모두). 눈동자가 아니라 머리 방향을 잽니다. 원본 시각으로 돌려줍니다. step은 살펴보는 간격(초, 기본 2).",
+    input_schema: { type: "object", properties: { asset_id: str, from: num, to: num, step: num }, required: ["asset_id", "from", "to"] },
+  },
+  {
+    name: "measure_loudness", description: "구간의 소리 크기를 잽니다: LUFS(전체 크기), 범위, 최고점, 10초마다의 크기. 내보낼 때 몇 LUFS일지나 소리가 작은 곳을 볼 때 씁니다.",
+    input_schema: { type: "object", properties: { asset_id: str, start: num, end: num }, required: ["asset_id"] },
+  },
+  {
+    name: "find_beats", description: "음악의 박자를 찾습니다: BPM, 확실한 정도(0~1, 0.2 아래면 일정한 박자가 없음), 박자 시각(원본 초). 음악에 맞춰 자를 때 씁니다.",
+    input_schema: { type: "object", properties: { asset_id: str, start: num, end: num }, required: ["asset_id"] },
+  },
+  {
+    name: "find_scene_cuts", description: "화면이 갑자기 바뀌는 곳을 찾습니다(원본 초와 점수). threshold 기본 0.3, 낮을수록 많이 찾습니다. 360 영상은 한쪽 렌즈 기준입니다.",
+    input_schema: { type: "object", properties: { asset_id: str, start: num, end: num, threshold: num }, required: ["asset_id"] },
+  },
+  {
+    name: "find_audio_events", description: "소리 크기로 눈에 띄는 구간을 찾습니다: silence(조용함), loud(잠깐 큰 소리), loud_long(오래 큰 소리). 소리의 크기만 재므로 웃음이나 박수 같은 소리의 종류는 구별하지 못합니다.",
+    input_schema: { type: "object", properties: { asset_id: str, start: num, end: num }, required: ["asset_id"] },
+  },
+  {
+    name: "organize_media", description: "미디어를 폴더로 옮깁니다(파일은 그대로, 앱 안의 분류만). folder가 빈 글이면 맨 위로.",
+    input_schema: { type: "object", properties: { moves: { type: "array", items: { type: "object", properties: { asset_id: str, folder: str }, required: ["asset_id", "folder"] } } }, required: ["moves"] },
   },
   {
     name: "find_faces", description: "360 영상의 특정 원본 시각들에서 얼굴을 자동으로 찾습니다(내장 얼굴 인식, 최대 16곳). 수평 파노라마 좌표로 x, y, 크기를 돌려줍니다. 머리 위치를 눈으로 읽는 대신 정확한 값을 얻을 때 씁니다. 뒤돈 얼굴은 안 잡히니 equirect_sheet와 함께 보세요. 어른은 얼굴이 크고 위쪽, 어린아이는 작고 아래쪽에 있는 경우가 많습니다.",
@@ -561,6 +587,44 @@ async function run(name: string, inp: any): Promise<Out> {
       const found = await scanShots(a.id, inp.from, inp.to);
       const name = { blurry: "흐림", shaky: "흔들림", dark: "어두움" };
       return found.length ? found.map((b) => `${r3(b.from)}–${r3(b.to)}초 ${name[b.kind]}`).join("\n") : "문제 구간이 없습니다.";
+    }
+    case "scan_gaze": {
+      const a = getAsset(inp.asset_id);
+      if (a.info.kind !== "video") throw new Error("영상이 아닙니다");
+      const step = Number(inp.step) || 2;
+      const lens = is360(a) ? { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 } : null;
+      const looks = await api.scanGaze(a.info.path, lens, Number(inp.from), Math.min(Number(inp.to), a.info.duration), step);
+      const spans = gazeSpans(looks, step, is360(a) ? GAZE_MIN_FACE_360 : 0);
+      const withFace = looks.filter((l) => l.faces.length).length;
+      return `${looks.length}곳을 봤고 그중 ${withFace}곳에 얼굴이 있었습니다. 카메라 쪽을 향한 구간 ${spans.length}개 (머리 방향 기준):\n${spans.map((x) => `${x.from}~${x.to}초, 얼굴 ${x.faces}개`).join("\n") || "없음"}`;
+    }
+    case "measure_loudness": {
+      const a = getAsset(inp.asset_id), from = Number(inp.start) || 0, to = Math.min(Number(inp.end) || a.info.duration, a.info.duration);
+      const r = await api.measure("loudness", a.info.path, from, to);
+      const each = r.series.filter((_: unknown, i: number) => i % 10 === 0).map((p: any) => `${Math.round(p.t)}초 ${Math.round(p.db)}dB`).join(", ");
+      return `전체 ${r.lufs} LUFS, 범위 ${r.range ?? "?"} LU, 최고점 ${r.peak ?? "?"} dBFS\n${each}`;
+    }
+    case "find_beats": {
+      const a = getAsset(inp.asset_id), from = Number(inp.start) || 0, to = Math.min(Number(inp.end) || a.info.duration, a.info.duration);
+      const r = await api.measure("beats", a.info.path, from, to);
+      if (!r.beats.length) return "일정한 박자를 찾지 못했습니다 (구간이 4초보다 짧거나 소리가 없습니다).";
+      return `${r.bpm} BPM, 확실한 정도 ${r.confidence}${r.confidence < 0.2 ? " (일정한 박자가 없어 보입니다)" : ""}, 박자 ${r.beats.length}개:\n${r.beats.slice(0, 400).join(" ")}${r.beats.length > 400 ? " …" : ""}`;
+    }
+    case "find_scene_cuts": {
+      const a = getAsset(inp.asset_id), from = Number(inp.start) || 0, to = Math.min(Number(inp.end) || a.info.duration, a.info.duration);
+      const r: { t: number; score: number }[] = await api.measure("scenes", a.info.path, from, to, Number(inp.threshold) || 0);
+      return r.length ? `화면이 바뀌는 곳 ${r.length}곳:\n${r.slice(0, 300).map((x) => `${x.t}초(${x.score})`).join(" ")}` : "화면이 갑자기 바뀌는 곳이 없습니다.";
+    }
+    case "find_audio_events": {
+      const a = getAsset(inp.asset_id), from = Number(inp.start) || 0, to = Math.min(Number(inp.end) || a.info.duration, a.info.duration);
+      const r: { from: number; to: number; kind: string; db: number }[] = await api.measure("events", a.info.path, from, to);
+      return r.length ? `${r.length}곳 (소리 크기 기준):\n${r.slice(0, 300).map((x) => `${r3(x.from)}~${r3(x.to)}초 ${x.kind} ${x.db}dB`).join("\n")}` : "눈에 띄는 구간이 없습니다.";
+    }
+    case "organize_media": {
+      const moves = new Map<string, string>((inp.moves ?? []).map((m: any) => [String(m.asset_id), String(m.folder ?? "").trim()]));
+      const names = [...new Set(moves.values())].filter(Boolean);
+      mutate((p) => ({ ...p, folders: [...new Set([...(p.folders ?? []), ...names])], assets: p.assets.map((a) => (moves.has(a.id) ? { ...a, folder: moves.get(a.id)! } : a)) }));
+      return `미디어 ${moves.size}개를 옮겼습니다. 폴더: ${names.join(", ") || "맨 위"}`;
     }
     case "find_faces": {
       const a = getAsset(inp.asset_id);
@@ -1125,7 +1189,7 @@ export const TOOL_LABEL: Record<string, string> = {
   get_project_overview: "프로젝트 살펴보는 중", get_transcript: "대본 읽는 중", search_transcript: "대본 찾는 중", view_frames: "장면 보는 중",
   contact_sheet: "영상 훑어보는 중", create_draft: "편집본 만드는 중", get_draft: "편집본 확인 중", edit_draft: "편집하는 중",
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
-  get_captions: "자막 읽는 중", edit_captions: "자막 고치는 중", fix_words: "받아쓰기 고치는 중", set_translation: "번역 넣는 중", paste_attributes: "속성 붙여넣는 중", sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", ask_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
+  measure_loudness: "소리 크기 재는 중", find_beats: "박자 찾는 중", find_scene_cuts: "장면 바뀌는 곳 찾는 중", find_audio_events: "소리 구간 찾는 중", scan_gaze: "카메라 보는 구간 찾는 중", organize_media: "미디어 정리하는 중", get_captions: "자막 읽는 중", edit_captions: "자막 고치는 중", fix_words: "받아쓰기 고치는 중", set_translation: "번역 넣는 중", paste_attributes: "속성 붙여넣는 중", sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", ask_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
 

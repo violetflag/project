@@ -1,3 +1,4 @@
+mod analysis;
 mod args;
 mod cc;
 mod faces;
@@ -369,6 +370,93 @@ async fn find_faces(app: St<'_>, req: FindFaces) -> Result<Vec<Value>, String> {
             Err(e) => err = Some(e),
         })?;
         err.map_or(Ok(out), Err)
+    })
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct MeasureReq {
+    what: String,
+    path: String,
+    from: f64,
+    to: f64,
+    #[serde(default)]
+    threshold: f64,
+}
+
+/// Loudness, beats, picture changes or sound events of a stretch of a file.
+#[tauri::command]
+async fn measure(app: St<'_>, req: MeasureReq) -> Result<Value, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let ff = &app.bins.ffmpeg;
+        match req.what.as_str() {
+            "loudness" => analysis::loudness(ff, &req.path, req.from, req.to),
+            "beats" => analysis::beats(ff, &req.path, req.from, req.to),
+            "events" => analysis::events(ff, &req.path, req.from, req.to).map(|v| json!(v)),
+            "scenes" => analysis::scene_cuts(ff, &req.path, req.from, req.to, if req.threshold > 0.0 { req.threshold } else { 0.3 }).map(|v| json!(v)),
+            w => Err(format!("모르는 측정: {w}")),
+        }
+    })
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct GazeReq {
+    path: String,
+    #[serde(default)]
+    lens: Option<Lens>,
+    from: f64,
+    to: f64,
+    step: f64,
+}
+
+/// Faces and which way they point every `step` seconds of a stretch (at most 240 looks).
+#[tauri::command]
+async fn scan_gaze(app: St<'_>, req: GazeReq) -> Result<Vec<Value>, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let step = req.step.clamp(0.5, 60.0);
+        let times: Vec<f64> = (0..240).map(|i| req.from + i as f64 * step).take_while(|t| *t < req.to).collect();
+        let info = media::inspect(&app.bins.ffprobe, &req.path)?;
+        let gen = app.jobs.generation("gaze");
+        let mut out = Vec::new();
+        if matches!(info.layout360.as_str(), "dual" | "dfisheye") {
+            let (info, lens, m) = engine_for(&app, "gaze", gen, &req.path, req.lens)?;
+            let items: Vec<(f64, pano::M3, Option<f64>)> = times.iter().copied().map(|t| (t, pano::I3, None)).collect();
+            let mut err = None;
+            let mut seen = std::collections::HashSet::new();
+            motion::look_at(&app.bins.ffmpeg, &app.jobs, "gaze", gen, &info, &lens, m.as_ref(), &items, 1920, 960, &mut |_, t, f| {
+                if !seen.insert(t.to_bits()) {
+                    return;
+                }
+                match app.faces.detect_sphere(f) {
+                    Ok(faces) => out.push(json!({ "t": t, "faces": faces })),
+                    Err(e) => err = Some(e),
+                }
+            })?;
+            return err.map_or(Ok(out), Err);
+        }
+        // An ordinary video: pictures fitted into the detector's square, in time order.
+        const S: usize = 640;
+        let vf = format!("fps=1/{step},scale={S}:{S}:force_original_aspect_ratio=decrease,pad={S}:{S}:0:0,format=bgr24");
+        let mut c = ff::command(&app.bins.ffmpeg)
+            .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-ss", &format!("{:.3}", req.from.max(0.0)), "-t", &format!("{:.3}", (req.to - req.from).max(0.0)), "-i", &req.path, "-an", "-vf", &vf, "-f", "rawvideo", "-"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let mut pipe = c.stdout.take().ok_or("ffmpeg 출력 없음")?;
+        let mut buf = vec![0u8; S * S * 3];
+        let mut i = 0;
+        while i < times.len() && std::io::Read::read_exact(&mut pipe, &mut buf).is_ok() {
+            out.push(json!({ "t": times[i], "faces": app.faces.detect_bgr(&buf, S, S)? }));
+            i += 1;
+        }
+        let _ = c.kill();
+        let _ = c.wait();
+        Ok(out)
     })
     .await
 }
@@ -1070,6 +1158,8 @@ pub fn run() {
             save_srt,
             scan_shots,
             find_faces,
+            scan_gaze,
+            measure,
             track_people,
             face_check,
             live_stop,

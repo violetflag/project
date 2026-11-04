@@ -847,3 +847,8 @@ Selects has **no 360 support**. It imports `.insv` and `.lrv` as flat video and 
 13. **Transcript tools**: speakers, a proper-noun fixer for family names, split and merge of lines, translation (Korean ↔ English), and export of the transcript as TXT or SRT.
 14. **Editing comfort**: copy, paste and paste-attributes (one grade or 360 view onto many clips), disable clip, marker navigation and deletion, relink missing media, and remappable shortcuts with a Premiere or Resolve layout.
 15. **Secondary outputs**: FCPXML or Resolve handoff, AAC or MP3 audio export, and still-frame export. Reelcut already leads on 360 stitching, stabilisation and reframing, the LUT slot, J/L detach, loudness and ducking on export, and archive-size encoding.
+
+## 넣지 않기로 한 기능
+
+- 사람 오려내기(person.matte): 모델을 내려받지 않기로 John이 정했습니다(2026-11-04). 2.15.0에 포함하지 않았고, 내려받기 버튼도 두지 않았습니다.
+- 인터넷 브라우저, CAPTCHA 풀기, Google·이미지·YouTube 검색, 플러그인 패널과 게시 스킬: Reelcut에 해당 기능이 없어 넣지 않았습니다. CAPTCHA 풀기는 앞으로도 넣지 않습니다.

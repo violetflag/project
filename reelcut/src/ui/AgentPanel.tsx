@@ -1,5 +1,6 @@
 import { Bookmark, BookmarkPlus, LoaderCircle, Pencil, Plus, Send, Sparkles, Trash2, Undo2 } from "lucide-preact";
 import { useEffect, useRef, useState } from "preact/hooks";
+import { BUILTIN_SKILLS, expandSkillCommand } from "../skills";
 import { answerCard, answerCardText, ask, EFFORTS, isWaitingCard, MODELS, newChat, stopAgent, TOOL_LABEL, waitingCardOf } from "../agent";
 import { ctxLimit, fmtK, newSession, sessionsNewestFirst } from "../chats";
 import { draftDuration, fmtTC, overlays, starts } from "../edit";
@@ -241,7 +242,7 @@ export function AgentPanel() {
     if (s.settings.aiMode === "api" && !s.settings.apiKey) { setErr("설정에서 Anthropic API 키를 먼저 넣어 주세요."); return; }
     setText(""); setErr("");
     // A request that fails gives the text back, so nothing typed is lost.
-    try { await ask(t.trim()); } catch (e) { setErr(String((e as Error)?.message ?? e)); if (!loadPrompt(projectId, chatId)) setText(t); }
+    try { await ask(expandSkillCommand(t.trim(), st.skills)); } catch (e) { setErr(String((e as Error)?.message ?? e)); if (!loadPrompt(projectId, chatId)) setText(t); }
   };
   const open = (id: string) => { if (!s.agentBusy) mutate((x) => ({ ...x, activeChat: id })); };
   const remove = () => {
@@ -324,6 +325,13 @@ export function AgentPanel() {
         onSend={(t) => { setLib(false); send(t); }} onClose={() => setLib(false)} />}
       <div class="composer">
         <button class={`icon-btn ${lib ? "on" : ""}`} onClick={() => setLib(!lib)} aria-pressed={lib} aria-label="저장한 프롬프트" title="저장한 프롬프트"><Bookmark size={16} /></button>
+        {/^\/\S*$/.test(text) && (
+          <div class="skill-pick" role="listbox" aria-label="스킬 고르기">
+            {[...s.skills, ...BUILTIN_SKILLS].filter((k) => k.name.includes(text.slice(1).toLowerCase())).slice(0, 8).map((k) => (
+              <button role="option" onClick={() => { setText(`/${k.name} `); box.current?.focus(); }}><b>/{k.name}</b> <span class="muted">{k.description}</span></button>
+            ))}
+          </div>
+        )}
         <textarea ref={box} rows={3} placeholder="예: 인트로를 짧게 줄이고 자막 넣어 줘 (Enter 보내기, Shift+Enter 줄바꿈)" value={text} aria-label="AI에게 편집 요청"
           onInput={(e) => setText((e.target as HTMLTextAreaElement).value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } }} />

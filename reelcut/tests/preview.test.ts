@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
 import { captionLines, draftCaptions, keyWordIndex, moveWordPrev, setHidden, setLineText, spokenIndex, toAss, toSrt, wordKey } from "../src/captions";
+import { BUILTIN_SKILLS, expandSkillCommand, skillFromText, skillToText } from "../src/skills";
+import { TOOLS } from "../src/agent";
 import { CAPTION_PRESETS, STICKERS, stickerSvgPath, textEvent, textLook } from "../src/graphics";
 import { BUILTIN_SKILLS, cleanSkillName, findSkill, skillCatalog, upsertSkill } from "../src/skills";
-import { CLIP_ATTRS, pasteAttrs, toSegs, transitionLook, TRANSITIONS, multicamDraft, isDefaultColor, LOOKS, animAt, DEFAULT_CAPTION, fitMusic, mergeScenes, movePreset, volAt, newDraft, playableInWebView, previewSource, searchScenes } from "../src/edit";
+import { gazeSpans, CLIP_ATTRS, pasteAttrs, toSegs, transitionLook, TRANSITIONS, multicamDraft, isDefaultColor, LOOKS, animAt, DEFAULT_CAPTION, fitMusic, mergeScenes, movePreset, volAt, newDraft, playableInWebView, previewSource, searchScenes } from "../src/edit";
 import { dirToDfisheye } from "../src/gl360";
 import type { Asset, MediaInfo } from "../src/types";
 
@@ -281,5 +283,32 @@ describe("caption lines, styles and translation", () => {
   it("has 15 distinct looks", () => {
     expect(CAPTION_PRESETS).toHaveLength(15);
     expect(new Set(CAPTION_PRESETS.map((p) => p.id)).size).toBe(15);
+  });
+});
+
+describe("skills and gaze", () => {
+  it("only names tools the AI has", () => {
+    const known = new Set(TOOLS.map((t) => t.name));
+    const words = new Set<string>();
+    for (const k of BUILTIN_SKILLS) for (const m of k.body.matchAll(/\b([a-z]+_[a-z_]+)\b/g)) words.add(m[1]);
+    // Values and guide names that look like tool names.
+    const allowed = new Set([...BUILTIN_SKILLS.map((k) => k.name), "jump_cut", "break_by", "max_chars", "cut_source", "add_music", "add_overlay", "shrink_balanced", "shrink_small", "shrink_archive", "shrink_lecture", "break_before", "join_next", "move_word_prev", "fix_word", "set_line", "zoom_in", "zoom_out", "pan_left", "pan_right", "remove_range", "head_marks", "draft_id", "asset_id", "run_script", "set_view_keys"]);
+    const unknown = [...words].filter((w) => !known.has(w) && !allowed.has(w));
+    expect(unknown).toEqual([]);
+    expect(BUILTIN_SKILLS).toHaveLength(33);
+    expect(new Set(BUILTIN_SKILLS.map((k) => k.name)).size).toBe(33);
+  });
+  it("goes to text and back, and answers /name in chat", () => {
+    const k = { name: "twins", description: "쌍둥이 쇼츠", triggers: ["쇼츠", "쌍둥이"], body: "1. 세로\n2. 15초" };
+    expect(skillFromText(skillToText(k))).toEqual(k);
+    expect(() => skillFromText("그냥 글")).toThrow();
+    expect(expandSkillCommand("/twins 4분부터", [k])).toContain('"twins"');
+    expect(expandSkillCommand("/twins 4분부터", [k])).toContain("4분부터");
+    expect(expandSkillCommand("/없는것 해줘", [k])).toBe("/없는것 해줘");
+  });
+  it("joins looks facing the camera into stretches", () => {
+    const f = (front: number) => ({ front });
+    const spans = gazeSpans([{ t: 0, faces: [f(0.9)] }, { t: 2, faces: [f(0.8), f(0.7)] }, { t: 4, faces: [f(0.1)] }, { t: 6, faces: [] }, { t: 8, faces: [f(0.6)] }], 2);
+    expect(spans).toEqual([{ from: 0, to: 4, faces: 2 }, { from: 8, to: 10, faces: 1 }]);
   });
 });

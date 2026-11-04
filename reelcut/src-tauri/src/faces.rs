@@ -22,6 +22,18 @@ pub struct Face {
     pub w: f32,
     pub h: f32,
     pub score: f32,
+    /// How squarely the head points at the camera, 0–1, from the eyes and nose. This is head
+    /// direction, not where the eyes look.
+    #[serde(default)]
+    pub front: f32,
+}
+
+/// Frontal when the nose sits between the eyes and the eyes are wide apart for the face's size.
+fn frontal(kps: &[f32], fw: f32) -> f32 {
+    let (ex0, ey0, ex1, ey1, nose) = (kps[0], kps[1], kps[2], kps[3], kps[4]);
+    let d = ((ex1 - ex0).powi(2) + (ey1 - ey0).powi(2)).sqrt().max(1.0);
+    let off = (nose - (ex0 + ex1) / 2.0).abs() / d;
+    (1.0 - off / 0.45).clamp(0.0, 1.0) * (d / (fw * 0.3)).clamp(0.0, 1.0)
 }
 
 impl Face {
@@ -81,7 +93,7 @@ impl Detector {
                     let i = names.iter().position(|n| *n == name || n.starts_with(&format!("{name}"))).ok_or(format!("{name} 없음"))?;
                     outs[i].as_slice::<f32>().map_err(|e| e.to_string())
                 };
-                let (cls, obj, bbox) = (get("cls")?, get("obj")?, get("bbox")?);
+                let (cls, obj, bbox, kps) = (get("cls")?, get("obj")?, get("bbox")?, get("kps")?);
                 let cols = SIZE / stride;
                 for r in 0..cols {
                     for c in 0..cols {
@@ -94,7 +106,9 @@ impl Detector {
                         let cx = (c as f32 + bbox[idx * 4]) * s;
                         let cy = (r as f32 + bbox[idx * 4 + 1]) * s;
                         let (fw, fh) = (bbox[idx * 4 + 2].exp() * s, bbox[idx * 4 + 3].exp() * s);
-                        out.push(Face { x: cx - fw / 2.0, y: cy - fh / 2.0, w: fw, h: fh, score });
+                        let k = &kps[idx * 10..idx * 10 + 10];
+                        let pts = [(c as f32 + k[0]) * s, (r as f32 + k[1]) * s, (c as f32 + k[2]) * s, (r as f32 + k[3]) * s, (c as f32 + k[4]) * s];
+                        out.push(Face { x: cx - fw / 2.0, y: cy - fh / 2.0, w: fw, h: fh, score, front: frontal(&pts, fw) });
                     }
                 }
             }
@@ -122,7 +136,7 @@ impl Detector {
         while x0 < w {
             let bgr = crop_bgr(f, x0, y0, tile, tile.min(h - y0));
             for m in self.detect_bgr(&bgr, tile, tile.min(h - y0))? {
-                all.push(Face { x: (m.x + x0 as f32) * k, y: (m.y + y0 as f32) * k, w: m.w * k, h: m.h * k, score: m.score });
+                all.push(Face { x: (m.x + x0 as f32) * k, y: (m.y + y0 as f32) * k, w: m.w * k, h: m.h * k, score: m.score, front: m.front });
             }
             x0 += step;
         }
@@ -391,8 +405,15 @@ mod tests {
     }
 
     #[test]
+    fn tells_a_frontal_head_from_a_turned_one() {
+        // Eyes either side of the nose, wide apart: frontal. Nose out past one eye: turned.
+        assert!(frontal(&[40.0, 50.0, 80.0, 50.0, 60.0], 100.0) > 0.9);
+        assert!(frontal(&[40.0, 50.0, 60.0, 50.0, 62.0], 100.0) < 0.4);
+    }
+
+    #[test]
     fn snaps_to_faces_and_flags_edges() {
-        let m = Face { x: 300.0, y: 2.0, w: 40.0, h: 50.0, score: 0.9 };
+        let m = Face { x: 300.0, y: 2.0, w: 40.0, h: 50.0, score: 0.9, front: 1.0 };
         assert_eq!(edge_of(&m, 640.0, 360.0), Some("top"));
         assert_eq!(edge_of(&Face { y: 100.0, ..m }, 640.0, 360.0), None);
         assert_eq!(edge_of(&Face { y: 320.0, ..m }, 640.0, 360.0), Some("bottom"));

@@ -55,6 +55,8 @@ export const api = {
   liveUrl: (req: { slot: string; info: MediaInfo; lens: Lens | null; t: number; kind: "stream" | "frame"; rate?: number }) => invoke<string>("live_url", { req }),
   liveStop: (slot: string) => invoke<boolean>("live_stop", { slot }),
   calibrate360: (info: MediaInfo, lens: Lens) => invoke<Stitch>("calibrate_360", { info, lens }),
+  measure: (what: "loudness" | "beats" | "events" | "scenes", path: string, from: number, to: number, threshold = 0) => invoke<any>("measure", { req: { what, path, from, to, threshold } }),
+  scanGaze: (path: string, lens: Lens | null, from: number, to: number, step: number) => invoke<{ t: number; faces: { x: number; y: number; w: number; h: number; score: number; front: number }[] }[]>("scan_gaze", { req: { path, lens, from, to, step } }),
   findFaces: (path: string, lens: Lens, times: number[]) => invoke<{ t: number; faces: { x: number; y: number; w: number; h: number; score: number }[] }[]>("find_faces", { req: { path, lens, times } }),
   trackPeople: (path: string, lens: Lens, from: number, to: number, subjects: { name: string; seeds: [number, number, number][] }[]) =>
     invoke<{ name: string; tracked: number; marks: [number, number, number][] }[]>("track_people", { req: { path, lens, from, to, subjects } }),

@@ -2,6 +2,7 @@
 // app; the user's own are kept in the app store ("skills") and shared by every project. The AI sees
 // only the list (name, description, trigger words) in its instructions and reads a guide when needed.
 import { PLAYBOOK_360 } from "./playbook";
+import { LIBRARY } from "./skills-lib";
 import type { Skill } from "./types";
 
 const VLOG = `# 브이로그 편집 순서
@@ -68,6 +69,7 @@ export const BUILTIN_SKILLS: Skill[] = [
   { name: "highlights", description: "하이라이트·쇼츠 후보를 제안하고 고른 것으로 만들기", triggers: ["하이라이트", "쇼츠", "숏폼", "릴스"], body: HIGHLIGHTS },
   { name: "talk_cleanup", description: "말하는 영상의 군더더기와 무음 다듬기", triggers: ["무음", "군더더기", "강의", "인터뷰"], body: TALK },
   { name: "photo_slideshow", description: "사진으로 음악 있는 영상 만들기", triggers: ["사진", "슬라이드"], body: SLIDESHOW },
+  ...LIBRARY,
 ];
 
 /** A name the app can store: lowercase letters, numbers, - and _ (other languages' letters too). */
@@ -86,7 +88,7 @@ export function upsertSkill(user: Skill[], s: Skill): Skill[] {
   if (!name) throw new Error("스킬 이름이 비었습니다");
   if (BUILTIN_SKILLS.some((b) => b.name === name)) throw new Error(`"${name}"은 앱에 들어 있는 이름입니다. 다른 이름을 쓰세요`);
   if (!s.body.trim()) throw new Error("스킬 내용이 비었습니다");
-  const next: Skill = { name, description: s.description.trim().slice(0, 200), triggers: (s.triggers ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 16), body: s.body };
+  const next: Skill = { name, description: s.description.replace(/<\/?[a-z_]+>/g, "").trim().slice(0, 200), triggers: (s.triggers ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 16), body: s.body };
   return [next, ...user.filter((x) => x.name !== name)];
 }
 
@@ -94,6 +96,26 @@ export function upsertSkill(user: Skill[], s: Skill): Skill[] {
 export function skillCatalog(user: Skill[]): string {
   const line = (s: Skill) => `- ${s.name}: ${s.description}${s.triggers?.length ? ` (${s.triggers.join(", ")})` : ""}`;
   return ["## 작업 안내(스킬)", "요청이 아래 작업에 맞으면 시작하기 전에 get_playbook으로 그 안내를 읽고 따르세요. 사용자가 만든 것이 우선입니다.", ...(user.length ? ["사용자가 만든 것:", ...user.map(line)] : []), "앱에 들어 있는 것:", ...BUILTIN_SKILLS.map(line), "사용자가 \"다음에도 이렇게\", \"이 규칙을 기억해\"처럼 말하면 save_skill로 저장합니다."].join("\n");
+}
+
+/** A skill as one piece of text, to hand to someone or keep. */
+export function skillToText(s: Skill): string {
+  return ["---", `name: ${s.name}`, `description: ${s.description}`, `triggers: ${(s.triggers ?? []).join(", ")}`, "---", "", s.body].join("\n");
+}
+export function skillFromText(text: string): Skill {
+  const m = /^\s*---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
+  if (!m) throw new Error("스킬 글은 ---로 시작하는 머리말이 있어야 합니다");
+  const field = (k: string) => new RegExp(`^${k}:[ \\t]*(.*)$`, "m").exec(m[1])?.[1].trim() ?? "";
+  const name = cleanSkillName(field("name"));
+  if (!name) throw new Error("머리말에 name이 없습니다");
+  return { name, description: field("description"), triggers: field("triggers").split(",").map((t) => t.trim()).filter(Boolean), body: m[2].trim() };
+}
+
+/** "/name what to do" in the chat box asks for that skill. */
+export function expandSkillCommand(text: string, user: Skill[]): string {
+  const m = /^\/(\S+)\s*([\s\S]*)$/.exec(text.trim());
+  const s = m && findSkill(user, m[1]);
+  return s ? `get_playbook으로 "${s.name}" 안내를 읽고 그대로 따라 주세요.${m![2] ? `\n\n요청: ${m![2]}` : ""}` : text;
 }
 
 export type Step = { tool: string; input?: Record<string, unknown> };

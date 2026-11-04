@@ -6,6 +6,8 @@ import type { ComponentChildren } from "preact";
 import { useState } from "preact/hooks";
 import { api, pickLut } from "../api";
 import {
+  GAZE_MIN_FACE_360,
+  gazeSpans,
   ASPECTS, audioTrack, fitMusic, LOOKS, clipAt, clipDur, DEFAULT_COLOR, DEFAULT_TRANSFORM, DEFAULT_VIEW, detachAudio, fmtTCF, is360, isGap, overlays, parseTC, r3, setTransition, setViewKey, starts,
   MOVE_PRESETS, movePreset, TRANSITIONS, timedDur, uid, updateAudio, updateClip, updateOverlay, viewAt, volAt,
 } from "../edit";
@@ -161,6 +163,7 @@ function ViewSec({ view, keys, src, onView, onKeys }: { view?: View; keys?: { t:
 }
 
 function ClipView({ d, c }: { d: Draft; c: Clip }) {
+  const [gazing, setGazing] = useState(false);
   const a = isGap(c) ? null : asset(c.asset);
   const fps = d.fps || 30;
   const i = d.clips.findIndex((x) => x.id === c.id);
@@ -179,6 +182,17 @@ function ClipView({ d, c }: { d: Draft; c: Clip }) {
     <div class="inspector">
       <Section id="clip" title="클립" term="Clip">
         <p class="muted">{a?.info.name} · {a?.info.width ? `${a.info.width}×${a.info.height} · ` : ""}타임라인 {fmtTCF(starts(d)[i], fps)}부터</p>
+        {a?.info.kind === "video" && <button class="small" disabled={gazing} onClick={async () => {
+          setGazing(true);
+          try {
+            const step = Math.max(1, (c.end - c.start) / 200);
+            const lens = is360(a) ? { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 } : null;
+            const spans = gazeSpans(await api.scanGaze(a.info.path, lens, c.start, c.end, step), step, is360(a) ? GAZE_MIN_FACE_360 : 0);
+            const t0 = starts(d)[i];
+            editDraft("카메라 보는 구간 표시", (x) => ({ ...x, markers: [...x.markers, ...spans.map((m) => ({ id: uid(), t: t0 + (m.from - c.start) / c.speed, label: "카메라 쪽", color: "#5BE7A9" }))] }));
+            toast(spans.length ? `카메라 쪽을 향한 구간 ${spans.length}곳에 마커를 달았습니다 (머리 방향 기준)` : "카메라 쪽을 향한 얼굴을 찾지 못했습니다");
+          } catch (e) { toast(String(e)); } finally { setGazing(false); }
+        }}>{gazing ? "찾는 중…" : "카메라 보는 구간 찾기"}</button>}
         <label class="check"><input type="checkbox" checked={!c.disabled} onChange={() => set1("클립 켜기·끄기", { disabled: !c.disabled })} /> 클립 켜기 <span class="muted">(끄면 자리를 지키며 검은 화면·무음)</span></label>
         <div class="row">
           <TCField label="원본 시작" value={c.start} fps={fps} onChange={(v) => set1("다듬기", { start: r3(Math.max(0, Math.min(c.end - 0.1, v))) })} />
