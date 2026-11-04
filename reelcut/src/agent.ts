@@ -12,10 +12,10 @@ import {
 import { exportAndWait } from "./exporter";
 import { CAPTION_PRESETS, TEXT_KINDS } from "./graphics";
 import { cleanKeys, frameGroup, frameSubject, normView, sampleKeys, snapRanges, type Mark, type Subject } from "./framing";
-import { PLAYBOOK_360 } from "./playbook";
+import { BUILTIN_SKILLS, cleanSkillName, findSkill, NOT_IN_BATCH, skillCatalog, upsertSkill, type Step } from "./skills";
 import { compactBudget, ctxLimit, estTokens, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
-import { activeChat, asset, assetMap, editDraft, syncAssets, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
-import type { AnimKey, Asset, ChatBlock, ChatMsg, ChatSession, Draft, TextItem, View, ViewKey, VolKey } from "./types";
+import { activeChat, asset, assetMap, editDraft, saveSkills, syncAssets, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
+import type { AnimKey, Asset, ChatBlock, ChoiceCard, ChatMsg, ChatSession, Draft, TextItem, View, ViewKey, VolKey } from "./types";
 
 export const MODELS = [
   { id: "claude-opus-5-5", label: "Claude Opus 5.5" },
@@ -162,8 +162,21 @@ export const TOOLS = [
   { name: "remove_text", description: "add_text로 올린 글자·스티커를 지웁니다. ids가 없으면 전부 지웁니다. 지금 있는 항목은 get_draft에 나옵니다.", input_schema: { type: "object", properties: { draft_id: draftId, ids: { type: "array", items: str } } } },
   { name: "transcribe", description: "미디어를 받아쓰기합니다 (끝날 때까지 기다림).", input_schema: { type: "object", properties: { asset_ids: { type: "array", items: str } }, required: ["asset_ids"] } },
   {
-    name: "get_playbook", description: "작업별 단계별 지침을 읽습니다. name=360_auto_edit: 360 영상을 사람 따라가며 자동 편집하는 순서.",
-    input_schema: { type: "object", properties: { name: { type: "string", enum: ["360_auto_edit"] } }, required: ["name"] },
+    name: "get_playbook", description: "작업 안내(스킬)를 읽습니다. 어떤 안내가 있는지는 지침의 '작업 안내(스킬)' 목록에 있습니다.",
+    input_schema: { type: "object", properties: { name: str }, required: ["name"] },
+  },
+  {
+    name: "save_skill", description: "사용자의 규칙이나 작업 순서를 스킬로 저장합니다. 모든 프로젝트와 새 대화에서 쓸 수 있습니다. 사용자가 '다음에도 이렇게', '이 규칙 기억해'라고 할 때 씁니다. body는 앞으로의 자신이 따를 수 있게 구체적으로 적으세요. 같은 이름이면 고칩니다.",
+    input_schema: { type: "object", properties: { name: { ...str, description: "짧은 이름(영문·한글, 띄어쓰기 없이)" }, description: { ...str, description: "무엇을 하는 스킬인지 한 줄" }, triggers: { type: "array", items: str, description: "이 스킬을 떠올릴 말" }, body: str }, required: ["name", "description", "body"] },
+  },
+  { name: "delete_skill", description: "사용자가 만든 스킬을 지웁니다.", input_schema: { type: "object", properties: { name: str }, required: ["name"] } },
+  {
+    name: "show_options", description: "사용자에게 고를 수 있는 카드를 보여 줍니다(하이라이트 후보, 길이 선택 등). 부른 뒤에는 차례를 끝내고 기다리세요. 사용자가 고르면 그 선택지의 prompt(없으면 label)가 다음 요청으로 옵니다. prompt에는 이어서 할 일을 시각까지 구체적으로 적으세요.",
+    input_schema: { type: "object", properties: { question: str, options: { type: "array", items: { type: "object", properties: { label: str, detail: str, prompt: str }, required: ["label"] } } }, required: ["question", "options"] },
+  },
+  {
+    name: "run_steps", description: "여러 도구를 한 번에 차례로 실행합니다(예: 클립마다 같은 작업). steps: [{tool, input}], 앞 단계가 실패하면 멈춥니다(stop_on_error 기본 켬). 그림을 돌려주는 도구의 그림은 빠지고 글만 돌아옵니다. 그림을 봐야 하면 따로 부르세요. show_options, get_playbook은 넣을 수 없습니다.",
+    input_schema: { type: "object", properties: { stop_on_error: { type: "boolean" }, steps: { type: "array", items: { type: "object", properties: { tool: str, input: { type: "object" } }, required: ["tool"] } } }, required: ["steps"] },
   },
   {
     name: "equirect_sheet", description: "360 영상의 특정 원본 시간을 '수평으로 펴 놓은 파노라마'(가로 0~960 = 방위 -180~180°, 480 = 정면, 세로 240 = 수평선)로 봅니다. 좌표 격자가 그려져 있어 사람 머리의 [x,y]를 읽을 때 씁니다 (최대 6장).",
@@ -452,7 +465,48 @@ async function run(name: string, inp: any): Promise<Out> {
       editDraft(`AI: 편집본 수정`, () => d, d0.id);
       return `적용했습니다. 길이 ${r3(draftDuration(d0))}초 → ${r3(draftDuration(d))}초\n` + draftInfo(d);
     }
-    case "get_playbook": return PLAYBOOK_360;
+    case "get_playbook": {
+      const s = findSkill(st.skills, String(inp.name ?? ""));
+      if (!s) throw new Error(`없는 안내: ${inp.name}. 있는 것: ${[...st.skills, ...BUILTIN_SKILLS].map((x) => x.name).join(", ")}`);
+      return s.body;
+    }
+    case "save_skill": {
+      const next = upsertSkill(st.skills, { name: String(inp.name ?? ""), description: String(inp.description ?? ""), triggers: inp.triggers, body: String(inp.body ?? "") });
+      await saveSkills(next);
+      return `스킬 "${next[0].name}"을 저장했습니다. 사용자가 설정 > AI 편집에서 보고 고칠 수 있습니다.`;
+    }
+    case "delete_skill": {
+      const n = cleanSkillName(String(inp.name ?? ""));
+      if (!st.skills.some((s) => s.name === n)) throw new Error(`사용자가 만든 스킬 중에 "${n}"이 없습니다`);
+      await saveSkills(st.skills.filter((s) => s.name !== n));
+      return `스킬 "${n}"을 지웠습니다.`;
+    }
+    case "show_options": {
+      const card: ChoiceCard = { id: uid(), question: String(inp.question ?? ""), options: (inp.options ?? []).slice(0, 6).map((o: any) => ({ label: String(o.label), detail: o.detail ? String(o.detail) : undefined, prompt: o.prompt ? String(o.prompt) : undefined })), at: Date.now() };
+      if (!card.options.length) throw new Error("options가 비었습니다");
+      const sid = activeChat()?.id;
+      mutateChat((c) => ({ ...c, cards: [...(c.cards ?? []), card] }), sid);
+      return "카드를 보여 줬습니다. 여기서 차례를 끝내고 사용자의 선택을 기다리세요.";
+    }
+    case "run_steps": {
+      const steps: Step[] = inp.steps ?? [];
+      const stop = inp.stop_on_error !== false;
+      const lines: string[] = [];
+      for (let i = 0; i < steps.length; i++) {
+        // The model may use the name it knows the tool by in account mode.
+        const s = { ...steps[i], tool: String(steps[i].tool).replace(/^mcp__\w+__/, "") };
+        if (NOT_IN_BATCH.has(s.tool)) { lines.push(`${i + 1}. ${s.tool}: 여기서는 쓸 수 없습니다`); if (stop) break; continue; }
+        try {
+          const out = await run(s.tool, s.input ?? {});
+          const text = typeof out === "string" ? out : (out as ChatBlock[]).filter((b) => b.type === "text").map((b) => String(b.text)).join(" ");
+          lines.push(`${i + 1}. ${s.tool}: ${text.slice(0, 600)}`);
+        } catch (e) {
+          lines.push(`${i + 1}. ${s.tool}: 실패 (${(e as Error)?.message ?? e})`);
+          if (stop) { lines.push(`여기서 멈췄습니다 (${steps.length - i - 1}단계 남음).`); break; }
+        }
+      }
+      return lines.join("\n");
+    }
     case "equirect_sheet": {
       const a = getAsset(inp.asset_id);
       if (!is360(a)) throw new Error("360 영상이 아닙니다");
@@ -950,7 +1004,7 @@ export const TOOL_LABEL: Record<string, string> = {
   get_project_overview: "프로젝트 살펴보는 중", get_transcript: "대본 읽는 중", search_transcript: "대본 찾는 중", view_frames: "장면 보는 중",
   contact_sheet: "영상 훑어보는 중", create_draft: "편집본 만드는 중", get_draft: "편집본 확인 중", edit_draft: "편집하는 중",
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
-  sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
+  sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", show_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
 
@@ -960,7 +1014,8 @@ const PREFIX = "mcp__reelcut__";
 /** The system prompt with what the user asked the AI always to keep in mind (설정 > AI 편집). */
 const sys = () => {
   const notes = (st.settings.aiNotes ?? "").trim();
-  return notes ? `${SYSTEM}\n\n## 사용자가 늘 지켜 달라고 한 것 (설정에 적어 둔 내용)\n${notes}` : SYSTEM;
+  const base = `${SYSTEM}\n\n${skillCatalog(st.skills)}`;
+  return notes ? `${base}\n\n## 사용자가 늘 지켜 달라고 한 것 (설정에 적어 둔 내용)\n${notes}` : base;
 };
 const sysCc = () => sys() + `\n\n도구 이름에는 ${PREFIX} 접두어가 붙어 있습니다 (예: ${PREFIX}get_project_overview). 이 앱의 도구 말고 다른 도구는 없습니다.`;
 

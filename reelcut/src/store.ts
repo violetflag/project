@@ -4,7 +4,7 @@ import { api, onJob, type AppInfo, type CcStatus, type ModelInfo, type QwenStatu
 import { CTX_DEFAULTS, migrateChats, newSession, promptName } from "./chats";
 export { promptName };
 import { draftDuration, newDraft, refineWords, rippleConnected, uid } from "./edit";
-import type { Asset, BadShot, ChatSession, Draft, JobEvent, Lens, Project, SavedPrompt, Settings, Word } from "./types";
+import type { Asset, BadShot, ChatSession, Draft, JobEvent, Lens, Project, SavedPrompt, Settings, Skill, Word } from "./types";
 
 export type Meta = { id: string; name: string; updated: number; created: number; assets: number; drafts: number; duration: number; poster?: string; clips: number };
 export type ExportJob = { id: string; draft: string; pct: number; state: string; message: string; out: string; result?: any; left?: number; name?: string };
@@ -67,13 +67,15 @@ type S = {
   motionRev: number;
   /** AI requests saved for reuse (all projects). */
   prompts: SavedPrompt[];
+  /** The user's own AI guides (all projects). */
+  skills: Skill[];
 };
 
 export const st: S = {
   route: "home", projects: [], project: null, draftId: null, sourceId: null, folder: "", playhead: 0, selClip: null,
   settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, ccConnect: null, qwenSetup: null, downloads: {}, exportJob: null, toast: "",
   agentBusy: false, agentStatus: "", rightTab: "inspect", leftTab: "media",
-  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, dialog: "", showSafe: false, showSilence: false, motion: {}, scans: {}, motionRev: 0, prompts: [],
+  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, dialog: "", showSafe: false, showSilence: false, motion: {}, scans: {}, motionRev: 0, prompts: [], skills: [],
 };
 
 const subs = new Set<() => void>();
@@ -516,6 +518,17 @@ export async function loadWave(a: Asset): Promise<Uint8Array | null> {
 }
 
 // ---------------------------------------------------------------- saved AI prompts
+
+export async function loadSkills() {
+  try {
+    const raw = await api.storeGet("skills");
+    if (raw) set({ skills: JSON.parse(raw) });
+  } catch { /* none yet */ }
+}
+export async function saveSkills(skills: Skill[]) {
+  set({ skills });
+  await api.storeSet("skills", JSON.stringify(skills));
+}
 
 export async function loadPrompts() {
   try {

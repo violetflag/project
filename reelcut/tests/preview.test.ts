@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
 import { captionLines, toAss } from "../src/captions";
 import { STICKERS, stickerSvgPath, textEvent, textLook } from "../src/graphics";
+import { BUILTIN_SKILLS, cleanSkillName, findSkill, skillCatalog, upsertSkill } from "../src/skills";
 import { multicamDraft, isDefaultColor, LOOKS, animAt, DEFAULT_CAPTION, fitMusic, mergeScenes, movePreset, volAt, newDraft, playableInWebView, previewSource, searchScenes } from "../src/edit";
 import { dirToDfisheye } from "../src/gl360";
 import type { Asset, MediaInfo } from "../src/types";
@@ -158,5 +159,30 @@ describe("multicam and looks", () => {
     expect(isDefaultColor({ ...base, vignette: 0.3 })).toBe(false);
     expect(isDefaultColor({ ...base, ...LOOKS.find((l) => l.id === "warm")!.color })).toBe(false);
     expect(isDefaultColor({ ...base, vignette: 0.3, ...LOOKS.find((l) => l.id === "none")!.color })).toBe(true);
+  });
+});
+
+describe("skills", () => {
+  const mine = { name: "쌍둥이 쇼츠", description: "쌍둥이 쇼츠 규칙", triggers: ["쇼츠"], body: "두 아이를 함께" };
+  it("saves, replaces and finds a user's skill, and cleans its name", () => {
+    expect(cleanSkillName("  쌍둥이 쇼츠! ")).toBe("쌍둥이_쇼츠");
+    const a = upsertSkill([], mine);
+    expect(a[0].name).toBe("쌍둥이_쇼츠");
+    const b = upsertSkill(a, { ...mine, body: "새 내용" });
+    expect(b).toHaveLength(1);
+    expect(findSkill(b, "쌍둥이 쇼츠")?.body).toBe("새 내용");
+    expect(findSkill(b, "vlog_edit")?.body).toContain("브이로그");
+    expect(findSkill(b, "없는것")).toBeNull();
+  });
+  it("keeps the built-in names and refuses empty skills", () => {
+    expect(() => upsertSkill([], { ...mine, name: "vlog_edit" })).toThrow();
+    expect(() => upsertSkill([], { ...mine, body: "  " })).toThrow();
+    expect(() => upsertSkill([], { ...mine, name: "!!!" })).toThrow();
+  });
+  it("lists the user's skills first for the AI, without their bodies", () => {
+    const text = skillCatalog(upsertSkill([], mine));
+    expect(text.indexOf("쌍둥이_쇼츠")).toBeLessThan(text.indexOf(BUILTIN_SKILLS[0].name));
+    expect(text).not.toContain("두 아이를 함께");
+    for (const k of BUILTIN_SKILLS) expect(text).toContain(k.name);
   });
 });

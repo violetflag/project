@@ -289,6 +289,16 @@ export function AgentPanel() {
             </div>
           )
           : <div class={`msg ${it.kind}`}>{it.kind === "ai" ? <Md text={it.text} /> : it.text}</div>)}
+        {(c?.cards ?? []).filter((k) => !k.used).map((k) => (
+          <div class="choice-card" key={k.id}>
+            <div class="choice-q">{k.question}</div>
+            {k.options.map((o) => (
+              <button class="choice" disabled={s.agentBusy} onClick={() => { mutateChat((x) => ({ ...x, cards: (x.cards ?? []).map((y) => (y.id === k.id ? { ...y, used: true } : y)) })); send(o.prompt || o.label); }}>
+                <b>{o.label}</b>{o.detail && <span class="muted">{o.detail}</span>}
+              </button>
+            ))}
+          </div>
+        ))}
         {runs.length > 0 && <RunCard r={runs[runs.length - 1]} last={st.aiRuns[st.aiRuns.length - 1]?.id === runs[runs.length - 1].id} />}
         {s.agentBusy && <div class="msg status"><LoaderCircle size={13} class="spin-i" aria-hidden="true" /> {s.agentStatus}</div>}
         {err && <div class="msg err">{err} <a onClick={() => set({ route: "settings" })}>설정 열기</a></div>}

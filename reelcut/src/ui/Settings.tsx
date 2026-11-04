@@ -2,7 +2,8 @@ import { useEffect, useState } from "preact/hooks";
 import { api, pickFolder } from "../api";
 import { EFFORTS, MODELS } from "../agent";
 import { CTX_DEFAULTS } from "../chats";
-import { connectClaude, refreshCc, refreshModels, refreshQwen, saveNow, saveSettings, set, st, toast, useStore } from "../store";
+import { connectClaude, refreshCc, refreshModels, refreshQwen, saveNow, saveSettings, set, st, toast, useStore, saveSkills } from "../store";
+import { BUILTIN_SKILLS } from "../skills";
 
 export function SettingsView() {
   const s = useStore();
@@ -93,6 +94,18 @@ export function SettingsView() {
             onChange={(e) => saveSettings({ aiNotes: (e.target as HTMLTextAreaElement).value })} />
         </label>
         <p class="muted">새 대화에서도 AI가 항상 이 내용을 지킵니다.</p>
+        <h3 class="sub">AI 스킬 (작업 안내)</h3>
+        <p class="muted">AI가 일을 시작하기 전에 읽는 안내입니다. "다음에도 이렇게 해 줘"라고 말하면 AI가 여기에 저장합니다. 앱에 들어 있는 것: {BUILTIN_SKILLS.map((b) => b.name).join(", ")}</p>
+        {!s.skills.length && <p class="muted">내가 만든 스킬이 아직 없습니다.</p>}
+        {s.skills.map((k) => (
+          <details class="skill-row" key={k.name}>
+            <summary><b>{k.name}</b> <span class="muted">{k.description}</span></summary>
+            <label>설명<input value={k.description} onChange={(e) => saveSkills(s.skills.map((x) => (x.name === k.name ? { ...x, description: (e.target as HTMLInputElement).value } : x)))} /></label>
+            <label>떠올릴 말 (쉼표로)<input value={(k.triggers ?? []).join(", ")} onChange={(e) => saveSkills(s.skills.map((x) => (x.name === k.name ? { ...x, triggers: (e.target as HTMLInputElement).value.split(",").map((t) => t.trim()).filter(Boolean) } : x)))} /></label>
+            <label>내용<textarea value={k.body} onChange={(e) => saveSkills(s.skills.map((x) => (x.name === k.name ? { ...x, body: (e.target as HTMLTextAreaElement).value } : x)))} /></label>
+            <button class="small danger" onClick={() => { if (confirm(`스킬 "${k.name}"을 지울까요?`)) saveSkills(s.skills.filter((x) => x.name !== k.name)); }}>지우기</button>
+          </details>
+        ))}
         <h3 class="sub">컨텍스트와 자동 요약</h3>
         <p class="muted">대화가 길어지면 한도의 {cfg.compactAt || 90}%에서 자동으로 요약해 {cfg.compactTo || 50}% 이하로 줄입니다. 지난 대화는 패널에 그대로 남습니다.</p>
         <div class="row">

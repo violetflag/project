@@ -491,7 +491,7 @@ pub fn auto_color(pics: &[(Vec<u8>, usize, usize)]) -> (f64, f64, f64) {
     let pct = |p: f64| lum[((lum.len() - 1) as f64 * p) as usize] as f64 / 255.0;
     let (lo, mid, hi) = (pct(0.02), pct(0.5).clamp(0.05, 0.95), pct(0.98));
     // The export's exposure is a gamma of 2^(0.75·stops): bring the middle towards 0.45.
-    let exposure = ((0.45f64.ln() / mid.ln()).log2() / 0.75).clamp(-1.0, 1.0) * 0.8;
+    let exposure = ((mid.ln() / 0.45f64.ln()).log2() / 0.75).clamp(-1.0, 1.0) * 0.8;
     let range = (hi - lo).max(0.2);
     let contrast = if range < 0.75 { (0.8 / range).min(1.25) } else { 1.0 };
     let temperature = if n > 100.0 && b > 1.0 {

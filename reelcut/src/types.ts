@@ -181,6 +181,11 @@ export type Draft = {
   updated: number;
 };
 
+/** A guide the AI reads before a kind of job. */
+export type Skill = { name: string; description: string; triggers?: string[]; body: string };
+/** A choice the AI offers: pressing it sends `prompt` (or the label) as the next request. */
+export type ChoiceCard = { id: string; question: string; options: { label: string; detail?: string; prompt?: string }[]; at: number; used?: boolean };
+
 export type ChatBlock = Record<string, unknown> & { type: string };
 export type ChatMsg = { role: "user" | "assistant"; content: ChatBlock[] | string };
 
@@ -201,6 +206,8 @@ export type ChatSession = {
   ccSession?: string;
   /** Summary + recent turns to open a fresh Claude Code conversation with (after a compaction). */
   seed?: string;
+  /** Choices the AI has put to the user in this conversation. */
+  cards?: ChoiceCard[];
   /** Which connection this conversation uses. */
   chatMode?: "account" | "api";
   /** Model of the last request (sets the context limit). */
