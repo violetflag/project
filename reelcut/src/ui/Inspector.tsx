@@ -6,12 +6,12 @@ import type { ComponentChildren } from "preact";
 import { useState } from "preact/hooks";
 import { pickLut } from "../api";
 import {
-  ASPECTS, audioTrack, clipAt, clipDur, DEFAULT_COLOR, DEFAULT_TRANSFORM, DEFAULT_VIEW, detachAudio, fmtTCF, is360, isGap, overlays, parseTC, r3, setTransition, setViewKey, starts,
-  timedDur, uid, updateAudio, updateClip, updateOverlay, viewAt,
+  ASPECTS, audioTrack, fitMusic, clipAt, clipDur, DEFAULT_COLOR, DEFAULT_TRANSFORM, DEFAULT_VIEW, detachAudio, fmtTCF, is360, isGap, overlays, parseTC, r3, setTransition, setViewKey, starts,
+  MOVE_PRESETS, movePreset, TRANSITIONS, timedDur, uid, updateAudio, updateClip, updateOverlay, viewAt, volAt,
 } from "../edit";
 import { CAPTION_PRESETS, STICKERS, TEXT_KINDS, textLook } from "../graphics";
 import { asset, draft, editDraft, patchAsset, prepare360, st, toast, useStore } from "../store";
-import type { Clip, ColorAdj, Draft, MusicClip, Overlay, TextItem, Transform, View } from "../types";
+import type { Clip, ColorAdj, Draft, MusicClip, Overlay, TextItem, Transform, View, VolKey } from "../types";
 import { player } from "./Viewer";
 import { Stab360 } from "./Stab360";
 import { Stitch360 } from "./Stitch360";
@@ -208,9 +208,24 @@ function ClipView({ d, c }: { d: Draft; c: Clip }) {
           <Num label="페이드 아웃" value={c.fadeOut ?? 0} min={0} max={5} step={0.1} def={0} unit="초" onChange={(v) => set1("페이드", { fadeOut: v })} />
         </Section>
       )}
+      <Section id="move" title={`움직임${c.anim?.length ? " (켜짐)" : ""}`} term="Zoom / Ken Burns" defaultOpen={!!c.anim?.length}>
+        <div class="row wrap">
+          {MOVE_PRESETS.map((m) => <button class="small" onClick={() => set1("움직임", { anim: movePreset(m.id, c.start, c.end) })}>{m.label}</button>)}
+          {!!c.anim?.length && <button class="small" onClick={() => set1("움직임 끄기", { anim: undefined })}>끄기</button>}
+        </div>
+        <p class="muted tip">사진이나 영상을 천천히 확대·이동합니다. 내보낸 파일에도 같은 움직임이 들어갑니다.</p>
+      </Section>
+      <Section id="volkeys" title={`음량 변화${c.volKeys?.length ? ` (${c.volKeys.length})` : ""}`} term="Volume keyframes" defaultOpen={!!c.volKeys?.length}>
+        <VolEditor keys={c.volKeys} at={src ?? c.start} base={c.volume ?? 1} onKeys={(k) => set1("음량 키프레임", { volKeys: k })} />
+      </Section>
       {i > 0 && (
         <Section id="transition" title="전환 (앞 클립과)" term="Transition" defaultOpen={!!c.xin}>
           <Num label="디졸브" value={c.xin ?? 0} min={0} max={3} step={0.1} def={0} unit="초" onChange={(v) => editDraft("디졸브", (x) => setTransition(x, c.id, v))} />
+          <label>전환 모양
+            <select value={c.xtype ?? "fade"} onChange={(e) => set1("전환 모양", { xtype: (e.target as HTMLSelectElement).value })}>
+              {TRANSITIONS.map((x) => <option value={x.id}>{x.label}</option>)}
+            </select>
+          </label>
           <p class="muted tip">0이면 바로 넘어갑니다. 미리보기는 컷으로 보이고, 내보낸 파일에서 겹쳐집니다.</p>
         </Section>
       )}
@@ -293,6 +308,8 @@ function AudioView({ d, m }: { d: Draft; m: MusicClip }) {
         <Num label="음량" value={Math.round(m.volume * 100)} min={0} max={200} step={5} def={tr === 2 ? 25 : 100} unit={dB(m.volume)} onChange={(x) => up("음량", { volume: x / 100 })} />
         <Num label="페이드 인" value={m.fadeIn} min={0} max={10} step={0.1} def={0} unit="초" onChange={(v) => up("페이드", { fadeIn: v })} />
         <Num label="페이드 아웃" value={m.fadeOut} min={0} max={10} step={0.1} def={0} unit="초" onChange={(v) => up("페이드", { fadeOut: v })} />
+        <VolEditor keys={m.volKeys} at={Math.max(m.start, m.start + st.playhead - m.at)} base={m.volume} onKeys={(k) => up("음량 키프레임", { volKeys: k })} />
+        {asset(m.asset) && <button class="small" onClick={() => editDraft("음악 길이 맞추기", (x) => fitMusic(x, m.id, asset(m.asset)!.info.duration), st.draftId, false)} title="영상 끝까지 맞게 자르거나 반복하고 끝을 부드럽게 줄입니다">영상 길이에 맞추기</button>}
         <label class="check"><input type="checkbox" checked={!!m.denoise} onChange={(e) => up("잡음 줄이기", { denoise: (e.target as HTMLInputElement).checked })} /> 잡음 줄이기 · Denoise</label>
         <label>트랙
           <select value={String(tr)} onChange={(e) => up("트랙 바꾸기", { track: Number((e.target as HTMLSelectElement).value) as 1 | 2 | 3 })}>
@@ -301,6 +318,24 @@ function AudioView({ d, m }: { d: Draft; m: MusicClip }) {
         </label>
       </Section>
     </div>
+  );
+}
+
+/** Loudness keyframes of a clip or sound: add one at the current spot, change or remove them. */
+function VolEditor({ keys, at, base, onKeys }: { keys?: VolKey[]; at: number; base: number; onKeys: (k: VolKey[] | undefined) => void }) {
+  const ks = (keys ?? []).slice().sort((a, b) => a.t - b.t);
+  const put = (t: number, v: number) => onKeys([...ks.filter((k) => Math.abs(k.t - t) > 0.05), { t: r3(t), v }].sort((a, b) => a.t - b.t));
+  return (
+    <>
+      {ks.map((k) => (
+        <div class="row" key={k.t}>
+          <span class="muted" style="flex:1">{k.t.toFixed(1)}초</span>
+          <input type="number" min={0} max={4} step={0.05} value={k.v} aria-label="음량" style="width:70px" onChange={(e) => put(k.t, Number((e.target as HTMLInputElement).value) || 0)} />
+          <button class="tb" aria-label="키프레임 지우기" onClick={() => { const rest = ks.filter((x) => x !== k); onKeys(rest.length ? rest : undefined); }}><Trash2 size={12} /></button>
+        </div>
+      ))}
+      <button class="small" onClick={() => put(at, ks.length ? volAt(ks, at) : base)}>재생 위치에 음량 키 넣기</button>
+    </>
   );
 }
 

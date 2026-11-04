@@ -97,6 +97,11 @@ export type Clip = {
   denoise?: boolean;
   /** Cross-dissolve with the previous clip (seconds, 0 = cut). */
   xin?: number;
+  /** The look of that dissolve (see TRANSITIONS). */
+  xtype?: string;
+  /** Moves over the clip: zoom, pan, picture fade. */
+  anim?: AnimKey[];
+  volKeys?: VolKey[];
   /** The sound was split off to track A1 (the clip itself stays silent). */
   detached?: boolean;
 };
@@ -104,15 +109,22 @@ export type Clip = {
 /** A clip on track V2/V3, placed at a timeline time over the main track. */
 export type Overlay = {
   id: string; asset: string; track: 2 | 3; at: number; start: number; end: number; speed: number; volume: number;
+  anim?: AnimKey[]; volKeys?: VolKey[];
   view?: View; viewKeys?: ViewKey[]; transform?: Transform; color?: ColorAdj; fadeIn?: number; fadeOut?: number;
 };
 
 /** Sound on track A1 (sound split from a clip), A2 (music) or A3 (effects). */
 export type MusicClip = {
   id: string; asset: string; start: number; end: number; at: number; volume: number; fadeIn: number; fadeOut: number;
+  volKeys?: VolKey[];
   track?: 1 | 2 | 3; denoise?: boolean;
 };
 export type Marker = { id: string; t: number; label: string; color: string };
+
+/** Size, place and opacity of a picture at source second `t`. */
+export type AnimKey = { t: number; scale: number; x: number; y: number; opacity: number };
+/** Loudness factor at source second `t`. */
+export type VolKey = { t: number; v: number };
 
 export type CaptionStyle = {
   size: number; color: string; outline: string; position: "bottom" | "middle" | "top"; maxChars: number; font: string;
@@ -234,11 +246,13 @@ export type SavedPrompt = { id: string; name: string; text: string; created: num
 export type ShrinkSettings = { codec: string; crf: number; speed: number; fps: string; res: string; denoise: number; acodec: string; abr: number; container: string; screen: boolean; vfr: boolean };
 
 export type Seg = {
+  anim?: { t: number; scale: number; x: number; y: number; opacity: number }[]; vol_keys?: { t: number; v: number }[]; xtype?: string;
   path: string; kind: string; start: number; dur: number; speed: number; volume: number; has_audio: boolean;
   lens: Lens | null; view: View | null; fit: string; fade_in: number; fade_out: number;
   transform?: Transform | null; color?: ColorAdj | null; denoise?: boolean; view_keys?: ViewKey[]; xin?: number;
 };
 export type PlanOverlay = {
+  anim?: { t: number; scale: number; x: number; y: number; opacity: number }[]; vol_keys?: { t: number; v: number }[];
   path: string; kind: string; start: number; dur: number; speed: number; at: number; track: number; volume: number; has_audio: boolean;
   lens: Lens | null; view: View | null; view_keys: ViewKey[]; transform: Transform | null; color: ColorAdj | null; fade_in: number; fade_out: number;
 };

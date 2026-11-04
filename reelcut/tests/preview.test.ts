@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
 import { captionLines, toAss } from "../src/captions";
 import { STICKERS, stickerSvgPath, textEvent, textLook } from "../src/graphics";
-import { DEFAULT_CAPTION, mergeScenes, playableInWebView, previewSource, searchScenes } from "../src/edit";
+import { animAt, DEFAULT_CAPTION, fitMusic, mergeScenes, movePreset, volAt, newDraft, playableInWebView, previewSource, searchScenes } from "../src/edit";
 import { dirToDfisheye } from "../src/gl360";
 import type { Asset, MediaInfo } from "../src/types";
 
@@ -104,5 +104,36 @@ describe("titles, stickers and caption looks", () => {
   it("uses a box instead of an outline when asked", () => {
     const ass = toAss([], { ...DEFAULT_CAPTION, box: true }, 1280, 720);
     expect(ass.split("\n").find((l) => l.startsWith("Style: Default"))).toMatch(/,3,\d+,0,2,/);
+  });
+});
+
+describe("keyframes and music fit", () => {
+  it("eases between keys and holds outside them", () => {
+    const k = [{ t: 2, scale: 1, x: 0, y: 0, opacity: 1 }, { t: 4, scale: 1.2, x: 0.1, y: 0, opacity: 0.5 }];
+    expect(animAt(k, 0).scale).toBe(1);
+    expect(animAt(k, 3).scale).toBeCloseTo(1.1);
+    expect(animAt(k, 3).opacity).toBeCloseTo(0.75);
+    expect(animAt(k, 9).x).toBe(0.1);
+    expect(volAt([{ t: 0, v: 1 }, { t: 2, v: 0 }], 1)).toBeCloseTo(0.5);
+  });
+  it("makes zoom and pan moves that never show the frame edge", () => {
+    expect(movePreset("zoom_in", 5, 9).map((k) => k.scale)).toEqual([1, 1.15]);
+    const pan = movePreset("pan_right", 0, 4);
+    expect(pan[0].scale).toBe(1.15);
+    expect(Math.abs(pan[0].x)).toBeLessThanOrEqual((1.15 - 1) / 2);
+  });
+  it("cuts long music with a fade and repeats short music to the end of the video", () => {
+    const base = newDraft("t");
+    const clip = { id: "c", asset: "a", start: 0, end: 30, speed: 1, volume: 1, fit: "fit" } as any;
+    const m = { id: "m", asset: "s", start: 0, end: 10, at: 0, volume: 1, fadeIn: 0, fadeOut: 0, track: 2 } as any;
+    const d = { ...base, clips: [clip], music: [m] };
+    const long = fitMusic(d, "m", 100);
+    expect(long.music).toHaveLength(1);
+    expect(long.music[0].end).toBe(30);
+    expect(long.music[0].fadeOut).toBe(2);
+    const short = fitMusic(d, "m", 12);
+    expect(short.music.map((x) => x.at)).toEqual([0, 12, 24]);
+    expect(short.music[2].end).toBe(6);
+    expect(short.music[2].fadeOut).toBe(2);
   });
 });

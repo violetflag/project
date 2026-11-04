@@ -8,8 +8,8 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api, fileSrc } from "../api";
 import { captionLines } from "../captions";
 import {
-  audioTrack, clipAt, clipDur, DEFAULT_VIEW, draftDuration, draftWords, fmtTCF, insertClips, is360, isDefaultColor, isGap, newClip, newOverlay, overlays,
-  parseTC, playableInWebView, previewSource, setViewKey, starts, timedDur, trackState, updateClip, viewAt,
+  animAt, audioTrack, clipAt, clipDur, DEFAULT_TRANSFORM, DEFAULT_VIEW, draftDuration, draftWords, fmtTCF, insertClips, is360, isDefaultColor, isGap, newClip, newOverlay, overlays,
+  parseTC, playableInWebView, previewSource, setViewKey, starts, timedDur, trackState, updateClip, viewAt, volAt,
 } from "../edit";
 import { Flat360, type Proj } from "../gl360";
 import { STICKERS, stickerSvgPath, textLook } from "../graphics";
@@ -438,6 +438,7 @@ class Player {
         t = hit.at + (this.pos() - c.start) / c.speed;
       }
       this.last = ts;
+      if (c.volKeys?.length && !c.detached && !trackState(d, "A1").mute) v.volume = Math.min(1, Math.max(0, volAt(c.volKeys, hit.src)));
       const ss = starts(d);
       const end = hit.index + 1 < d.clips.length ? ss[hit.index + 1] : hit.at + clipDur(c);
       if (t >= end - 0.015 || (ca && ca.info.kind !== "image" && v.ended)) {
@@ -477,7 +478,8 @@ class Player {
         if (el.id) { el.v.pause(); el.v.style.display = "none"; el.i.style.display = "none"; el.id = null; }
         continue;
       }
-      const look = cssLook(o.transform, o.color);
+      const oSrc = o.start + (t - o.at) * (o.speed || 1);
+      const look = cssLook(o.anim?.length ? { ...(o.transform ?? DEFAULT_TRANSFORM), ...animAt(o.anim, oSrc) } : o.transform, o.color);
       const target = a.info.kind === "image" ? el.i : el.v;
       const other = a.info.kind === "image" ? el.v : el.i;
       other.style.display = "none";
@@ -515,7 +517,7 @@ class Player {
         el.currentTime = want;
         this.sounds.set(m.id, el);
       } else if (hard || Math.abs(el.currentTime - want) > 0.35) el.currentTime = want;
-      el.volume = Math.min(1, m.volume);
+      el.volume = Math.min(1, m.volKeys?.length ? volAt(m.volKeys, want) : m.volume);
       el.playbackRate = Math.max(1, this.rate);
       if (el.paused) el.play().catch(() => {});
     }
@@ -618,7 +620,8 @@ export function Viewer() {
   const fish = !!shownSrc && r360 && shownSrc.proj === "dfisheye";
   const liveFlat = !!shownSrc?.live && !r360;
   const opening = !!shownSrc?.live && !noPreview && player.stillOn && !sref.current?.naturalWidth;
-  const look = !src && hitClip ? cssLook(r360 ? null : hitClip.transform, hitClip.color) : null;
+  const moving = !src && hit && hitClip?.anim?.length ? animAt(hitClip.anim, hit.src) : null;
+  const look = !src && hitClip ? cssLook(moving ? { ...(hitClip.transform ?? DEFAULT_TRANSFORM), ...moving } : r360 ? null : hitClip.transform, hitClip.color) : null;
   const lut = !src && hitClip?.color?.lut;
   const fps = src ? src.info.fps || 30 : d?.fps || 30;
   const ov360 = !src && d ? overlays(d).some((o) => s.playhead >= o.at && s.playhead < o.at + timedDur(o) && is360(asset(o.asset) ?? undefined)) : false;
@@ -697,7 +700,7 @@ export function Viewer() {
           <img ref={iref} class={isImg ? "" : "hidden"} alt="" style={look ? { transform: look.transform, clipPath: look.clipPath, filter: look.filter, opacity: look.opacity } : undefined} />
           {/* A decoded frame of a live file while paused (360 ones are drawn through the canvas). */}
           <img ref={sref} crossOrigin="anonymous" class={liveFlat && player.stillOn ? "" : "hidden"} alt="" style={look ? { transform: look.transform, clipPath: look.clipPath, filter: look.filter, opacity: look.opacity } : undefined} />
-          <canvas ref={cref} class={r360 ? "" : "hidden"} style={look?.filter ? { filter: look.filter } : undefined} />
+          <canvas ref={cref} class={r360 ? "" : "hidden"} style={look ? { filter: look.filter, transform: moving ? look.transform : undefined, opacity: moving ? look.opacity : undefined } : undefined} />
           <video ref={o2v} crossOrigin="anonymous" class="ov" playsInline muted preload="auto" style={{ display: "none" }} />
           <img ref={o2i} class="ov" alt="" style={{ display: "none" }} />
           <video ref={o3v} crossOrigin="anonymous" class="ov ov3" playsInline muted preload="auto" style={{ display: "none" }} />

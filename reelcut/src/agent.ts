@@ -5,6 +5,7 @@ import { api, onEvent } from "./api";
 import {
   clipDur, cutSource, DEFAULT_COLOR, DEFAULT_TRANSFORM, deleteClip, detachAudio, draftDuration, draftWords, fmtTC, insertClips, is360, isDefaultColor, isDefaultTransform, isFiller, isGap, moveClip,
   newClip, newDraft, newGap, newOverlay, r3, removeFillers, removeItem, removeRange, removeSilences, setTransition, splitAt, speechFromWave, speechFromWords, starts, transcriptText, uid, updateClip, updateOverlay, viewAt,
+  fitMusic, movePreset, overlays,
   type Pacing, mergeScenes, searchScenes,
 } from "./edit";
 import { exportAndWait } from "./exporter";
@@ -13,7 +14,7 @@ import { cleanKeys, frameGroup, frameSubject, normView, sampleKeys, snapRanges, 
 import { PLAYBOOK_360 } from "./playbook";
 import { compactBudget, ctxLimit, estTokens, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
 import { activeChat, asset, assetMap, editDraft, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
-import type { Asset, ChatBlock, ChatMsg, ChatSession, Draft, TextItem, View, ViewKey } from "./types";
+import type { AnimKey, Asset, ChatBlock, ChatMsg, ChatSession, Draft, TextItem, View, ViewKey, VolKey } from "./types";
 
 export const MODELS = [
   { id: "claude-opus-5-5", label: "Claude Opus 5.5" },
@@ -97,7 +98,7 @@ export const TOOLS = [
   (x/y: 화면 대비 중심 이동 -1~1, scale 1=원래, exposure 스톱 -2~2, contrast/saturation 1=그대로, temperature 6500=그대로)
 - {op:"set_view_keys", clip_id, keys:[{t,yaw,pitch,roll,hfov},…], merge?}: 360 클립의 시점 키프레임 (t=원본 초, 키 사이는 부드럽게). merge=true면 기존 키에 더하고 같은 시각은 바꿈. 사람 따라가기는 frame_subject가 더 쉽습니다
 - {op:"clear_view_keys", clip_id}: 시점 키프레임 지우기
-- {op:"transition", clip_id, seconds}: 이 클립과 앞 클립 사이 디졸브 (0이면 컷)
+- {op:"transition", clip_id, seconds, type}: 이 클립과 앞 클립 사이 전환 (0이면 컷). type: fade(디졸브), fadeblack, fadewhite, fadegrays, wipeleft, slideleft, smoothleft, circleopen, circlecrop, rectcrop, radial, zoomin, pixelize, hblur
 - {op:"gap", index, seconds}: 빈칸(검은 화면·무음) 넣기
 - {op:"detach_audio", clip_id}: 클립 소리를 A1으로 분리
 - {op:"rename", name} / {op:"aspect", aspect}
@@ -120,6 +121,18 @@ export const TOOLS = [
   {
     name: "set_captions", description: "받아쓰기로 만든 자막을 켜고 끄거나 모양을 바꿉니다.",
     input_schema: { type: "object", properties: { draft_id: draftId, enabled: { type: "boolean" }, style: { type: "string", enum: ["basic", "yellow", "box", "karaoke", "pop", "soft"], description: "자막 모양: 기본, 노란 글자, 검은 상자, 말하는 단어 강조, 강조+톡 튀는 단어(쇼츠), 얇고 차분하게" }, size: { ...num, description: "화면 높이 대비 % (기본 6)" }, position: { type: "string", enum: ["bottom", "middle", "top"] }, max_chars: num }, required: ["enabled"] },
+  },
+  {
+    name: "set_motion", description: "클립이나 V2/V3 그림에 움직임을 넣습니다. preset: zoom_in(천천히 확대), zoom_out, pan_right, pan_left, none(끄기) — 사진에 생동감을 줄 때 좋습니다. 직접 하려면 keys: [{t(원본 초), scale, x, y(화면 비율 이동), opacity}]. 키 사이는 부드럽게 이어집니다.",
+    input_schema: { type: "object", properties: { draft_id: draftId, item_id: str, preset: { type: "string", enum: ["zoom_in", "zoom_out", "pan_right", "pan_left", "none"] }, amount: { ...num, description: "확대 정도(기본 0.15 = 15%)" }, keys: { type: "array", items: { type: "object", properties: { t: num, scale: num, x: num, y: num, opacity: num }, required: ["t"] } } }, required: ["item_id"] },
+  },
+  {
+    name: "set_volume_keys", description: "클립·소리의 음량을 시간에 따라 바꿉니다(음악을 말할 때만 줄이기 등). keys: [{t(원본 초), v(1=원래 크기)}]. 빈 목록이면 끕니다.",
+    input_schema: { type: "object", properties: { draft_id: draftId, item_id: str, keys: { type: "array", items: { type: "object", properties: { t: num, v: num }, required: ["t", "v"] } } }, required: ["item_id", "keys"] },
+  },
+  {
+    name: "fit_music", description: "음악을 영상 끝까지 길이에 맞춥니다: 길면 자르고 끝을 부드럽게 줄이며, 짧으면 반복합니다. music_id는 get_draft의 소리 목록에 있습니다.",
+    input_schema: { type: "object", properties: { draft_id: draftId, music_id: str, fade: { ...num, description: "끝 페이드 초(기본 2)" } }, required: ["music_id"] },
   },
   {
     name: "add_text", description: "제목, 작은 제목, 설명 막대(lower), 장소·날짜 핀(pin), 스티커(sticker)를 화면에 올립니다. 내보낸 파일에 그대로 들어갑니다. at=편집본 시각(초), dur=길이. x·y는 화면 비율(0~1), size는 화면 높이 대비 %(비우면 종류별 기본값). 스티커 sticker: heart, star, pin, arrow, bubble, circle. 촬영 날짜는 get_project_overview의 '촬영'에서 읽어 핀 글자에 넣으세요.",
@@ -312,7 +325,7 @@ function applyOps(d: Draft, ops: any[]): Draft {
         break;
       }
       case "clear_view_keys": d = updateClip(d, o.clip_id, { viewKeys: undefined }); break;
-      case "transition": d = setTransition(d, o.clip_id, Number(o.seconds ?? 0.5)); break;
+      case "transition": d = setTransition(d, o.clip_id, Number(o.seconds ?? 0.5)); if (o.type) d = updateClip(d, o.clip_id, { xtype: String(o.type) }); break;
       case "gap": d = insertClips(d, [newGap(Number(o.seconds ?? 1))], o.index ?? d.clips.length); break;
       case "detach_audio": d = detachAudio(d, o.clip_id); break;
       case "rename": d = { ...d, name: String(o.name) }; break;
@@ -583,6 +596,33 @@ async function run(name: string, inp: any): Promise<Out> {
       editDraft("AI: 마커", (d) => ({ ...d, markers: [...d.markers, ...(inp.markers as any[]).map((m) => ({ id: uid(), t: Number(m.time), label: String(m.label), color: m.color || "#FFB020" }))] }), d0.id);
       return `마커 ${inp.markers.length}개를 달았습니다.`;
     }
+    case "set_motion": {
+      const d0 = getDraft(inp.draft_id);
+      const c = d0.clips.find((x) => x.id === inp.item_id);
+      const o = overlays(d0).find((x) => x.id === inp.item_id);
+      const it = c ?? o;
+      if (!it) throw new Error(`없는 항목: ${inp.item_id}`);
+      const keys: AnimKey[] | undefined = inp.preset === "none" ? undefined : inp.preset ? movePreset(inp.preset, it.start, it.end, inp.amount ?? 0.15)
+        : (inp.keys ?? []).map((k: any) => ({ t: Number(k.t), scale: k.scale ?? 1, x: k.x ?? 0, y: k.y ?? 0, opacity: k.opacity ?? 1 }));
+      editDraft("AI: 움직임", (d) => (c ? updateClip(d, c.id, { anim: keys }) : { ...d, overlays: overlays(d).map((x) => (x.id === inp.item_id ? { ...x, anim: keys } : x)) }), d0.id, false);
+      return keys?.length ? `움직임을 넣었습니다 (키 ${keys.length}개).` : "움직임을 껐습니다.";
+    }
+    case "set_volume_keys": {
+      const d0 = getDraft(inp.draft_id);
+      const keys: VolKey[] | undefined = inp.keys?.length ? inp.keys.map((k: any) => ({ t: Number(k.t), v: Number(k.v) })) : undefined;
+      const patch = <T extends { id: string }>(x: T) => (x.id === inp.item_id ? { ...x, volKeys: keys } : x);
+      editDraft("AI: 음량 키프레임", (d) => ({ ...d, clips: d.clips.map(patch), music: d.music.map(patch), overlays: overlays(d).map(patch) }), d0.id, false);
+      return keys ? `음량 키 ${keys.length}개를 넣었습니다.` : "음량 키를 껐습니다.";
+    }
+    case "fit_music": {
+      const d0 = getDraft(inp.draft_id);
+      const m = d0.music.find((x) => x.id === inp.music_id);
+      if (!m) throw new Error(`없는 소리: ${inp.music_id}`);
+      const a = getAsset(m.asset);
+      editDraft("AI: 음악 길이 맞추기", (d) => fitMusic(d, m.id, a.info.duration, inp.fade ?? 2), d0.id, false);
+      const n = getDraft(d0.id).music.filter((x) => x.asset === m.asset).length;
+      return `영상 길이 ${r3(draftDuration(getDraft(d0.id)))}초에 맞췄습니다 (음악 조각 ${n}개).`;
+    }
     case "add_text": {
       const d0 = getDraft(inp.draft_id);
       const add: TextItem[] = (inp.items ?? []).map((m: any) => {
@@ -843,7 +883,7 @@ export const TOOL_LABEL: Record<string, string> = {
   get_project_overview: "프로젝트 살펴보는 중", get_transcript: "대본 읽는 중", search_transcript: "대본 찾는 중", view_frames: "장면 보는 중",
   contact_sheet: "영상 훑어보는 중", create_draft: "편집본 만드는 중", get_draft: "편집본 확인 중", edit_draft: "편집하는 중",
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
-  add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
+  set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
 

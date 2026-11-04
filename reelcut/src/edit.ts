@@ -2,7 +2,7 @@
 // editor and the AI agent.
 
 import { normView, smoothViewAt } from "./framing";
-import type { Asset, CaptionStyle, Clip, ColorAdj, Draft, Lens, MediaInfo, MusicClip, Overlay, Plan, PlanOverlay, SceneNote, Seg, ShrinkSettings, TrackId, Transform, View, ViewKey, Word } from "./types";
+import type { AnimKey, Asset, CaptionStyle, Clip, ColorAdj, Draft, Lens, MediaInfo, MusicClip, Overlay, Plan, PlanOverlay, SceneNote, Seg, ShrinkSettings, TrackId, Transform, View, ViewKey, VolKey, Word } from "./types";
 
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 export const clamp = (x: number, a: number, b: number) => Math.min(b, Math.max(a, x));
@@ -30,6 +30,67 @@ export const trackState = (d: Draft, t: TrackId) => d.tracks?.[t] ?? {};
 export const audioTrack = (m: MusicClip) => m.track ?? 2;
 
 export const is360 = (a?: Asset) => !!a && a.info.layout360 !== "none" && a.info.kind === "video";
+
+/** The looks a dissolve can have (the export's xfade names). */
+export const TRANSITIONS: { id: string; label: string }[] = [
+  { id: "fade", label: "디졸브" }, { id: "fadeblack", label: "검은 화면 거쳐" }, { id: "fadewhite", label: "흰 화면 거쳐" }, { id: "fadegrays", label: "흑백 거쳐" },
+  { id: "wipeleft", label: "닦아 내기" }, { id: "slideleft", label: "밀어 내기" }, { id: "smoothleft", label: "부드럽게 밀기" }, { id: "circleopen", label: "원 열기" },
+  { id: "circlecrop", label: "원 닫고 열기" }, { id: "rectcrop", label: "네모 닫고 열기" }, { id: "radial", label: "시계 방향" }, { id: "zoomin", label: "확대하며" },
+  { id: "pixelize", label: "모자이크" }, { id: "hblur", label: "가로 흐림" },
+];
+
+const ease = (a: number, b: number, f: number) => a + (b - a) * (0.5 - 0.5 * Math.cos(Math.PI * f));
+function keyAt<K extends { t: number }>(keys: K[], t: number, mix: (a: K, b: K, f: number) => K): K {
+  const k = keys.slice().sort((a, b) => a.t - b.t);
+  if (t <= k[0].t) return k[0];
+  for (let i = 0; i + 1 < k.length; i++) if (t < k[i + 1].t) return mix(k[i], k[i + 1], (t - k[i].t) / Math.max(1e-3, k[i + 1].t - k[i].t));
+  return k[k.length - 1];
+}
+/** The picture's size, place and opacity at source second t (same easing as the export). */
+export function animAt(keys: AnimKey[], t: number): AnimKey {
+  return keyAt(keys, t, (a, b, f) => ({ t, scale: ease(a.scale, b.scale, f), x: ease(a.x, b.x, f), y: ease(a.y, b.y, f), opacity: ease(a.opacity, b.opacity, f) }));
+}
+/** The loudness at source second t. */
+export function volAt(keys: VolKey[], t: number): number {
+  return keyAt(keys, t, (a, b, f) => ({ t, v: ease(a.v, b.v, f) })).v;
+}
+
+export type MovePreset = "zoom_in" | "zoom_out" | "pan_right" | "pan_left";
+export const MOVE_PRESETS: { id: MovePreset; label: string }[] = [
+  { id: "zoom_in", label: "천천히 확대" }, { id: "zoom_out", label: "천천히 축소" }, { id: "pan_right", label: "오른쪽으로 이동" }, { id: "pan_left", label: "왼쪽으로 이동" },
+];
+/** Slow zoom or pan over a clip (Ken Burns), keys in source seconds. */
+export function movePreset(p: MovePreset, start: number, end: number, amount = 0.15): AnimKey[] {
+  const k = (t: number, scale: number, x: number): AnimKey => ({ t: r3(t), scale: r3(scale), x: r3(x), y: 0, opacity: 1 });
+  const s = 1 + Math.max(0.02, amount), off = (s - 1) / 2 - 0.005;
+  switch (p) {
+    case "zoom_in": return [k(start, 1, 0), k(end, s, 0)];
+    case "zoom_out": return [k(start, s, 0), k(end, 1, 0)];
+    case "pan_right": return [k(start, s, off), k(end, s, -off)];
+    case "pan_left": return [k(start, s, -off), k(end, s, off)];
+  }
+}
+
+/**
+ * Fits a piece of music to the rest of the draft from where it starts: cut with a fade-out if it is
+ * longer, repeated with short fades if it is shorter.
+ */
+export function fitMusic(d: Draft, id: string, assetDur: number, fade = 2): Draft {
+  const m = d.music.find((x) => x.id === id);
+  if (!m) return d;
+  const want = draftDuration(d) - m.at;
+  const piece = Math.max(1, assetDur - m.start);
+  if (want <= 0.5) return d;
+  const parts: MusicClip[] = [];
+  let at = m.at;
+  while (at < m.at + want - 0.05) {
+    const len = Math.min(piece, m.at + want - at);
+    const last = at + len >= m.at + want - 0.05;
+    parts.push({ ...m, id: parts.length ? uid() : m.id, at: r3(at), end: r3(m.start + len), fadeIn: parts.length ? 0.5 : m.fadeIn, fadeOut: last ? Math.min(fade, len / 2) : 0.5, volKeys: undefined });
+    at += len;
+  }
+  return { ...d, music: d.music.flatMap((x) => (x.id === id ? parts : [x])), updated: Date.now() };
+}
 
 /** Scene notes merged into a list sorted by time; a note at the same second replaces the old one. */
 export function mergeScenes(old: SceneNote[] | undefined, add: SceneNote[]): SceneNote[] {
@@ -576,6 +637,11 @@ function planKeys(keys: ViewKey[] | undefined, start: number, speed: number): Vi
   return keys.map((k) => ({ t: r3((k.t - start) / (speed || 1)), view: k.view }));
 }
 
+/** Keys in source seconds → output seconds from the item's start. */
+function planTimed<K extends { t: number }>(keys: K[] | undefined, start: number, speed: number): K[] {
+  return (keys ?? []).map((k) => ({ ...k, t: r3((k.t - start) / (speed || 1)) }));
+}
+
 export function toSegs(d: Draft, assets: Map<string, Asset>): Seg[] {
   const hideV1 = trackState(d, "V1").hide;
   const muteA1 = trackState(d, "A1").mute;
@@ -594,7 +660,8 @@ export function toSegs(d: Draft, assets: Map<string, Asset>): Seg[] {
       has_audio: a.info.has_audio, lens: r360 ? defaultLens(a) : null, view: r360 ? planView(c.view, c.viewKeys) : null,
       fit: c.fit ?? "fit", fade_in: c.fadeIn ?? 0, fade_out: c.fadeOut ?? 0,
       transform: isDefaultTransform(c.transform) ? null : c.transform!, color: isDefaultColor(c.color) ? null : c.color!,
-      denoise: !!c.denoise, view_keys: r360 ? planKeys(c.viewKeys, c.start, c.speed) : [], xin,
+      denoise: !!c.denoise, view_keys: r360 ? planKeys(c.viewKeys, c.start, c.speed) : [], xin, xtype: c.xtype ?? "",
+      anim: planTimed(c.anim, c.start, c.speed), vol_keys: planTimed(c.volKeys, c.start, c.speed),
     }];
   });
 }
@@ -614,6 +681,7 @@ export function toOverlays(d: Draft, assets: Map<string, Asset>): PlanOverlay[] 
       volume: t.mute ? 0 : o.volume ?? 0, has_audio: a.info.has_audio, lens: r360 ? defaultLens(a) : null, view: r360 ? planView(o.view, o.viewKeys) : null,
       view_keys: r360 ? planKeys(o.viewKeys, o.start, sp) : [], transform: o.transform ?? null, color: isDefaultColor(o.color) ? null : o.color!,
       fade_in: o.fadeIn ?? 0, fade_out: o.fadeOut ?? 0,
+      anim: planTimed(o.anim, o.start, sp), vol_keys: planTimed(o.volKeys, o.start, sp),
     }];
   });
 }
@@ -656,7 +724,7 @@ export function toPlan(d0: Draft, assets: Map<string, Asset>, o: ExportOpts): Pl
     music: d.music.flatMap((m) => {
       const a = assets.get(m.asset);
       const dur = Math.min(m.end - m.start, total - m.at);
-      return a && dur > 0.05 && !muted(m) ? [{ path: a.info.path, start: r3(m.start), dur: r3(dur), at: r3(m.at), volume: m.volume, fade_in: m.fadeIn, fade_out: m.fadeOut, denoise: !!m.denoise }] : [];
+      return a && dur > 0.05 && !muted(m) ? [{ path: a.info.path, start: r3(m.start), dur: r3(dur), at: r3(m.at), volume: m.volume, vol_keys: planTimed(m.volKeys, m.start, 1), fade_in: m.fadeIn, fade_out: m.fadeOut, denoise: !!m.denoise }] : [];
     }),
     width, height, fps: d.fps || 30, ass: o.ass, mode: o.mode, vbitrate: o.vbitrate, settings: o.shrink, out: o.out,
     loudnorm: !!o.loudnorm, duck: !!o.duck, abr: o.abr ?? 256,

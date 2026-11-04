@@ -77,6 +77,28 @@ pub struct ViewKey {
     pub view: View,
 }
 
+/// Size, place and opacity of a picture at `t` seconds from its start (output time); between keys
+/// the values ease smoothly.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnimKey {
+    pub t: f64,
+    #[serde(default = "one")]
+    pub scale: f64,
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    #[serde(default = "one")]
+    pub opacity: f64,
+}
+
+/// Loudness factor at `t` seconds from the start of a sound.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VolKey {
+    pub t: f64,
+    pub v: f64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Seg {
     pub path: String,
@@ -114,12 +136,19 @@ pub struct Seg {
     /// Cross-dissolve from the previous clip, seconds (0 = cut).
     #[serde(default)]
     pub xin: f64,
+    /// Moves (zoom, pan, fade of the picture) over the clip.
+    #[serde(default)]
+    pub anim: Vec<AnimKey>,
+    #[serde(default)]
+    pub vol_keys: Vec<VolKey>,
+    /// The dissolve's look (an xfade transition name; "" = plain dissolve).
+    #[serde(default)]
+    pub xtype: String,
 }
 
 impl Default for Seg {
     fn default() -> Self {
-        Seg {
-            path: String::new(),
+        Seg { anim: vec![], vol_keys: vec![], xtype: String::new(), path: String::new(),
             kind: "video".into(),
             start: 0.0,
             dur: 0.0,
@@ -155,11 +184,13 @@ pub struct Music {
     pub fade_out: f64,
     #[serde(default)]
     pub denoise: bool,
+    #[serde(default)]
+    pub vol_keys: Vec<VolKey>,
 }
 
 impl Default for Music {
     fn default() -> Self {
-        Music { path: String::new(), start: 0.0, dur: 0.0, at: 0.0, volume: 1.0, fade_in: 0.0, fade_out: 0.0, denoise: false }
+        Music { vol_keys: vec![], path: String::new(), start: 0.0, dur: 0.0, at: 0.0, volume: 1.0, fade_in: 0.0, fade_out: 0.0, denoise: false }
     }
 }
 
@@ -202,12 +233,15 @@ pub struct Overlay {
     pub fade_in: f64,
     #[serde(default)]
     pub fade_out: f64,
+    #[serde(default)]
+    pub anim: Vec<AnimKey>,
+    #[serde(default)]
+    pub vol_keys: Vec<VolKey>,
 }
 
 impl Default for Overlay {
     fn default() -> Self {
-        Overlay {
-            path: String::new(),
+        Overlay { anim: vec![], vol_keys: vec![], path: String::new(),
             kind: "video".into(),
             start: 0.0,
             dur: 0.0,
@@ -529,6 +563,86 @@ fn alpha_filters(t: &Transform, rotate: bool, alpha: bool) -> Vec<String> {
     f
 }
 
+/// An ffmpeg expression for values at key times: held outside them, easing between them.
+pub fn key_expr(keys: &[(f64, f64)], var: &str) -> String {
+    let mut k: Vec<(f64, f64)> = keys.to_vec();
+    k.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Expressions nest once per key; more than about 24 keys adds nothing visible.
+    if k.len() > 24 {
+        let step = (k.len() - 1) as f64 / 23.0;
+        k = (0..24).map(|i| k[((i as f64 * step).round() as usize).min(k.len() - 1)]).collect();
+    }
+    let Some(last) = k.last() else { return "1".into() };
+    let mut e = format!("{:.4}", last.1);
+    for w in k.windows(2).rev() {
+        let ((a, va), (b, vb)) = (w[0], w[1]);
+        if b - a < 1e-3 {
+            continue;
+        }
+        e = format!("if(lt({var},{b:.3}),{va:.4}+({:.4})*(0.5-0.5*cos(PI*({var}-({a:.3}))/{:.3})),{e})", vb - va, b - a);
+    }
+    format!("if(lt({var},{:.3}),{:.4},{e})", k[0].0, k[0].1)
+}
+
+/// The value at t, as `key_expr` works it out.
+fn key_at(k: &[(f64, f64)], t: f64) -> f64 {
+    if t <= k[0].0 {
+        return k[0].1;
+    }
+    for w in k.windows(2) {
+        if t < w[1].0 {
+            let f = (t - w[0].0) / (w[1].0 - w[0].0).max(1e-3);
+            return w[0].1 + (w[1].1 - w[0].1) * (0.5 - 0.5 * (std::f64::consts::PI * f).cos());
+        }
+    }
+    k[k.len() - 1].1
+}
+
+/// Filters that animate a picture's size and opacity. They go after the clip's speed so `t` is
+/// output time from its start; the place is in `anim_place`.
+fn anim_filters(keys: &[AnimKey], name: &str, len: f64) -> Vec<String> {
+    let mut k = keys.to_vec();
+    k.sort_by(|a, b| a.t.total_cmp(&b.t));
+    let mut f = Vec::new();
+    let s: Vec<(f64, f64)> = k.iter().map(|x| (x.t, x.scale.clamp(0.05, 8.0))).collect();
+    let e = key_expr(&s, "t");
+    f.push(format!("scale=w='trunc(iw*({e})/2)*2':h='trunc(ih*({e})/2)*2':eval=frame:flags=bicubic"));
+    let o: Vec<(f64, f64)> = k.iter().map(|x| (x.t, x.opacity.clamp(0.0, 1.0))).collect();
+    if o.iter().any(|x| x.1 < 0.999) {
+        let mut cmds = Vec::new();
+        let mut i = 0.0;
+        while i < len {
+            cmds.push(format!("{i:.3} colorchannelmixer@{name} aa {:.3}", key_at(&o, i)));
+            i += 1.0 / 15.0;
+        }
+        f.push("format=yuva420p".into());
+        f.push(format!("sendcmd=c='{}'", cmds.join(";")));
+        f.push(format!("colorchannelmixer@{name}=aa={:.3}", o[0].1));
+    }
+    f
+}
+
+/// overlay position following the keys (`var` = seconds from the picture's start).
+fn anim_place(keys: &[AnimKey], var: &str) -> String {
+    let (mut xs, mut ys): (Vec<(f64, f64)>, Vec<(f64, f64)>) = (Vec::new(), Vec::new());
+    for k in keys {
+        xs.push((k.t, k.x));
+        ys.push((k.t, k.y));
+    }
+    format!("x='(W-w)/2+W*({})':y='(H-h)/2+H*({})':eval=frame", key_expr(&xs, var), key_expr(&ys, var))
+}
+
+/// The volume filter: steady, or following keys (`t` = seconds from the sound's start).
+fn volume_filter(steady: f64, keys: &[VolKey]) -> String {
+    if keys.is_empty() {
+        return format!("volume={:.3}", steady.max(0.0));
+    }
+    let k: Vec<(f64, f64)> = keys.iter().map(|x| (x.t, x.v.clamp(0.0, 4.0))).collect();
+    format!("volume=eval=frame:volume='{}'", key_expr(&k, "t"))
+}
+
+const XFADES: [&str; 15] = ["fade", "dissolve", "fadeblack", "fadewhite", "fadegrays", "wipeleft", "slideleft", "smoothleft", "circleopen", "circlecrop", "rectcrop", "radial", "zoomin", "pixelize", "hblur"];
+
 /// overlay position: the picture's centre moved by x/y of the frame.
 fn place(t: &Transform, w: u32, h: u32) -> String {
     format!("x=(W-w)/2{:+.2}:y=(H-h)/2{:+.2}", t.x * w as f64, t.y * h as f64)
@@ -628,7 +742,13 @@ pub fn build(p: &Plan, hw: &Hw, graph_file: &str, new_syntax: bool, has_ass: boo
             n_in += 1;
         }
         if !audio_only {
-            let tf = sg.transform.clone().filter(|t| !t.identity());
+            // With moves the keys say the size, place and opacity; the rest of the transform stays.
+            let tf = if sg.anim.is_empty() {
+                sg.transform.clone().filter(|t| !t.identity())
+            } else {
+                let t = sg.transform.clone().unwrap_or_default();
+                Some(Transform { scale: 1.0, x: 0.0, y: 0.0, opacity: 1.0, ..t })
+            };
             let mut chain: Vec<String>;
             let src_label;
             let mut timed = false;
@@ -652,9 +772,12 @@ pub fn build(p: &Plan, hw: &Hw, graph_file: &str, new_syntax: bool, has_ass: boo
                     if !timed {
                         chain.push(speed_pts(speed));
                     }
+                    if !sg.anim.is_empty() {
+                        chain.extend(anim_filters(&sg.anim, &format!("an{i}"), out_dur));
+                    }
                     g += &format!("[{src_label}]{}[t{i}];", chain.join(","));
                     g += &format!("color=c=black:s={w}x{h}:r={fps:.3}:d={out_dur:.3}[cv{i}];");
-                    tail.push(format!("overlay={}", place(t, w, h)));
+                    tail.push(if sg.anim.is_empty() { format!("overlay={}", place(t, w, h)) } else { format!("overlay={}", anim_place(&sg.anim, "t")) });
                 }
                 None => {
                     if !blank && !timed {
@@ -689,8 +812,8 @@ pub fn build(p: &Plan, hw: &Hw, graph_file: &str, new_syntax: bool, has_ass: boo
         if !at.is_empty() {
             ach.push(at);
         }
-        if (sg.volume - 1.0).abs() > 1e-3 {
-            ach.push(format!("volume={:.3}", sg.volume.max(0.0)));
+        if (sg.volume - 1.0).abs() > 1e-3 || !sg.vol_keys.is_empty() {
+            ach.push(volume_filter(sg.volume, if sg.volume > 0.0 { &sg.vol_keys } else { &[] }));
         }
         if sg.fade_in > 0.0 {
             ach.push(format!("afade=t=in:st=0:d={:.3}", sg.fade_in));
@@ -754,7 +877,8 @@ pub fn build(p: &Plan, hw: &Hw, graph_file: &str, new_syntax: bool, has_ass: boo
             let d = xin[grp[0]];
             let (ov, oa) = if k == last { ("[vc]".to_string(), "[ac]".to_string()) } else { (format!("[xv{k}]"), format!("[xa{k}]")) };
             if !audio_only {
-                g += &format!("{}{gv}xfade=transition=fade:duration={d:.4}:offset={:.4}{ov};", acc.0, len - d);
+                let look = Some(p.segs[grp[0]].xtype.as_str()).filter(|x| XFADES.contains(x)).unwrap_or("fade");
+                g += &format!("{}{gv}xfade=transition={look}:duration={d:.4}:offset={:.4}{ov};", acc.0, len - d);
             }
             g += &format!("{}{ga}acrossfade=d={d:.4}{oa};", acc.1);
             acc = (ov, oa);
@@ -778,7 +902,7 @@ pub fn build(p: &Plan, hw: &Hw, graph_file: &str, new_syntax: bool, has_ass: boo
         if m.denoise {
             ch.push(DENOISE.into());
         }
-        ch.push(format!("volume={:.3}", m.volume.max(0.0)));
+        ch.push(volume_filter(m.volume, &m.vol_keys));
         if m.fade_in > 0.0 {
             ch.push(format!("afade=t=in:st=0:d={:.3}", m.fade_in));
         }
@@ -826,7 +950,11 @@ pub fn build(p: &Plan, hw: &Hw, graph_file: &str, new_syntax: bool, has_ass: boo
         }
         if picture {
             let lens = lens_of(&o.lens).filter(|_| !image);
-            let tf = o.transform.clone().unwrap_or_default();
+            let mut tf = o.transform.clone().unwrap_or_default();
+            if !o.anim.is_empty() {
+                // The keys say the size, place and opacity.
+                (tf.scale, tf.x, tf.y, tf.opacity) = (1.0, 0.0, 0.0, 1.0);
+            }
             let pic = Pic { vi: oi, tag: format!("o{k}"), vname: format!("o{k}"), lens: lens.clone(), view: &o.view, keys: &o.view_keys, fit: &o.fit, tf: Some(tf.clone()), color: color_filters(&o.color), speed, len: full };
             let (pre, src, mut chain, timed) = shape(&pic, w, h, false);
             g += ";";
@@ -835,6 +963,9 @@ pub fn build(p: &Plan, hw: &Hw, graph_file: &str, new_syntax: bool, has_ass: boo
             chain.extend(alpha_filters(&tf, lens.is_none(), true));
             if !timed {
                 chain.push(speed_pts(speed));
+            }
+            if !o.anim.is_empty() {
+                chain.extend(anim_filters(&o.anim, &format!("ao{k}"), len));
             }
             chain.push(format!("fps={fps:.5}"));
             if o.fade_in > 0.0 {
@@ -846,7 +977,7 @@ pub fn build(p: &Plan, hw: &Hw, graph_file: &str, new_syntax: bool, has_ass: boo
             chain.push(format!("trim=duration={len:.4}"));
             chain.push(format!("setpts=PTS-STARTPTS+{at:.4}/TB"));
             g += &format!("[{src}]{}[ov{k}]", chain.join(","));
-            g += &format!(";{vbase}[ov{k}]overlay={}:eof_action=pass:enable='between(t,{at:.3},{:.3})'[vx{k}]", place(&tf, w, h), at + len);
+            g += &format!(";{vbase}[ov{k}]overlay={}:eof_action=pass:enable='between(t,{at:.3},{:.3})'[vx{k}]", if o.anim.is_empty() { place(&tf, w, h) } else { anim_place(&o.anim, &format!("(t-{at:.3})")) }, at + len);
             vbase = format!("[vx{k}]");
         }
         if sound {
@@ -859,7 +990,7 @@ pub fn build(p: &Plan, hw: &Hw, graph_file: &str, new_syntax: bool, has_ass: boo
             if !t.is_empty() {
                 ch.push(t);
             }
-            ch.push(format!("volume={:.3}", o.volume));
+            ch.push(volume_filter(o.volume, &o.vol_keys));
             if o.fade_in > 0.0 {
                 ch.push(format!("afade=t=in:st=0:d={:.3}", o.fade_in));
             }
@@ -1125,6 +1256,30 @@ mod tests {
         let b = graph(&p);
         assert!(b.graph.contains("[0:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS,afftdn=nf=-25,apad"), "{}", b.graph);
         assert!(b.graph.contains("[1:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS,afftdn=nf=-25,volume=1.000"), "{}", b.graph);
+    }
+
+    #[test]
+    fn keyframed_moves_volume_and_transitions() {
+        let e = key_expr(&[(0.0, 1.0), (4.0, 1.2)], "t");
+        assert_eq!(e, "if(lt(t,0.000),1.0000,if(lt(t,4.000),1.0000+(0.2000)*(0.5-0.5*cos(PI*(t-(0.000))/4.000)),1.2000))");
+        assert!((key_at(&[(0.0, 1.0), (4.0, 1.2)], 2.0) - 1.1).abs() < 1e-9);
+        let mv = vec![AnimKey { t: 0.0, scale: 1.0, x: 0.0, y: 0.0, opacity: 1.0 }, AnimKey { t: 3.0, scale: 1.3, x: 0.1, y: 0.0, opacity: 1.0 }];
+        let s = Seg { anim: mv.clone(), transform: Some(Transform::default()), ..seg("a.mp4", 0.0, 3.0) };
+        let g = graph(&plan(vec![s])).graph;
+        assert!(g.contains(":eval=frame:flags=bicubic[t0]"), "{g}");
+        assert!(g.contains("overlay=x='(W-w)/2+W*(if(lt(t,0.000),0.0000"), "{g}");
+        assert!(!g.contains("colorchannelmixer"), "{g}");
+        let fade = vec![AnimKey { t: 0.0, scale: 1.0, x: 0.0, y: 0.0, opacity: 1.0 }, AnimKey { t: 1.0, scale: 1.0, x: 0.0, y: 0.0, opacity: 0.0 }];
+        let s = Seg { anim: fade, transform: Some(Transform::default()), ..seg("a.mp4", 0.0, 2.0) };
+        let g = graph(&plan(vec![s])).graph;
+        assert!(g.contains("colorchannelmixer@an0=aa=1.000") && g.contains("colorchannelmixer@an0 aa"), "{g}");
+        let s = Seg { vol_keys: vec![VolKey { t: 0.0, v: 1.0 }, VolKey { t: 2.0, v: 0.2 }], has_audio: true, ..seg("a.mp4", 0.0, 3.0) };
+        let g = graph(&plan(vec![s])).graph;
+        assert!(g.contains("volume=eval=frame:volume='if(lt(t,0.000)"), "{g}");
+        let g = graph(&plan(vec![seg("a.mp4", 0.0, 3.0), Seg { xin: 1.0, xtype: "circleopen".into(), ..seg("b.mp4", 0.0, 3.0) }])).graph;
+        assert!(g.contains("xfade=transition=circleopen"), "{g}");
+        let g = graph(&plan(vec![seg("a.mp4", 0.0, 3.0), Seg { xin: 1.0, xtype: "bogus".into(), ..seg("b.mp4", 0.0, 3.0) }])).graph;
+        assert!(g.contains("xfade=transition=fade"), "{g}");
     }
 
     #[test]
