@@ -524,7 +524,7 @@ class Player {
 
 export const player = new Player();
 
-function Scrub({ total, now, marks, onSeek }: { total: number; now: number; marks?: { in?: number | null; out?: number | null; markers?: { t: number; color: string }[] }; onSeek: (t: number) => void }) {
+function Scrub({ total, now, marks, onSeek }: { total: number; now: number; marks?: { in?: number | null; out?: number | null; markers?: { t: number; color: string }[]; bad?: { from: number; to: number; kind: string }[] }; onSeek: (t: number) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const tOf = (x: number) => { const r = ref.current!.getBoundingClientRect(); return Math.max(0, Math.min(total, ((x - r.left) / r.width) * total)); };
   const pct = (t: number) => `${total ? (t / total) * 100 : 0}%`;
@@ -539,6 +539,7 @@ function Scrub({ total, now, marks, onSeek }: { total: number; now: number; mark
       <div class="scrub-track" />
       {marks?.in != null && marks?.out != null && <div class="scrub-range" style={{ left: pct(marks.in), width: `calc(${pct(marks.out)} - ${pct(marks.in)})` }} />}
       {marks?.in != null && marks.out == null && <div class="scrub-range" style={{ left: pct(marks.in), right: 0 }} />}
+      {marks?.bad?.map((b) => <div class={`scrub-bad ${b.kind}`} title={{ blurry: "흐림", shaky: "흔들림", dark: "어두움" }[b.kind]} style={{ left: pct(b.from), width: `calc(${pct(b.to)} - ${pct(b.from)})` }} />)}
       {marks?.markers?.map((m) => <span class="scrub-marker" style={{ left: pct(m.t), background: m.color }} />)}
       <div class="scrub-fill" style={{ width: pct(now) }} />
       <div class="scrub-head" style={{ left: pct(now) }} />
@@ -711,7 +712,7 @@ export function Viewer() {
         </div>
       </div>
       <Scrub total={total} now={now} onSeek={(t) => player.seek(t)}
-        marks={src ? { in: player.markIn, out: player.markOut } : { in: d?.inPoint, out: d?.outPoint, markers: d?.markers }} />
+        marks={src ? { in: player.markIn, out: player.markOut, bad: src.badShots } : { in: d?.inPoint, out: d?.outPoint, markers: d?.markers }} />
       <div class="controls">
         {src ? <span class="badge" title={src.info.path}>원본: {src.info.name}</span> : <span class="badge draft">편집본: {d?.name}</span>}
         <span class="spacer" />

@@ -445,3 +445,12 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .composer .icon-btn { align-self: flex-end; }
 .prompt-lib-head b, .agent-sub .conn { white-space: nowrap; }
 .prompt-lib-head .muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-xs); }
+
+/* Scene search and weak stretches */
+.scene-hits { display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border-bottom: 1px solid var(--line); max-height: 40%; overflow: auto; font-size: var(--fs-s); }
+.scene-hit { justify-content: flex-start; text-align: left; white-space: normal; padding: 3px 6px; font-size: var(--fs-s); }
+.tc-s { color: var(--accent); font-variant-numeric: tabular-nums; flex: none; }
+.scrub-bad { position: absolute; top: 0; bottom: 0; opacity: .55; pointer-events: auto; }
+.scrub-bad.blurry { background: var(--warn); }
+.scrub-bad.shaky { background: var(--err); }
+.scrub-bad.dark { background: var(--faint); }

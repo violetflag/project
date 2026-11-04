@@ -2,7 +2,7 @@
 // editor and the AI agent.
 
 import { normView, smoothViewAt } from "./framing";
-import type { Asset, CaptionStyle, Clip, ColorAdj, Draft, Lens, MediaInfo, MusicClip, Overlay, Plan, PlanOverlay, Seg, ShrinkSettings, TrackId, Transform, View, ViewKey, Word } from "./types";
+import type { Asset, CaptionStyle, Clip, ColorAdj, Draft, Lens, MediaInfo, MusicClip, Overlay, Plan, PlanOverlay, SceneNote, Seg, ShrinkSettings, TrackId, Transform, View, ViewKey, Word } from "./types";
 
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 export const clamp = (x: number, a: number, b: number) => Math.min(b, Math.max(a, x));
@@ -30,6 +30,30 @@ export const trackState = (d: Draft, t: TrackId) => d.tracks?.[t] ?? {};
 export const audioTrack = (m: MusicClip) => m.track ?? 2;
 
 export const is360 = (a?: Asset) => !!a && a.info.layout360 !== "none" && a.info.kind === "video";
+
+/** Scene notes merged into a list sorted by time; a note at the same second replaces the old one. */
+export function mergeScenes(old: SceneNote[] | undefined, add: SceneNote[]): SceneNote[] {
+  const by = new Map((old ?? []).map((n) => [Math.round(n.t), n]));
+  for (const n of add) if (Number.isFinite(n.t) && String(n.text ?? "").trim()) by.set(Math.round(n.t), { t: r3(Math.max(0, n.t)), text: String(n.text).trim() });
+  return [...by.values()].sort((a, b) => a.t - b.t);
+}
+
+export type SceneHit = { asset: string; t: number; text: string; score: number };
+
+/** Moments whose notes contain the words of `query` (best matches first; every word counts). */
+export function searchScenes(assets: Pick<Asset, "id" | "scenes">[], query: string, limit = 30): SceneHit[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return [];
+  const hits: SceneHit[] = [];
+  for (const a of assets) {
+    for (const n of a.scenes ?? []) {
+      const text = n.text.toLowerCase();
+      const score = words.filter((w) => text.includes(w)).length;
+      if (score) hits.push({ asset: a.id, t: n.t, text: n.text, score });
+    }
+  }
+  return hits.sort((x, y) => y.score - x.score || x.t - y.t).slice(0, limit);
+}
 
 /**
  * Whether the WebView's video element can decode a file itself. The rest (an Osmo .osv's two lens

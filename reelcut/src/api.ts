@@ -1,6 +1,6 @@
 // Bridge to the Rust side. Outside Tauri (plain browser, for UI tests) a small mock answers instead.
 
-import type { Hw, JobEvent, Lens, MediaInfo, MotionInfo, Plan, Stitch, View, Word } from "./types";
+import type { BadShot, Hw, JobEvent, Lens, MediaInfo, MotionInfo, Plan, Stitch, View, Word } from "./types";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -59,6 +59,7 @@ export const api = {
   trackPeople: (path: string, lens: Lens, from: number, to: number, subjects: { name: string; seeds: [number, number, number][] }[]) =>
     invoke<{ name: string; tracked: number; marks: [number, number, number][] }[]>("track_people", { req: { path, lens, from, to, subjects } }),
   faceCheck: (path: string, lens: Lens, items: [number, View][]) => invoke<{ t: number; faces: number; edges: string[] }[]>("face_check", { req: { path, lens, items } }),
+  scanShots: (id: string, info: MediaInfo, from?: number, to?: number) => invoke<BadShot[]>("scan_shots", { id, info, from: from ?? null, to: to ?? null }),
   motionTrack: (path: string, lens: Lens) => invoke<{ fps: number; quats: string } | null>("motion_track", { path, lens }),
   motionInfo: (path: string) => invoke<MotionInfo | null>("motion_info", { path }),
   filmstrip: (path: string, duration: number, count: number) => invoke<string>("filmstrip", { path, duration, count }),

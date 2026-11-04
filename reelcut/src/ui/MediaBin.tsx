@@ -3,8 +3,8 @@
 import { Check, Flag, FolderPlus, LayoutGrid, List, Music, Plus, Star, X as XIcon } from "lucide-preact";
 import { useEffect, useState } from "preact/hooks";
 import { api, fileSrc, pickFiles } from "../api";
-import { draftDuration, fmtTC, insertClips, is360, newClip, overlays, uid } from "../edit";
-import { draft, editDraft, ensureStrip, importPaths, mutate, patchAsset, set, startTranscribe, toast, useStore } from "../store";
+import { draftDuration, fmtTC, insertClips, is360, newClip, overlays, searchScenes, uid } from "../edit";
+import { draft, editDraft, ensureStrip, importPaths, mutate, patchAsset, scanShots, set, startTranscribe, toast, useStore } from "../store";
 import type { Asset } from "../types";
 import { player } from "./Viewer";
 
@@ -75,7 +75,7 @@ export function MediaBin() {
   const ql = q.trim().toLowerCase();
   const filtering = !!ql || !!smart;
   const inFolder = (a: Asset) => (filtering ? true : a.folder === s.folder);
-  const match = (a: Asset) => !ql || a.info.name.toLowerCase().includes(ql) || (a.tags ?? []).some((t) => t.toLowerCase().includes(ql.replace(/^#/, ""))) || (a.words?.map((w) => w.t).join(" ").includes(q.trim()) ?? false);
+  const match = (a: Asset) => !ql || a.info.name.toLowerCase().includes(ql) || (a.tags ?? []).some((t) => t.toLowerCase().includes(ql.replace(/^#/, ""))) || (a.words?.map((w) => w.t).join(" ").includes(q.trim()) ?? false) || (a.scenes ?? []).some((n) => n.text.toLowerCase().includes(ql));
   const smartOk = (a: Asset) => !smart || (smart === "360" ? is360(a) : smart === "words" ? !!a.words : smart === "picks" ? a.flag === "pick" : smart === "stars" ? (a.rating ?? 0) >= 3 : !used.has(a.id));
   const cmp = (x: Asset, y: Asset) => sort === "name" ? x.info.name.localeCompare(y.info.name, "ko") : sort === "duration" ? y.info.duration - x.info.duration
     : sort === "recorded" ? (x.info.recorded || "").localeCompare(y.info.recorded || "") : sort === "rating" ? (y.rating ?? 0) - (x.rating ?? 0) : (x.added ?? 0) - (y.added ?? 0);
@@ -120,6 +120,7 @@ export function MediaBin() {
     return () => window.removeEventListener("keydown", key, true);
   }, [sel.join(",")]);
 
+  const hits = ql ? searchScenes(p.assets, q).slice(0, 12) : [];
   const crumbs = s.folder ? s.folder.split("/") : [];
   const m = menu ? p.assets.find((a) => a.id === menu.id) : null;
   const targets = menu ? (sel.includes(menu.id) ? sel : [menu.id]) : [];
@@ -173,6 +174,15 @@ export function MediaBin() {
           }
           if (e.key === "Escape") setNewFolder(null);
         }} onBlur={() => setNewFolder(null)} />
+      )}
+      {hits.length > 0 && (
+        <div class="scene-hits" aria-label="찾은 장면">
+          <div class="muted">찾은 장면 {hits.length}곳</div>
+          {hits.map((h) => {
+            const a = p.assets.find((x) => x.id === h.asset)!;
+            return <button class="scene-hit" title={a.info.name} onClick={() => { open(a); setTimeout(() => player.seek(h.t), 300); }}><span class="tc-s">{fmtTC(h.t)}</span> {h.text}</button>;
+          })}
+        </div>
       )}
       <div class={view === "grid" ? "assets" : "assets list"} role="listbox" aria-multiselectable="true" aria-label="미디어" onDragOver={(e) => e.preventDefault()}>
         {sub.map((f) => (
@@ -236,6 +246,7 @@ export function MediaBin() {
           <button role="menuitem" onClick={() => { setTagging(m.id); setMenu(null); }}>태그 달기…</button>
           <div class="menu-sep" />
           <button role="menuitem" onClick={() => { targets.forEach((id) => startTranscribe(id)); setMenu(null); }}>{m.words ? "다시 받아쓰기" : "받아쓰기"}</button>
+          <button role="menuitem" onClick={() => { targets.forEach((id) => scanShots(id).then((b) => toast(b.length ? `흔들리거나 흐린 구간 ${b.length}곳을 찾았습니다 (원본 보기의 재생 막대에 표시)` : "문제 구간이 없습니다")).catch((e) => toast(`찾지 못했습니다: ${e}`))); setMenu(null); }}>흔들림·흐림 찾기</button>
           {m.tState === "running" && <button role="menuitem" onClick={() => { api.cancel(`transcribe:${m.id}`); setMenu(null); }}>받아쓰기 취소</button>}
           <button role="menuitem" onClick={() => { api.reveal(m.info.path); setMenu(null); }}>탐색기에서 보기</button>
           {s.folder && <button role="menuitem" onClick={() => { mutate((pp) => ({ ...pp, assets: pp.assets.map((a) => (targets.includes(a.id) ? { ...a, folder: "" } : a)) })); setMenu(null); }}>맨 위 폴더로</button>}

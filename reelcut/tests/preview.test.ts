@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
-import { playableInWebView, previewSource } from "../src/edit";
+import { mergeScenes, playableInWebView, previewSource, searchScenes } from "../src/edit";
 import { dirToDfisheye } from "../src/gl360";
 import type { Asset, MediaInfo } from "../src/types";
 
@@ -52,5 +52,20 @@ describe("saved prompts", () => {
   it("names a prompt after its first 20 characters", () => {
     expect(promptName("무음을 정리하고 자막을 켜 줘")).toBe("무음을 정리하고 자막을 켜 줘");
     expect(promptName("  핵심만 남겨서\n1분짜리 세로 쇼츠 편집본을 새로 만들어 줘")).toBe("핵심만 남겨서 1분짜리 세로 쇼츠 편…");
+  });
+});
+
+describe("scene notes", () => {
+  it("merges notes by the second, sorted, and ignores empty ones", () => {
+    const a = mergeScenes([{ t: 10, text: "기린 앞" }], [{ t: 5, text: "입구" }, { t: 10.2, text: "기린 앞 아이들" }, { t: 20, text: "  " }]);
+    expect(a.map((n) => n.text)).toEqual(["입구", "기린 앞 아이들"]);
+  });
+  it("finds moments by words, the best match first", () => {
+    const assets = [{ id: "a", scenes: [{ t: 1, text: "미끄럼틀 타는 아이" }, { t: 9, text: "아이들이 기린 앞에 서 있음" }] }, { id: "b", scenes: [{ t: 3, text: "기린 조형물" }] }];
+    const hits = searchScenes(assets, "기린 아이");
+    expect(hits[0]).toMatchObject({ asset: "a", t: 9, score: 2 });
+    expect(hits.map((h) => h.asset)).toContain("b");
+    expect(searchScenes(assets, "   ")).toEqual([]);
+    expect(searchScenes(assets, "바닷가")).toEqual([]);
   });
 });

@@ -11,6 +11,7 @@ export function StatusBar() {
   const tr = as.filter((a) => a.tState === "running");
   const errs = as.filter((a) => a.tState === "error");
   const mo = Object.values(s.motion);
+  const sc = Object.values(s.scans);
   const avg = (xs: number[]) => (xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : 0);
   const job = s.exportJob;
   const hw = s.info?.hw;
@@ -18,6 +19,7 @@ export function StatusBar() {
   return (
     <footer class="statusbar" role="status" aria-live="polite">
       {mo.length > 0 && <span class="sb-item"><LoaderCircle size={12} class="spin-i" aria-hidden="true" /> 흔들림 분석 {mo.length}개 · {avg(mo)}%</span>}
+      {sc.length > 0 && <span class="sb-item"><LoaderCircle size={12} class="spin-i" aria-hidden="true" /> 흔들림·흐림 찾기 {sc.length}개 · {avg(sc)}%</span>}
       {tr.length > 0 && <span class="sb-item"><LoaderCircle size={12} class="spin-i" aria-hidden="true" /> 받아쓰기 {tr.length}개 · {avg(tr.map((a) => a.tPct ?? 0))}%</span>}
       {errs.length > 0 && <span class="sb-item warn" title={errs.map((a) => `${a.info.name}: ${a.tError}`).join("\n")}><CircleAlert size={12} aria-hidden="true" /> 문제 {errs.length}개</span>}
       {job && (

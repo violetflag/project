@@ -9,6 +9,7 @@ mod media;
 mod probe;
 mod qwen;
 mod render;
+mod shots;
 mod stitch;
 mod pano;
 mod motion;
@@ -445,6 +446,31 @@ async fn face_check(app: St<'_>, req: FaceCheck) -> Result<Vec<Value>, String> {
             out.push(json!({ "t": t, "faces": found.len(), "edges": edges }));
         })?;
         Ok(out)
+    })
+    .await
+}
+
+/// Looks for blurry, shaky and too dark stretches of a recording, with progress as "shots" job
+/// events. A two-lens recording is read through its .lrf when there is one (much quicker).
+#[tauri::command]
+async fn scan_shots(handle: tauri::AppHandle, app: St<'_>, id: String, info: MediaInfo, from: Option<f64>, to: Option<f64>) -> Result<Vec<shots::Bad>, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let tag = format!("shots:{id}");
+        let gen = app.jobs.generation(&tag);
+        let path = if info.layout360 == "dual" { info.lrf.clone().unwrap_or_else(|| info.path.clone()) } else { info.path.clone() };
+        let from = from.unwrap_or(0.0).max(0.0);
+        let dur = (to.unwrap_or(info.duration).min(info.duration) - from).max(0.5);
+        let app2 = app.clone();
+        let h2 = handle.clone();
+        let id2 = id.clone();
+        let tag2 = tag.clone();
+        let res = shots::measure(&app.bins.ffmpeg, &path, 0, from, dur, move |f| emit(&h2, &id2, "shots", f * 100.0, "running", "", Value::Null), move || app2.jobs.generation(&tag2) != gen);
+        match &res {
+            Ok(_) => emit(&handle, &id, "shots", 100.0, "done", "", Value::Null),
+            Err(e) => emit(&handle, &id, "shots", 0.0, "error", e, Value::Null),
+        }
+        Ok(shots::judge(&res?, from))
     })
     .await
 }
@@ -976,6 +1002,7 @@ pub fn run() {
             analyze_motion,
             live_url,
             eq_sheet,
+            scan_shots,
             find_faces,
             track_people,
             face_check,

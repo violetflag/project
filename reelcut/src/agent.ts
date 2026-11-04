@@ -5,13 +5,13 @@ import { api, onEvent } from "./api";
 import {
   clipDur, cutSource, DEFAULT_COLOR, DEFAULT_TRANSFORM, deleteClip, detachAudio, draftDuration, draftWords, fmtTC, insertClips, is360, isDefaultColor, isDefaultTransform, isFiller, isGap, moveClip,
   newClip, newDraft, newGap, newOverlay, r3, removeFillers, removeItem, removeRange, removeSilences, setTransition, splitAt, speechFromWave, speechFromWords, starts, transcriptText, uid, updateClip, updateOverlay, viewAt,
-  type Pacing,
+  type Pacing, mergeScenes, searchScenes,
 } from "./edit";
 import { exportAndWait } from "./exporter";
 import { cleanKeys, frameGroup, frameSubject, normView, sampleKeys, snapRanges, type Mark, type Subject } from "./framing";
 import { PLAYBOOK_360 } from "./playbook";
 import { compactBudget, ctxLimit, estTokens, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
-import { activeChat, asset, assetMap, editDraft, loadWave, mutate, mutateChat, saveNow, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
+import { activeChat, asset, assetMap, editDraft, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
 import type { Asset, ChatBlock, ChatMsg, ChatSession, Draft, View, ViewKey } from "./types";
 
 export const MODELS = [
@@ -151,6 +151,18 @@ export const TOOLS = [
   {
     name: "get_view_keys", description: "클립의 시점 키프레임을 봅니다 (많으면 고르게 줄여서 최대 max개, 기본 60).",
     input_schema: { type: "object", properties: { draft_id: draftId, clip_id: str, max: num }, required: ["clip_id"] },
+  },
+  {
+    name: "save_scene_notes", description: "미디어의 장면 설명을 저장합니다. 나중에 search_scenes와 앱의 미디어 검색창으로 찾을 수 있습니다. contact_sheet·equirect_sheet로 본 내용을 시각과 함께 짧게(누가, 어디서, 무엇을) 적으세요. 같은 초의 설명은 새것으로 바뀝니다.",
+    input_schema: { type: "object", properties: { asset_id: str, notes: { type: "array", items: { type: "object", properties: { t: num, text: str }, required: ["t", "text"] } } }, required: ["asset_id", "notes"] },
+  },
+  {
+    name: "search_scenes", description: "저장한 장면 설명에서 찾습니다(모든 미디어). 예: '미끄럼틀', '기린 앞 아이들'. 설명이 없는 미디어가 있으면 결과에 알려 줍니다. 그럴 때는 contact_sheet로 훑고 save_scene_notes로 저장한 뒤 다시 찾으세요.",
+    input_schema: { type: "object", properties: { query: str }, required: ["query"] },
+  },
+  {
+    name: "scan_bad_shots", description: "흐리거나 흔들리거나 너무 어두운 구간을 자동으로 찾습니다(그 녹화 자체와 비교해서 판단). 결과는 미디어에 저장되어 원본 보기의 재생 막대에 표시됩니다. 하이라이트를 고를 때 이 구간을 피하세요. 긴 영상은 from·to로 범위를 줄이면 빠릅니다.",
+    input_schema: { type: "object", properties: { asset_id: str, from: num, to: num }, required: ["asset_id"] },
   },
   {
     name: "find_faces", description: "360 영상의 특정 원본 시각들에서 얼굴을 자동으로 찾습니다(내장 얼굴 인식, 최대 16곳). 수평 파노라마 좌표로 x, y, 크기를 돌려줍니다. 머리 위치를 눈으로 읽는 대신 정확한 값을 얻을 때 씁니다. 뒤돈 얼굴은 안 잡히니 equirect_sheet와 함께 보세요. 어른은 얼굴이 크고 위쪽, 어린아이는 작고 아래쪽에 있는 경우가 많습니다.",
@@ -407,6 +419,24 @@ async function run(name: string, inp: any): Promise<Out> {
       const lens = { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 };
       const shots = await api.eqSheet(a.info.path, lens, times, Math.min(1920, Math.max(480, inp.width ?? 960)));
       return [{ type: "text", text: "가로 0~960 = 방위 -180~180°(480 = 정면), 세로 240 = 수평선(위가 위쪽). 격자 눈금으로 [x,y]를 읽으세요." }, ...shots.flatMap((b, i) => [{ type: "text", text: `${a.info.name} ${r3(times[i])}초` } as ChatBlock, img(b)])];
+    }
+    case "save_scene_notes": {
+      const a = getAsset(inp.asset_id);
+      const scenes = mergeScenes(a.scenes, inp.notes ?? []);
+      patchAsset(a.id, { scenes });
+      return `${a.info.name}: 장면 설명 ${scenes.length}개가 저장되어 있습니다.`;
+    }
+    case "search_scenes": {
+      const hits = searchScenes(p.assets, String(inp.query ?? ""));
+      const none = p.assets.filter((a) => a.info.kind === "video" && !a.scenes?.length).map((a) => `${a.id} ${a.info.name}`);
+      const lines = hits.map((h) => `${h.asset} | ${p.assets.find((a) => a.id === h.asset)?.info.name} | ${r3(h.t)}초 | ${h.text}`);
+      return (lines.length ? lines.join("\n") : "찾지 못했습니다.") + (none.length ? `\n장면 설명이 아직 없는 미디어: ${none.join(", ")}` : "");
+    }
+    case "scan_bad_shots": {
+      const a = getAsset(inp.asset_id);
+      const found = await scanShots(a.id, inp.from, inp.to);
+      const name = { blurry: "흐림", shaky: "흔들림", dark: "어두움" };
+      return found.length ? found.map((b) => `${r3(b.from)}–${r3(b.to)}초 ${name[b.kind]}`).join("\n") : "문제 구간이 없습니다.";
     }
     case "find_faces": {
       const a = getAsset(inp.asset_id);
@@ -786,7 +816,7 @@ export const TOOL_LABEL: Record<string, string> = {
   get_project_overview: "프로젝트 살펴보는 중", get_transcript: "대본 읽는 중", search_transcript: "대본 찾는 중", view_frames: "장면 보는 중",
   contact_sheet: "영상 훑어보는 중", create_draft: "편집본 만드는 중", get_draft: "편집본 확인 중", edit_draft: "편집하는 중",
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
-  find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
+  save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
 

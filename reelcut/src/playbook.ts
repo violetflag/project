@@ -16,6 +16,7 @@ export const PLAYBOOK_360 = `# 360 영상 자동 편집 순서 (Reelcut 도구 �
 ## 순서
 1. get_project_overview로 미디어를 확인합니다. 받아쓰기가 없고 대사가 있으면 transcribe 먼저.
 2. 전체 훑기: contact_sheet를 구간별로 여러 번 (예: 30초 간격) 봅니다. 360이라 어안으로 둥글게 보이니, 후보 장면은 equirect_sheet로 다시 봅니다.
+   훑으면서 본 것을 save_scene_notes로 저장해 두면 다음부터 search_scenes로 바로 찾을 수 있습니다. scan_bad_shots로 흐리거나 흔들린 구간을 찾아 피하세요.
 3. 하이라이트 구간을 고르고 합쳐서 목표 길이에 맞춥니다. 구간마다 어떤 사람이 나오는지 적어 두세요.
 4. create_draft로 편집본을 만듭니다 (비율은 보통 16:9). 구간마다 클립 1개.
 5. snap_cuts로 시작·끝을 말 틈으로 옮깁니다. 말 틈이 없는 조용한 장면은 그대로 둡니다.

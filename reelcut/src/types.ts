@@ -33,6 +33,10 @@ export type Hw = {
 
 export type JobState = "idle" | "running" | "done" | "error" | "cancelled";
 
+/** A description of what is on screen from `t` seconds of the file. */
+export type SceneNote = { t: number; text: string };
+export type BadShot = { from: number; to: number; kind: "blurry" | "shaky" | "dark" };
+
 export type Asset = {
   id: string;
   info: MediaInfo;
@@ -58,6 +62,10 @@ export type Asset = {
   added?: number;
   /** Word times were checked against the waveform. */
   refined?: boolean;
+  /** What happens in the picture, for finding moments (written by the AI from what it sees). */
+  scenes?: SceneNote[];
+  /** Weak stretches found by the shot scan. */
+  badShots?: BadShot[];
 };
 
 /** Picture placement. x/y: offset of the centre as a fraction of the frame; crops are fractions of the source. */

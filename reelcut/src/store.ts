@@ -4,7 +4,7 @@ import { api, onJob, type AppInfo, type CcStatus, type ModelInfo, type QwenStatu
 import { CTX_DEFAULTS, migrateChats, newSession, promptName } from "./chats";
 export { promptName };
 import { draftDuration, newDraft, refineWords, rippleConnected, uid } from "./edit";
-import type { Asset, ChatSession, Draft, JobEvent, Lens, Project, SavedPrompt, Settings, Word } from "./types";
+import type { Asset, BadShot, ChatSession, Draft, JobEvent, Lens, Project, SavedPrompt, Settings, Word } from "./types";
 
 export type Meta = { id: string; name: string; updated: number; created: number; assets: number; drafts: number; duration: number; poster?: string; clips: number };
 export type ExportJob = { id: string; draft: string; pct: number; state: string; message: string; out: string; result?: any; left?: number; name?: string };
@@ -61,6 +61,8 @@ type S = {
   showSilence: boolean;
   /** 360 motion analysis running, by asset id: percent. */
   motion: Record<string, number>;
+  /** Shot scans running, by asset id: percent. */
+  scans: Record<string, number>;
   /** Goes up when an analysis ends (the preview fetches the stabilisation again). */
   motionRev: number;
   /** AI requests saved for reuse (all projects). */
@@ -71,7 +73,7 @@ export const st: S = {
   route: "home", projects: [], project: null, draftId: null, sourceId: null, folder: "", playhead: 0, selClip: null,
   settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, ccConnect: null, qwenSetup: null, downloads: {}, exportJob: null, toast: "",
   agentBusy: false, agentStatus: "", rightTab: "inspect", leftTab: "media",
-  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, dialog: "", showSafe: false, showSilence: false, motion: {}, motionRev: 0, prompts: [],
+  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, dialog: "", showSafe: false, showSilence: false, motion: {}, scans: {}, motionRev: 0, prompts: [],
 };
 
 const subs = new Set<() => void>();
@@ -329,6 +331,22 @@ export async function analyzeMotion(id: string) {
     toast(`흔들림 분석 실패: ${e}`);
   }
 }
+/** Looks for blurry, shaky and dark stretches of a recording and keeps them on the asset. */
+export async function scanShots(id: string, from?: number, to?: number): Promise<BadShot[]> {
+  const a = asset(id);
+  if (!a) return [];
+  set({ scans: { ...st.scans, [id]: 0 } });
+  try {
+    const found = await api.scanShots(id, a.info, from, to);
+    const keep = (asset(id)?.badShots ?? []).filter((b) => from != null && (b.to <= from || (to != null && b.from >= to)));
+    patchAsset(id, { badShots: [...keep, ...found].sort((x, y) => x.from - y.from) });
+    return found;
+  } finally {
+    const { [id]: _, ...rest } = st.scans;
+    set({ scans: rest });
+  }
+}
+
 function endMotion(id: string) {
   const { [id]: _, ...rest } = st.motion;
   set({ motion: rest, motionRev: st.motionRev + 1 });
@@ -409,6 +427,9 @@ export async function initJobs() {
     if (e.state === "running" && Date.now() - lastPaint < 160) return;
     lastPaint = Date.now();
     switch (e.kind) {
+      case "shots":
+        if (e.state === "running" && e.id in st.scans) set({ scans: { ...st.scans, [e.id]: e.pct } });
+        break;
       case "motion":
         if (e.state === "running") { if (e.id in st.motion) set({ motion: { ...st.motion, [e.id]: e.pct } }); }
         else {
