@@ -18,7 +18,40 @@ export const newGap = (dur: number): Clip => ({ id: uid(), asset: GAP, start: 0,
 export const DEFAULT_TRANSFORM: Transform = { x: 0, y: 0, scale: 1, rotation: 0, crop_l: 0, crop_r: 0, crop_t: 0, crop_b: 0, opacity: 1 };
 export const DEFAULT_COLOR: ColorAdj = { exposure: 0, contrast: 1, saturation: 1, temperature: 6500, lut: "" };
 export const isDefaultTransform = (t?: Transform | null) => !t || Object.keys(DEFAULT_TRANSFORM).every((k) => Math.abs((t as any)[k] - (DEFAULT_TRANSFORM as any)[k]) < 1e-6);
-export const isDefaultColor = (c?: ColorAdj | null) => !c || (Math.abs(c.exposure) < 1e-6 && Math.abs(c.contrast - 1) < 1e-6 && Math.abs(c.saturation - 1) < 1e-6 && Math.abs(c.temperature - 6500) < 1 && !c.lut);
+export const isDefaultColor = (c?: ColorAdj | null) => !c || (Math.abs(c.exposure) < 1e-6 && Math.abs(c.contrast - 1) < 1e-6 && Math.abs(c.saturation - 1) < 1e-6 && Math.abs(c.temperature - 6500) < 1 && !c.lut && !c.tint && !c.highlights && !c.shadows && !c.vibrance && !c.vignette);
+
+/** Ready-made looks: colour values applied over the clip's own. */
+export const LOOKS: { id: string; label: string; color: Partial<ColorAdj> }[] = [
+  { id: "warm", label: "따뜻한 필름", color: { temperature: 5400, saturation: 0.95, contrast: 1.05, shadows: 0.15, vignette: 0.35, vibrance: 0, tint: 0, highlights: 0 } },
+  { id: "cool", label: "시원하게", color: { temperature: 7600, saturation: 1, contrast: 1.05, shadows: 0, vignette: 0, vibrance: 0.1, tint: 0, highlights: 0 } },
+  { id: "vivid", label: "생생하게", color: { temperature: 6500, saturation: 1.05, contrast: 1.12, shadows: 0.05, vignette: 0, vibrance: 0.4, tint: 0, highlights: -0.1 } },
+  { id: "soft", label: "부드럽게", color: { temperature: 6300, saturation: 0.95, contrast: 0.92, shadows: 0.25, vignette: 0, vibrance: 0, tint: 0, highlights: -0.15 } },
+  { id: "bw", label: "흑백", color: { temperature: 6500, saturation: 0, contrast: 1.12, shadows: 0, vignette: 0.3, vibrance: 0, tint: 0, highlights: 0 } },
+  { id: "none", label: "원래대로", color: { exposure: 0, temperature: 6500, saturation: 1, contrast: 1, shadows: 0, vignette: 0, vibrance: 0, tint: 0, highlights: 0 } },
+];
+
+/**
+ * A multicam edit from recordings lined up by their sound: the picture cuts between them at the
+ * given timeline moments, the sound stays with one recording throughout (A1). Offsets are seconds
+ * of the reference timeline where each recording starts.
+ */
+export function multicamDraft(name: string, sound: Asset, cuts: { at: number; asset: Asset }[], offset: (a: Asset) => number, end: number, aspect = "16:9"): Draft {
+  const d = newDraft(name, aspect);
+  const ordered = cuts.slice().sort((a, b) => a.at - b.at);
+  const first = ordered.length ? ordered[0].at : 0;
+  const clips: Clip[] = [];
+  ordered.forEach((c, i) => {
+    const to = Math.min(end, i + 1 < ordered.length ? ordered[i + 1].at : end);
+    const off = offset(c.asset);
+    // Only the part this recording actually covers.
+    const s = Math.max(0, c.at - off), e = Math.min(c.asset.info.duration, to - off);
+    if (e - s < 0.05) return;
+    clips.push({ ...newClip(c.asset, r3(s), r3(e)), volume: 0, detached: true });
+  });
+  const so = offset(sound);
+  const music: MusicClip[] = [{ id: uid(), asset: sound.id, start: r3(Math.max(0, first - so)), end: r3(Math.min(sound.info.duration, end - so)), at: 0, volume: 1, fadeIn: 0, fadeOut: 0, track: 1 }];
+  return { ...d, clips, music };
+}
 
 export function newDraft(name: string, aspect = "16:9", fps = 30): Draft {
   const now = Date.now();

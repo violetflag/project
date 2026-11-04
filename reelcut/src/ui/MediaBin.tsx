@@ -4,7 +4,7 @@ import { Check, Flag, FolderPlus, LayoutGrid, List, Music, Plus, Star, X as XIco
 import { useEffect, useState } from "preact/hooks";
 import { api, fileSrc, pickFiles } from "../api";
 import { draftDuration, fmtTC, insertClips, is360, newClip, overlays, searchScenes, uid } from "../edit";
-import { draft, editDraft, ensureStrip, importPaths, mutate, patchAsset, scanShots, set, startTranscribe, toast, useStore } from "../store";
+import { draft, editDraft, ensureStrip, importPaths, mutate, patchAsset, scanShots, set, startTranscribe, syncAssets, toast, useStore } from "../store";
 import type { Asset } from "../types";
 import { player } from "./Viewer";
 
@@ -18,6 +18,7 @@ function Badges({ a }: { a: Asset }) {
     <div class="badges">
       {is360(a) && <span class="b b360">360</span>}
       {a.info.ext && ["osv", "lrf", "lrv"].includes(a.info.ext) && <span class="b">{a.info.ext.toUpperCase()}</span>}
+      {a.syncTo && <span class="b ok" title={`소리로 맞춘 시간: ${a.syncOffset! >= 0 ? "+" : ""}${a.syncOffset!.toFixed(2)}초`}>시간 맞춤</span>}
       {a.info.lrf && <span class="b" title={`저용량 짝 파일 (썸네일에 씀): ${a.info.lrf}`}>LRF 짝</span>}
       {a.tState === "running" && <span class="b busy">받아쓰기 {Math.round(a.tPct ?? 0)}%</span>}
       {a.words && <span class="b ok">대본</span>}
@@ -120,6 +121,19 @@ export function MediaBin() {
     return () => window.removeEventListener("keydown", key, true);
   }, [sel.join(",")]);
 
+  const syncSelected = async (ids: string[]) => {
+    const list = ids.map((id) => p.assets.find((a) => a.id === id)).filter((a): a is Asset => !!a && a.info.has_audio);
+    if (list.length < 2) return toast("소리가 있는 영상을 두 개 이상 골라 주세요");
+    toast("소리를 비교하는 중…");
+    const lines: string[] = [];
+    for (const a of list.slice(1)) {
+      try {
+        const r = await syncAssets(list[0].id, a.id);
+        lines.push(`${a.info.name}: ${r.offset >= 0 ? "+" : ""}${r.offset.toFixed(2)}초${r.clear < 0.3 ? " (확실하지 않음)" : ""}`);
+      } catch (e) { lines.push(`${a.info.name}: 실패 (${e})`); }
+    }
+    toast(`${list[0].info.name} 기준 — ${lines.join(", ")}`);
+  };
   const hits = ql ? searchScenes(p.assets, q).slice(0, 12) : [];
   const crumbs = s.folder ? s.folder.split("/") : [];
   const m = menu ? p.assets.find((a) => a.id === menu.id) : null;
@@ -246,6 +260,7 @@ export function MediaBin() {
           <button role="menuitem" onClick={() => { setTagging(m.id); setMenu(null); }}>태그 달기…</button>
           <div class="menu-sep" />
           <button role="menuitem" onClick={() => { targets.forEach((id) => startTranscribe(id)); setMenu(null); }}>{m.words ? "다시 받아쓰기" : "받아쓰기"}</button>
+          {targets.length >= 2 && <button role="menuitem" onClick={() => { syncSelected(targets); setMenu(null); }} title="같은 순간을 찍은 영상들을 소리로 맞춥니다 (멀티캠)">소리로 시간 맞추기</button>}
           <button role="menuitem" onClick={() => { targets.forEach((id) => scanShots(id).then((b) => toast(b.length ? `흔들리거나 흐린 구간 ${b.length}곳을 찾았습니다 (원본 보기의 재생 막대에 표시)` : "문제 구간이 없습니다")).catch((e) => toast(`찾지 못했습니다: ${e}`))); setMenu(null); }}>흔들림·흐림 찾기</button>
           {m.tState === "running" && <button role="menuitem" onClick={() => { api.cancel(`transcribe:${m.id}`); setMenu(null); }}>받아쓰기 취소</button>}
           <button role="menuitem" onClick={() => { api.reveal(m.info.path); setMenu(null); }}>탐색기에서 보기</button>

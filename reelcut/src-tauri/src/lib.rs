@@ -517,17 +517,72 @@ async fn poster(app: St<'_>, path: String, at: f64) -> Result<String, String> {
     .await
 }
 
+fn wave_of(app: &App, path: &str) -> Result<Vec<u8>, String> {
+    let out = app.dir("waves").join(format!("{}.bin", file_key(path)));
+    if let Ok(b) = std::fs::read(&out) {
+        return Ok(b);
+    }
+    let w = media::waveform(&app.bins.ffmpeg, path)?;
+    let _ = std::fs::write(&out, &w);
+    Ok(w)
+}
+
 #[tauri::command]
 async fn waveform(app: St<'_>, path: String) -> Result<Vec<u8>, String> {
     let app = app.inner().clone();
+    blocking(move || wave_of(&app, &path)).await
+}
+
+/// How far recording `b` lags recording `a`, by comparing their sound. Seconds of `a` where `b`
+/// starts, and how clear the match is (0–1).
+#[tauri::command]
+async fn sync_audio(app: St<'_>, a: String, b: String) -> Result<Value, String> {
+    let app = app.inner().clone();
     blocking(move || {
-        let out = app.dir("waves").join(format!("{}.bin", file_key(&path)));
-        if let Ok(b) = std::fs::read(&out) {
-            return Ok(b);
+        let (x, y) = (wave_of(&app, &a)?, wave_of(&app, &b)?);
+        let (offset, clear) = media::sync_offset(&x, &y);
+        Ok(json!({ "offset": offset, "clear": clear }))
+    })
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct AutoColorReq {
+    path: String,
+    start: f64,
+    end: f64,
+    #[serde(default)]
+    lens: Option<Lens>,
+    #[serde(default)]
+    view: Option<media::View>,
+}
+
+/// A suggested exposure, contrast and white balance from five pictures of a stretch of a file
+/// (a 360 clip as seen through its view).
+#[tauri::command]
+async fn auto_color(app: St<'_>, req: AutoColorReq) -> Result<Value, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let times: Vec<f64> = (0..5).map(|i| req.start + (req.end - req.start).max(0.0) * (i as f64 + 0.5) / 5.0).collect();
+        let mut pics = Vec::new();
+        if let (Some(v), Some(lens)) = (&req.view, req.lens.clone().filter(|l| matches!(l.layout.as_str(), "dual" | "dfisheye"))) {
+            let gen = app.jobs.generation("color");
+            let (info, lens, m) = engine_for(&app, "color", gen, &req.path, Some(lens))?;
+            let v = framing::norm_view(v);
+            let rot = stitch::matrix(stitch::ypr(v.yaw, v.pitch, v.roll));
+            let items: Vec<(f64, pano::M3, Option<f64>)> = times.iter().map(|t| (*t, rot, Some(v.hfov))).collect();
+            motion::look_at(&app.bins.ffmpeg, &app.jobs, "color", gen, &info, &lens, m.as_ref(), &items, 320, 180, &mut |_, _, f| pics.push((faces::crop_bgr(f, 0, 0, f.w, f.h), f.w, f.h)))?;
+        } else {
+            for t in &times {
+                let a: Vec<String> = ["-hide_banner", "-nostdin", "-loglevel", "error", "-ss", &format!("{:.3}", t.max(0.0)), "-i", &req.path, "-frames:v", "1", "-map", "0:v:0", "-vf", "scale=160:90,format=bgr24", "-f", "rawvideo", "-"].iter().map(|x| x.to_string()).collect();
+                let o = ff::command(&app.bins.ffmpeg).args(&a).stdin(std::process::Stdio::null()).output().map_err(|e| e.to_string())?;
+                if o.stdout.len() >= 160 * 90 * 3 {
+                    pics.push((o.stdout, 160, 90));
+                }
+            }
         }
-        let w = media::waveform(&app.bins.ffmpeg, &path)?;
-        let _ = std::fs::write(&out, &w);
-        Ok(w)
+        let (exposure, contrast, temperature) = media::auto_color(&pics);
+        Ok(json!({ "exposure": exposure, "contrast": contrast, "temperature": temperature }))
     })
     .await
 }
@@ -1010,6 +1065,8 @@ pub fn run() {
             analyze_motion,
             live_url,
             eq_sheet,
+            sync_audio,
+            auto_color,
             save_srt,
             scan_shots,
             find_faces,

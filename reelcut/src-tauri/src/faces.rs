@@ -134,7 +134,7 @@ impl Detector {
 }
 
 /// A region of a planar 4:2:0 picture as BGR bytes; x wraps round (panoramas).
-fn crop_bgr<T: Px>(f: &Frame<T>, x0: usize, y0: usize, w: usize, h: usize) -> Vec<u8> {
+pub fn crop_bgr<T: Px>(f: &Frame<T>, x0: usize, y0: usize, w: usize, h: usize) -> Vec<u8> {
     let mut out = vec![0u8; w * h * 3];
     let k = 255.0 / T::MAX;
     let (cw, _) = f.dims(1);

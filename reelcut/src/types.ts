@@ -62,6 +62,10 @@ export type Asset = {
   added?: number;
   /** Word times were checked against the waveform. */
   refined?: boolean;
+  /** Seconds after the start of the reference recording that this one starts (found from the sound). */
+  syncOffset?: number;
+  /** The recording it was lined up with. */
+  syncTo?: string;
   /** What happens in the picture, for finding moments (written by the AI from what it sees). */
   scenes?: SceneNote[];
   /** Weak stretches found by the shot scan. */
@@ -71,7 +75,15 @@ export type Asset = {
 /** Picture placement. x/y: offset of the centre as a fraction of the frame; crops are fractions of the source. */
 export type Transform = { x: number; y: number; scale: number; rotation: number; crop_l: number; crop_r: number; crop_t: number; crop_b: number; opacity: number };
 /** Colour: exposure in stops, contrast/saturation as factors, temperature in Kelvin (6500 = none), LUT = .cube path. */
-export type ColorAdj = { exposure: number; contrast: number; saturation: number; temperature: number; lut: string };
+export type ColorAdj = {
+  exposure: number; contrast: number; saturation: number; temperature: number; lut: string;
+  /** Green (−) to magenta (+), and the bright/dark parts, −1…1. */
+  tint?: number; highlights?: number; shadows?: number;
+  /** Saturation that spares what is already colourful, −1…1. */
+  vibrance?: number;
+  /** Darker corners, 0…1. */
+  vignette?: number;
+};
 /** 360 view keyframe; t = source seconds in the media (so splits and trims keep them in place). In a Plan, t is seconds from the segment start in output time. */
 export type ViewKey = { t: number; view: View };
 

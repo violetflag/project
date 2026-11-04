@@ -4,9 +4,9 @@
 import { ChevronDown, ChevronRight, Diamond, RotateCcw, Trash2 } from "lucide-preact";
 import type { ComponentChildren } from "preact";
 import { useState } from "preact/hooks";
-import { pickLut } from "../api";
+import { api, pickLut } from "../api";
 import {
-  ASPECTS, audioTrack, fitMusic, clipAt, clipDur, DEFAULT_COLOR, DEFAULT_TRANSFORM, DEFAULT_VIEW, detachAudio, fmtTCF, is360, isGap, overlays, parseTC, r3, setTransition, setViewKey, starts,
+  ASPECTS, audioTrack, fitMusic, LOOKS, clipAt, clipDur, DEFAULT_COLOR, DEFAULT_TRANSFORM, DEFAULT_VIEW, detachAudio, fmtTCF, is360, isGap, overlays, parseTC, r3, setTransition, setViewKey, starts,
   MOVE_PRESETS, movePreset, TRANSITIONS, timedDur, uid, updateAudio, updateClip, updateOverlay, viewAt, volAt,
 } from "../edit";
 import { CAPTION_PRESETS, STICKERS, TEXT_KINDS, textLook } from "../graphics";
@@ -96,7 +96,7 @@ function TransformSec({ t, onChange }: { t: Transform; onChange: (p: Partial<Tra
   );
 }
 
-function ColorSec({ c, onChange }: { c: ColorAdj; onChange: (p: Partial<ColorAdj>) => void }) {
+function ColorSec({ c, onChange, onAuto }: { c: ColorAdj; onChange: (p: Partial<ColorAdj>) => void; onAuto?: () => void }) {
   return (
     <Section id="color" title="색" term="Color / Lumetri">
       <div class="row lut-row">
@@ -109,7 +109,19 @@ function ColorSec({ c, onChange }: { c: ColorAdj; onChange: (p: Partial<ColorAdj
       <Num label="대비" value={c.contrast * 100} min={50} max={200} step={1} def={100} unit="%" onChange={(v) => onChange({ contrast: v / 100 })} />
       <Num label="채도" value={c.saturation * 100} min={0} max={300} step={1} def={100} unit="%" onChange={(v) => onChange({ saturation: v / 100 })} />
       <Num label="색온도" value={c.temperature} min={2500} max={12000} step={50} def={6500} unit="K" onChange={(v) => onChange({ temperature: v })} />
-      <p class="muted tip">미리보기는 근사입니다. LUT와 색온도는 내보낸 파일에 정확히 반영됩니다.</p>
+      <Num label="색조" value={(c.tint ?? 0) * 100} min={-100} max={100} step={1} def={0} unit="" onChange={(v) => onChange({ tint: v / 100 })} />
+      <Num label="밝은 부분" value={(c.highlights ?? 0) * 100} min={-100} max={100} step={1} def={0} unit="" onChange={(v) => onChange({ highlights: v / 100 })} />
+      <Num label="어두운 부분" value={(c.shadows ?? 0) * 100} min={-100} max={100} step={1} def={0} unit="" onChange={(v) => onChange({ shadows: v / 100 })} />
+      <Num label="생기" value={(c.vibrance ?? 0) * 100} min={-100} max={100} step={1} def={0} unit="" onChange={(v) => onChange({ vibrance: v / 100 })} />
+      <Num label="가장자리 어둡게" value={(c.vignette ?? 0) * 100} min={0} max={100} step={1} def={0} unit="" onChange={(v) => onChange({ vignette: v / 100 })} />
+      <label>룩
+        <select value="" onChange={(e) => { const l = LOOKS.find((x) => x.id === (e.target as HTMLSelectElement).value); if (l) onChange(l.color); }}>
+          <option value="">고르기…</option>
+          {LOOKS.map((l) => <option value={l.id}>{l.label}</option>)}
+        </select>
+      </label>
+      {onAuto && <button class="small" onClick={onAuto} title="노출·대비·화이트밸런스를 자동으로 맞춥니다">자동 색 보정</button>}
+      <p class="muted tip">미리보기는 근사입니다. LUT, 색온도, 색조, 가장자리는 내보낸 파일에 정확히 반영됩니다.</p>
     </Section>
   );
 }
@@ -192,7 +204,15 @@ function ClipView({ d, c }: { d: Draft; c: Clip }) {
         </div>
       </Section>
       {a && a.info.kind !== "audio" && !is360(a) && <TransformSec t={t} onChange={(p) => set1("변형", { transform: { ...t, ...p } })} />}
-      {a && a.info.kind !== "audio" && <ColorSec c={col} onChange={(p) => set1("색", { color: { ...col, ...p } })} />}
+      {a && a.info.kind !== "audio" && <ColorSec c={col} onChange={(p) => set1("색", { color: { ...col, ...p } })} onAuto={async () => {
+        try {
+          const r360 = is360(a);
+          const lens = r360 ? { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 } : undefined;
+          const r = await api.autoColor(a.info.path, c.start, c.end, lens, r360 ? viewAt(c.view, c.viewKeys, (c.start + c.end) / 2) : undefined);
+          set1("자동 색 보정", { color: { ...col, ...r } });
+          toast(`자동 색 보정: 노출 ${r.exposure}, 대비 ${r.contrast}, 색온도 ${r.temperature}K`);
+        } catch (e) { toast(`색을 맞추지 못했습니다: ${e}`); }
+      }} />}
       {a?.info.has_audio && (
         <Section id="audio" title="소리" term="Audio">
           {c.detached ? <p class="muted">소리를 A1 트랙으로 분리했습니다. A1의 소리 클립에서 조절하세요.</p> : (

@@ -54,7 +54,8 @@ export function cssLook(t?: Transform | null, c?: ColorAdj | null): { transform:
   const clip = t && (t.crop_l || t.crop_r || t.crop_t || t.crop_b) ? `inset(${t.crop_t * 100}% ${t.crop_r * 100}% ${t.crop_b * 100}% ${t.crop_l * 100}%)` : "";
   let f = "";
   if (c && !isDefaultColor(c)) {
-    f = `brightness(${Math.pow(2, c.exposure * 0.5).toFixed(3)}) contrast(${c.contrast}) saturate(${c.saturation})`;
+    const lift = 1 + (c.shadows ?? 0) * 0.08 + (c.highlights ?? 0) * 0.05;
+    f = `brightness(${(Math.pow(2, c.exposure * 0.5) * lift).toFixed(3)}) contrast(${c.contrast}) saturate(${(c.saturation * (1 + (c.vibrance ?? 0) * 0.4)).toFixed(3)})`;
     if (c.temperature < 6400) f += ` sepia(${Math.min(0.6, (6500 - c.temperature) / 7000).toFixed(3)})`;
     if (c.temperature > 6600) f += ` hue-rotate(${Math.min(20, (c.temperature - 6500) / 300).toFixed(1)}deg) saturate(0.95)`;
   }

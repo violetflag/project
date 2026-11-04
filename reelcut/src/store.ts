@@ -347,6 +347,17 @@ export async function scanShots(id: string, from?: number, to?: number): Promise
   }
 }
 
+/** Lines recording `id` up with reference `ref` by their sound and keeps the result. */
+export async function syncAssets(ref: string, id: string): Promise<{ offset: number; clear: number }> {
+  const a = asset(ref), b = asset(id);
+  if (!a || !b) throw new Error("미디어를 찾을 수 없습니다");
+  const r = await api.syncAudio(a.info.path, b.info.path);
+  // Offsets are kept against the reference's own timeline.
+  patchAsset(ref, { syncOffset: a.syncOffset ?? 0, syncTo: a.syncTo ?? ref });
+  patchAsset(id, { syncOffset: (a.syncOffset ?? 0) + r.offset, syncTo: a.syncTo ?? ref });
+  return r;
+}
+
 function endMotion(id: string) {
   const { [id]: _, ...rest } = st.motion;
   set({ motion: rest, motionRev: st.motionRev + 1 });

@@ -60,6 +60,8 @@ export const api = {
     invoke<{ name: string; tracked: number; marks: [number, number, number][] }[]>("track_people", { req: { path, lens, from, to, subjects } }),
   faceCheck: (path: string, lens: Lens, items: [number, View][]) => invoke<{ t: number; faces: number; edges: string[] }[]>("face_check", { req: { path, lens, items } }),
   scanShots: (id: string, info: MediaInfo, from?: number, to?: number) => invoke<BadShot[]>("scan_shots", { id, info, from: from ?? null, to: to ?? null }),
+  syncAudio: (a: string, b: string) => invoke<{ offset: number; clear: number }>("sync_audio", { a, b }),
+  autoColor: (path: string, start: number, end: number, lens?: Lens, view?: View) => invoke<{ exposure: number; contrast: number; temperature: number }>("auto_color", { req: { path, start, end, lens: lens ?? null, view: view ?? null } }),
   motionTrack: (path: string, lens: Lens) => invoke<{ fps: number; quats: string } | null>("motion_track", { path, lens }),
   motionInfo: (path: string) => invoke<MotionInfo | null>("motion_info", { path }),
   filmstrip: (path: string, duration: number, count: number) => invoke<string>("filmstrip", { path, duration, count }),

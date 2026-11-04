@@ -62,11 +62,25 @@ pub struct ColorAdj {
     pub saturation: f64,
     pub temperature: f64,
     pub lut: String,
+    /// Green (−) to magenta (+), −1…1.
+    #[serde(default)]
+    pub tint: f64,
+    /// Bright and dark parts, −1…1.
+    #[serde(default)]
+    pub highlights: f64,
+    #[serde(default)]
+    pub shadows: f64,
+    /// Saturation that spares what is already colourful, −1…1.
+    #[serde(default)]
+    pub vibrance: f64,
+    /// Darker corners, 0…1.
+    #[serde(default)]
+    pub vignette: f64,
 }
 
 impl Default for ColorAdj {
     fn default() -> Self {
-        ColorAdj { exposure: 0.0, contrast: 1.0, saturation: 1.0, temperature: 6500.0, lut: String::new() }
+        ColorAdj { exposure: 0.0, contrast: 1.0, saturation: 1.0, temperature: 6500.0, tint: 0.0, highlights: 0.0, shadows: 0.0, vibrance: 0.0, vignette: 0.0, lut: String::new() }
     }
 }
 
@@ -385,6 +399,21 @@ fn color_filters(c: &Option<ColorAdj>) -> Vec<String> {
     }
     if (c.temperature - 6500.0).abs() >= 1.0 {
         f.push(format!("colortemperature=temperature={:.0}", c.temperature.clamp(1000.0, 40000.0)));
+    }
+    if c.tint.abs() > 1e-3 {
+        // Magenta is less green.
+        let g = -c.tint.clamp(-1.0, 1.0) * 0.3;
+        f.push(format!("colorbalance=gs={g:.3}:gm={g:.3}:gh={g:.3}"));
+    }
+    if c.shadows.abs() > 1e-3 || c.highlights.abs() > 1e-3 {
+        let (s, h) = (c.shadows.clamp(-1.0, 1.0) * 0.12, c.highlights.clamp(-1.0, 1.0) * 0.12);
+        f.push(format!("curves=all='0/0 0.25/{:.3} 0.75/{:.3} 1/1'", 0.25 + s, 0.75 + h));
+    }
+    if c.vibrance.abs() > 1e-3 {
+        f.push(format!("vibrance=intensity={:.3}", c.vibrance.clamp(-1.0, 1.0)));
+    }
+    if c.vignette > 1e-3 {
+        f.push(format!("vignette=angle={:.3}", 0.2 + c.vignette.clamp(0.0, 1.0) * 0.75));
     }
     f
 }
@@ -1238,7 +1267,9 @@ mod tests {
     fn colour_order_escaping_and_neutral() {
         assert!(color_filters(&Some(ColorAdj::default())).is_empty());
         assert!(color_filters(&None).is_empty());
-        let c = ColorAdj { exposure: 1.0, contrast: 1.2, saturation: 0.8, temperature: 5000.0, lut: r"C:\Lut Dir\it's.cube".into() };
+        let wide = ColorAdj { tint: 0.5, shadows: 0.5, highlights: -0.5, vibrance: 0.3, vignette: 0.5, ..Default::default() };
+        assert_eq!(color_filters(&Some(wide)), vec!["colorbalance=gs=-0.150:gm=-0.150:gh=-0.150", "curves=all='0/0 0.25/0.310 0.75/0.690 1/1'", "vibrance=intensity=0.300", "vignette=angle=0.575"]);
+        let c = ColorAdj { exposure: 1.0, contrast: 1.2, saturation: 0.8, temperature: 5000.0, lut: r"C:\Lut Dir\it's.cube".into(), ..Default::default() };
         assert_eq!(
             color_filters(&Some(c)),
             vec![r"lut3d=file='C\:/Lut Dir/it\'\''s.cube'", "eq=contrast=1.200:saturation=0.800:gamma=1.682", "colortemperature=temperature=5000"]
@@ -1424,7 +1455,7 @@ mod tests {
         let segs = vec![
             Seg {
                 transform: Some(Transform { x: 0.2, y: -0.1, scale: 0.5, rotation: 8.0, crop_l: 0.05, crop_b: 0.1, ..Default::default() }),
-                color: Some(ColorAdj { exposure: 0.7, saturation: 1.4, contrast: 1.1, temperature: 5200.0, lut: lut.to_string_lossy().into_owned() }),
+                color: Some(ColorAdj { exposure: 0.7, saturation: 1.4, contrast: 1.1, temperature: 5200.0, lut: lut.to_string_lossy().into_owned(), ..Default::default() }),
                 denoise: true,
                 fade_in: 0.3,
                 ..clip(0.0, 3.0)

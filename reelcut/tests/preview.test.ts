@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
 import { captionLines, toAss } from "../src/captions";
 import { STICKERS, stickerSvgPath, textEvent, textLook } from "../src/graphics";
-import { animAt, DEFAULT_CAPTION, fitMusic, mergeScenes, movePreset, volAt, newDraft, playableInWebView, previewSource, searchScenes } from "../src/edit";
+import { multicamDraft, isDefaultColor, LOOKS, animAt, DEFAULT_CAPTION, fitMusic, mergeScenes, movePreset, volAt, newDraft, playableInWebView, previewSource, searchScenes } from "../src/edit";
 import { dirToDfisheye } from "../src/gl360";
 import type { Asset, MediaInfo } from "../src/types";
 
@@ -135,5 +135,28 @@ describe("keyframes and music fit", () => {
     expect(short.music.map((x) => x.at)).toEqual([0, 12, 24]);
     expect(short.music[2].end).toBe(6);
     expect(short.music[2].fadeOut).toBe(2);
+  });
+});
+
+describe("multicam and looks", () => {
+  it("cuts between recordings lined up by sound, keeping one sound", () => {
+    const cam = (id: string, duration: number): Asset => ({ ...asset({ duration }), id, syncOffset: id === "b" ? 10 : 0 });
+    const a = cam("a", 100), b = cam("b", 60);
+    const d = multicamDraft("m", a, [{ at: 20, asset: a }, { at: 30, asset: b }, { at: 40, asset: a }], (x) => x.syncOffset ?? 0, 50);
+    expect(d.clips.map((c) => [c.asset, c.start, c.end])).toEqual([["a", 20, 30], ["b", 20, 30], ["a", 40, 50]]);
+    expect(d.clips.every((c) => c.volume === 0)).toBe(true);
+    expect(d.music[0]).toMatchObject({ asset: "a", start: 20, end: 50, at: 0, track: 1 });
+  });
+  it("leaves out the part a camera did not record", () => {
+    const a: Asset = { ...asset({ duration: 100 }), id: "a" }, b: Asset = { ...asset({ duration: 5 }), id: "b" };
+    const d = multicamDraft("m", a, [{ at: 0, asset: b }, { at: 3, asset: a }], (x) => (x.id === "b" ? 2 : 0), 6);
+    expect(d.clips.map((c) => [c.asset, c.start, c.end])).toEqual([["b", 0, 1], ["a", 3, 6]]);
+  });
+  it("counts the wider colour values as a change, and 'none' as back to neutral", () => {
+    const base = { exposure: 0, contrast: 1, saturation: 1, temperature: 6500, lut: "" };
+    expect(isDefaultColor(base)).toBe(true);
+    expect(isDefaultColor({ ...base, vignette: 0.3 })).toBe(false);
+    expect(isDefaultColor({ ...base, ...LOOKS.find((l) => l.id === "warm")!.color })).toBe(false);
+    expect(isDefaultColor({ ...base, vignette: 0.3, ...LOOKS.find((l) => l.id === "none")!.color })).toBe(true);
   });
 });

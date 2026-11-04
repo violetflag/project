@@ -408,6 +408,101 @@ pub fn equirect_stills(ffmpeg: &Path, info: &MediaInfo, lens: &Lens, times: &[f6
     Ok(outs)
 }
 
+/// How far recording `b` lags `a`, from their loudness over time (50 values a second, `waveform`):
+/// seconds of `a` at which `b` starts (negative: `b` began first), and how clearly they match (0–1).
+pub fn sync_offset(a: &[u8], b: &[u8]) -> (f64, f64) {
+    const RATE: f64 = 50.0;
+    const COARSE: usize = 5; // 10 values a second for the first look
+    let small = |w: &[u8]| -> Vec<f32> { w.chunks(COARSE).map(|c| c.iter().map(|x| *x as f32).sum::<f32>() / c.len() as f32).collect() };
+    let (sa, sb) = (small(a), small(b));
+    if sa.len() < 20 || sb.len() < 20 {
+        return (0.0, 0.0);
+    }
+    // Correlation of the overlap at a shift, each side with its own mean removed.
+    let corr = |x: &[f32], y: &[f32], lag: isize, min: usize| -> Option<f64> {
+        let (i0, j0) = if lag >= 0 { (lag as usize, 0) } else { (0, (-lag) as usize) };
+        if i0 >= x.len() || j0 >= y.len() {
+            return None;
+        }
+        let n = (x.len() - i0).min(y.len() - j0);
+        if n < min {
+            return None;
+        }
+        let (p, q) = (&x[i0..i0 + n], &y[j0..j0 + n]);
+        let (mp, mq) = (p.iter().sum::<f32>() / n as f32, q.iter().sum::<f32>() / n as f32);
+        let (mut s, mut sp, mut sq) = (0f64, 0f64, 0f64);
+        for k in 0..n {
+            let (u, v) = ((p[k] - mp) as f64, (q[k] - mq) as f64);
+            s += u * v;
+            sp += u * u;
+            sq += v * v;
+        }
+        (sp > 1.0 && sq > 1.0).then(|| s / (sp * sq).sqrt())
+    };
+    // The overlap must be long enough to mean something: 10 s or a third of the shorter one.
+    let min = (sa.len().min(sb.len()) / 3).max(100).min(sa.len().min(sb.len()));
+    let mut scores: Vec<(isize, f64)> = Vec::new();
+    for lag in -(sb.len() as isize) + 1..sa.len() as isize {
+        if let Some(c) = corr(&sa, &sb, lag, min) {
+            scores.push((lag, c));
+        }
+    }
+    let Some(&(best, top)) = scores.iter().max_by(|x, y| x.1.total_cmp(&y.1)) else { return (0.0, 0.0) };
+    // Fine look around the best shift at the full 50 values a second.
+    let centre = best * COARSE as isize;
+    let (xa, xb): (Vec<f32>, Vec<f32>) = (a.iter().map(|v| *v as f32).collect(), b.iter().map(|v| *v as f32).collect());
+    let mut fine = (centre, -1.0);
+    for lag in centre - 2 * COARSE as isize..=centre + 2 * COARSE as isize {
+        if let Some(c) = corr(&xa, &xb, lag, min) {
+            if c > fine.1 {
+                fine = (lag, c);
+            }
+        }
+    }
+    // Clear when the best match stands out from the matches elsewhere.
+    let far: Vec<f64> = scores.iter().filter(|(l, _)| (l - best).abs() > 20).map(|x| x.1).collect();
+    let rest = far.iter().cloned().fold(f64::MIN, f64::max).max(0.0);
+    let clear = ((top - rest) * 2.5).clamp(0.0, 1.0) * top.clamp(0.0, 1.0).sqrt();
+    (fine.0 as f64 / RATE, (clear * 100.0).round() / 100.0)
+}
+
+/// A suggested colour correction from sample pictures (BGR bytes): exposure in stops, contrast,
+/// and white balance as a colour temperature, deliberately gentle.
+pub fn auto_color(pics: &[(Vec<u8>, usize, usize)]) -> (f64, f64, f64) {
+    let mut lum: Vec<u8> = Vec::new();
+    let (mut r, mut b, mut n) = (0f64, 0f64, 0f64);
+    for (bgr, w, h) in pics {
+        for px in bgr[..(w * h * 3).min(bgr.len())].chunks_exact(3) {
+            let (pb, pg, pr) = (px[0] as f64, px[1] as f64, px[2] as f64);
+            let y = 0.114 * pb + 0.587 * pg + 0.299 * pr;
+            lum.push(y as u8);
+            // Grey-world on the mid tones only: skies and shadows should not decide.
+            if (40.0..215.0).contains(&y) {
+                r += pr;
+                b += pb;
+                n += 1.0;
+            }
+        }
+    }
+    if lum.is_empty() {
+        return (0.0, 1.0, 6500.0);
+    }
+    lum.sort_unstable();
+    let pct = |p: f64| lum[((lum.len() - 1) as f64 * p) as usize] as f64 / 255.0;
+    let (lo, mid, hi) = (pct(0.02), pct(0.5).clamp(0.05, 0.95), pct(0.98));
+    // The export's exposure is a gamma of 2^(0.75·stops): bring the middle towards 0.45.
+    let exposure = ((0.45f64.ln() / mid.ln()).log2() / 0.75).clamp(-1.0, 1.0) * 0.8;
+    let range = (hi - lo).max(0.2);
+    let contrast = if range < 0.75 { (0.8 / range).min(1.25) } else { 1.0 };
+    let temperature = if n > 100.0 && b > 1.0 {
+        let warm = (r / b).clamp(0.6, 1.6);
+        (6500.0 * warm.powf(0.9)).clamp(4500.0, 9000.0)
+    } else {
+        6500.0
+    };
+    ((exposure * 100.0).round() / 100.0, (contrast * 100.0).round() / 100.0, (temperature / 50.0).round() * 50.0)
+}
+
 /// One image with tiles every `every` seconds (cols × rows), with the time burned into each tile.
 pub fn contact_sheet(ffmpeg: &Path, path: &str, start: f64, every: f64, cols: u32, rows: u32, tile_w: u32) -> Result<String, String> {
     let n = cols * rows;
@@ -449,6 +544,42 @@ mod tests {
             let f = v360_flat(&l, &View { yaw, pitch: 120.0, roll: 365.0, hfov: 400.0 }, 1280, 720);
             assert!(f.contains(want) && f.contains("pitch=89.000") && f.contains("roll=5.000") && f.contains("h_fov=160.000"), "{f}");
         }
+    }
+
+    #[test]
+    fn finds_how_far_one_recording_lags_another() {
+        // A made-up loudness track; the second recording starts 12.34 s into the first.
+        let mut seed = 12345u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 24) as u8
+        };
+        let mut talk = Vec::new();
+        while talk.len() < 50 * 120 {
+            let (v, len) = (rnd(), 5 + (rnd() as usize) % 40);
+            talk.extend(std::iter::repeat(v).take(len));
+        }
+        let b: Vec<u8> = talk[617..617 + 50 * 60].to_vec();
+        let (off, clear) = sync_offset(&talk, &b);
+        assert!((off - 12.34).abs() < 0.03, "{off}");
+        assert!(clear > 0.5, "{clear}");
+        let (back, _) = sync_offset(&b, &talk);
+        assert!((back + 12.34).abs() < 0.03, "{back}");
+        // Two unrelated tracks do not claim a clear match.
+        let other: Vec<u8> = (0..50 * 60).map(|_| rnd()).collect();
+        assert!(sync_offset(&talk, &other).1 < 0.4);
+    }
+
+    #[test]
+    fn auto_colour_is_gentle_and_goes_the_right_way() {
+        let pic = |b: u8, g: u8, r: u8| (std::iter::repeat([b, g, r]).take(100 * 100).flatten().collect::<Vec<u8>>(), 100, 100);
+        let (e, _, t) = auto_color(&[pic(115, 115, 115)]);
+        assert!(e.abs() < 0.05 && (t - 6500.0).abs() < 1.0, "{e} {t}");
+        assert!(auto_color(&[pic(50, 50, 50)]).0 > 0.3);
+        assert!(auto_color(&[pic(220, 220, 220)]).0 < -0.3);
+        // A warm picture is cooled: higher colour temperature for the filter.
+        assert!(auto_color(&[pic(90, 120, 150)]).2 > 7500.0);
+        assert!(auto_color(&[pic(150, 120, 90)]).2 < 5500.0);
     }
 
     #[test]

@@ -6,6 +6,7 @@ import {
   clipDur, cutSource, DEFAULT_COLOR, DEFAULT_TRANSFORM, deleteClip, detachAudio, draftDuration, draftWords, fmtTC, insertClips, is360, isDefaultColor, isDefaultTransform, isFiller, isGap, moveClip,
   newClip, newDraft, newGap, newOverlay, r3, removeFillers, removeItem, removeRange, removeSilences, setTransition, splitAt, speechFromWave, speechFromWords, starts, transcriptText, uid, updateClip, updateOverlay, viewAt,
   fitMusic, movePreset, overlays,
+  LOOKS, multicamDraft,
   type Pacing, mergeScenes, searchScenes,
 } from "./edit";
 import { exportAndWait } from "./exporter";
@@ -13,7 +14,7 @@ import { CAPTION_PRESETS, TEXT_KINDS } from "./graphics";
 import { cleanKeys, frameGroup, frameSubject, normView, sampleKeys, snapRanges, type Mark, type Subject } from "./framing";
 import { PLAYBOOK_360 } from "./playbook";
 import { compactBudget, ctxLimit, estTokens, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
-import { activeChat, asset, assetMap, editDraft, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
+import { activeChat, asset, assetMap, editDraft, syncAssets, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
 import type { AnimKey, Asset, ChatBlock, ChatMsg, ChatSession, Draft, TextItem, View, ViewKey, VolKey } from "./types";
 
 export const MODELS = [
@@ -121,6 +122,22 @@ export const TOOLS = [
   {
     name: "set_captions", description: "받아쓰기로 만든 자막을 켜고 끄거나 모양을 바꿉니다.",
     input_schema: { type: "object", properties: { draft_id: draftId, enabled: { type: "boolean" }, style: { type: "string", enum: ["basic", "yellow", "box", "karaoke", "pop", "soft"], description: "자막 모양: 기본, 노란 글자, 검은 상자, 말하는 단어 강조, 강조+톡 튀는 단어(쇼츠), 얇고 차분하게" }, size: { ...num, description: "화면 높이 대비 % (기본 6)" }, position: { type: "string", enum: ["bottom", "middle", "top"] }, max_chars: num }, required: ["enabled"] },
+  },
+  {
+    name: "sync_media", description: "같은 순간을 찍은 영상들(휴대폰, 360 카메라, 마이크)을 소리로 맞춥니다. 첫 번째가 기준입니다. 각 미디어가 기준보다 몇 초 뒤에 시작했는지와 확실한 정도(0~1)를 돌려주고 저장합니다.",
+    input_schema: { type: "object", properties: { asset_ids: { type: "array", items: str } }, required: ["asset_ids"] },
+  },
+  {
+    name: "multicam_draft", description: "sync_media로 맞춘 영상들로 멀티캠 편집본을 만듭니다. cuts: [{at(기준 시각 초), asset_id}] 순서대로 그 시각부터 해당 카메라 화면으로 바꿉니다. 소리는 sound_asset_id 하나를 끝까지 씁니다(A1). end는 끝나는 기준 시각.",
+    input_schema: { type: "object", properties: { name: str, sound_asset_id: str, end: num, aspect: str, cuts: { type: "array", items: { type: "object", properties: { at: num, asset_id: str }, required: ["at", "asset_id"] } } }, required: ["sound_asset_id", "end", "cuts"] },
+  },
+  {
+    name: "auto_color", description: "클립의 노출·대비·화이트밸런스를 자동으로 맞춥니다(클립마다 다섯 장면을 보고 계산, 부드럽게). clip_ids가 없으면 편집본 전체. 휴대폰과 360 영상의 색을 비슷하게 맞출 때도 좋습니다.",
+    input_schema: { type: "object", properties: { draft_id: draftId, clip_ids: { type: "array", items: str } } },
+  },
+  {
+    name: "set_look", description: "클립에 색 룩을 입힙니다: warm(따뜻한 필름), cool(시원하게), vivid(생생하게), soft(부드럽게), bw(흑백), none(원래대로). 세부 값은 color로 직접 줄 수 있습니다: exposure, contrast, saturation, temperature, tint, highlights, shadows, vibrance, vignette.",
+    input_schema: { type: "object", properties: { draft_id: draftId, clip_ids: { type: "array", items: str }, look: { type: "string", enum: ["warm", "cool", "vivid", "soft", "bw", "none"] }, color: { type: "object", properties: { exposure: num, contrast: num, saturation: num, temperature: num, tint: num, highlights: num, shadows: num, vibrance: num, vignette: num } } } },
   },
   {
     name: "set_motion", description: "클립이나 V2/V3 그림에 움직임을 넣습니다. preset: zoom_in(천천히 확대), zoom_out, pan_right, pan_left, none(끄기) — 사진에 생동감을 줄 때 좋습니다. 직접 하려면 keys: [{t(원본 초), scale, x, y(화면 비율 이동), opacity}]. 키 사이는 부드럽게 이어집니다.",
@@ -596,6 +613,56 @@ async function run(name: string, inp: any): Promise<Out> {
       editDraft("AI: 마커", (d) => ({ ...d, markers: [...d.markers, ...(inp.markers as any[]).map((m) => ({ id: uid(), t: Number(m.time), label: String(m.label), color: m.color || "#FFB020" }))] }), d0.id);
       return `마커 ${inp.markers.length}개를 달았습니다.`;
     }
+    case "sync_media": {
+      const ids: string[] = inp.asset_ids ?? [];
+      if (ids.length < 2) throw new Error("둘 이상 필요합니다");
+      const out: string[] = [];
+      for (const id of ids.slice(1)) {
+        const r = await syncAssets(ids[0], id);
+        out.push(`${getAsset(id).info.name}: 기준 ${r.offset >= 0 ? "+" : ""}${r.offset.toFixed(2)}초에 시작 (확실함 ${r.clear})`);
+      }
+      return out.join("\n");
+    }
+    case "multicam_draft": {
+      const sound = getAsset(inp.sound_asset_id);
+      const cuts = (inp.cuts ?? []).map((c: any) => ({ at: Number(c.at), asset: getAsset(c.asset_id) }));
+      if (!cuts.length) throw new Error("cuts가 비었습니다");
+      const d = multicamDraft(String(inp.name || "멀티캠"), sound, cuts, (a) => a.syncOffset ?? 0, Number(inp.end), inp.aspect || "16:9");
+      if (!d.clips.length) throw new Error("겹치는 구간이 없습니다 (sync_media를 먼저 하세요)");
+      setDrafts(`AI: 멀티캠 "${d.name}"`, [...p.drafts, d], d.id);
+      set({ playhead: 0, sourceId: null });
+      return `만들었습니다.\n` + draftInfo(d);
+    }
+    case "auto_color": {
+      const d0 = getDraft(inp.draft_id);
+      const clips = d0.clips.filter((c) => !isGap(c) && (!inp.clip_ids?.length || inp.clip_ids.includes(c.id)));
+      const out: string[] = [];
+      let d = d0;
+      for (const c of clips) {
+        const a = getAsset(c.asset);
+        if (a.info.kind === "audio") continue;
+        const r360 = is360(a);
+        const lens = r360 ? { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 } : undefined;
+        const r = await api.autoColor(a.info.path, c.start, c.end, lens, r360 ? viewAt(c.view, c.viewKeys, (c.start + c.end) / 2) : undefined);
+        d = updateClip(d, c.id, { color: { ...DEFAULT_COLOR, ...c.color, ...r } });
+        out.push(`${c.id}: 노출 ${r.exposure}, 대비 ${r.contrast}, 색온도 ${r.temperature}K`);
+      }
+      editDraft("AI: 자동 색 보정", () => d, d0.id, false);
+      return out.join("\n") || "맞출 클립이 없습니다.";
+    }
+    case "set_look": {
+      const d0 = getDraft(inp.draft_id);
+      const look = LOOKS.find((l) => l.id === inp.look)?.color ?? {};
+      let d = d0;
+      let n = 0;
+      for (const c of d0.clips) {
+        if (isGap(c) || (inp.clip_ids?.length && !inp.clip_ids.includes(c.id))) continue;
+        d = updateClip(d, c.id, { color: { ...DEFAULT_COLOR, ...c.color, ...look, ...(inp.color ?? {}) } });
+        n++;
+      }
+      editDraft("AI: 색", () => d, d0.id, false);
+      return `클립 ${n}개의 색을 바꿨습니다.`;
+    }
     case "set_motion": {
       const d0 = getDraft(inp.draft_id);
       const c = d0.clips.find((x) => x.id === inp.item_id);
@@ -883,7 +950,7 @@ export const TOOL_LABEL: Record<string, string> = {
   get_project_overview: "프로젝트 살펴보는 중", get_transcript: "대본 읽는 중", search_transcript: "대본 찾는 중", view_frames: "장면 보는 중",
   contact_sheet: "영상 훑어보는 중", create_draft: "편집본 만드는 중", get_draft: "편집본 확인 중", edit_draft: "편집하는 중",
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
-  set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
+  sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
 
