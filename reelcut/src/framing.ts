@@ -271,8 +271,11 @@ export function frameGroup(subjects: Subject[], from: number, to: number, o: Gro
     .filter((s) => s.ms.length);
   if (!people.length || to <= from) return { keys: [], report: { subjects: [], tooFar: [] } };
   const step = Math.max(0.02, o.step ?? 0.1);
-  const base = o.hfov ?? 90, aspect = o.aspect ?? 16 / 9, headroom = Math.max(0, Math.min(0.5, o.headroom ?? 0.33));
-  const reach = o.reach ?? 3, margin = o.margin ?? 25, maxF = Math.max(base, o.maxHfov ?? 130);
+  const aspect = o.aspect ?? 16 / 9, headroom = Math.max(0, Math.min(0.5, o.headroom ?? 0.33));
+  // A tall frame sees far more up and down than across: wide angles look straight down on people.
+  const tall = aspect < 1;
+  const base = tall ? Math.min(o.hfov ?? 75, 85) : o.hfov ?? 90;
+  const reach = o.reach ?? 3, margin = o.margin ?? 25, maxF = Math.max(base, o.maxHfov ?? (tall ? 105 : 130));
   // Each person's head path, with how far each moment is from their nearest mark.
   const paths = people.map((p) => {
     const t = p.ms.map((m) => m.t), a = p.ms.map(markAngles);
@@ -331,7 +334,8 @@ export function frameGroup(subjects: Subject[], from: number, to: number, o: Gro
     const lowest = Math.max(...on.map((x) => project(x.yaw, x.pitch, view, aspect)?.v ?? 1));
     return lowest > 0.7 ? (top + low) / 2 : aim;
   });
-  const sp = gaussian(ts, pt, sg);
+  // People are never so far overhead or underfoot that the view should point straight up or down.
+  const sp = gaussian(ts, pt, sg).map((p) => Math.max(-MAX_FOLLOW_PITCH, Math.min(MAX_FOLLOW_PITCH, p)));
   const keys = ts.map((tt, i) => ({ t: r3(tt), view: normView({ yaw: sy[i], pitch: sp[i], roll: 0, hfov: fov[i] }) }));
   // How well everyone was kept in view, and where they could not all fit.
   const counts = people.map(() => ({ inFrame: 0, counted: 0 }));
@@ -355,6 +359,86 @@ export function frameGroup(subjects: Subject[], from: number, to: number, o: Gro
 }
 
 // ---------------------------------------------------------------- snapping cuts into silences
+
+const MAX_FOLLOW_PITCH = 62;
+
+/** Head marks without those near the poles of the panorama or that jump faster than a person moves. */
+export function saneMarks(marks: Mark[]): Mark[] {
+  const out: Mark[] = [];
+  for (const m of [...marks].sort((a, b) => a.t - b.t)) {
+    if (m.y < 50 || m.y > 440) continue;
+    const p = out[out.length - 1];
+    if (p) {
+      const dt = Math.max(0.1, m.t - p.t);
+      const dx = Math.abs(((m.x - p.x + 480) % 960 + 960) % 960 - 480);
+      if (dx / dt > 320 || Math.abs(m.y - p.y) / dt > 200) continue;
+    }
+    out.push(m);
+  }
+  return out;
+}
+
+/** About two marks a second, enough to say where someone was. */
+export function thinMarks(marks: Mark[]): { t: number; x: number; y: number }[] {
+  const out: { t: number; x: number; y: number }[] = [];
+  for (const m of marks) if (!out.length || m.t - out[out.length - 1].t >= 0.45) out.push({ t: r3(m.t), x: Math.round(m.x), y: Math.round(m.y) });
+  return out;
+}
+
+export type SubjectLook = { t: number; missing: string[]; others: number; bigOther: boolean; ok: boolean };
+
+/** A face or head this close on the panorama (960 wide) is the same person. */
+const SAME_HEAD = 48;
+/** Someone else's face wider than this share of the frame is taking the picture over. */
+const BIG_FACE = 0.16;
+
+/** At each look: who of the followed people is out of frame, and whether someone else fills it. */
+export function subjectLooks(subjects: { name: string; marks: { t: number; x: number; y: number }[] }[], seen: { t: number; faces: { x: number; y: number; w: number }[] }[], viewAt: (t: number) => View, aspect: number, reach = 2): SubjectLook[] {
+  const seenAt = (m: { x: number; y: number }, x: number, y: number) => Math.hypot(Math.abs(((m.x - x + 480) % 960 + 960) % 960 - 480), m.y - y);
+  return seen.map(({ t, faces }) => {
+    const view = viewAt(t);
+    const inFrame = (x: number, y: number) => { const a = markAngles({ t, x, y }), p = project(a.yaw, a.pitch, view, aspect); return !!p && Math.abs(p.u) <= 1 && Math.abs(p.v) <= 1; };
+    const heads = subjects.map((s) => {
+      const near = s.marks.reduce<{ t: number; x: number; y: number } | null>((b, m) => (!b || Math.abs(m.t - t) < Math.abs(b.t - t) ? m : b), null);
+      return { name: s.name, at: near && Math.abs(near.t - t) <= reach ? near : null };
+    });
+    const missing = heads.filter((h) => !h.at || !inFrame(h.at.x, h.at.y)).map((h) => h.name);
+    const others = faces.filter((f) => inFrame(f.x + f.w / 2, f.y + f.w / 2) && !heads.some((h) => h.at && seenAt(h.at, f.x + f.w / 2, f.y + f.w / 2) <= SAME_HEAD));
+    const bigOther = others.some((f) => (f.w * 0.375) / view.hfov > BIG_FACE);
+    return { t, missing, others: others.length, bigOther, ok: !missing.length && !bigOther };
+  });
+}
+
+/** Puts what the AI saw in the pictures over the automatic verdict of the nearest look. */
+export function applyVerdicts(looks: SubjectLook[], notOk: number[], ok: number[]): SubjectLook[] {
+  const nearest = (t: number) => looks.reduce((b, l, i) => (Math.abs(l.t - t) < Math.abs(looks[b].t - t) ? i : b), 0);
+  const out = looks.map((l) => ({ ...l }));
+  if (!out.length) return out;
+  for (const t of ok) out[nearest(t)].ok = true;
+  for (const t of notOk) out[nearest(t)].ok = false;
+  return out;
+}
+
+export const percentOk = (looks: { ok: boolean }[]) => (looks.length ? Math.round((looks.filter((l) => l.ok).length / looks.length) * 100) : 0);
+
+/** The source-time stretches of a clip whose looks are not all right; a single stray look at a clip's edge counts whole. */
+export function badSpans(looks: { t: number; ok: boolean }[], step: number, from: number, to: number): [number, number][] {
+  const out: [number, number][] = [];
+  for (const l of looks) {
+    if (l.ok) continue;
+    const a = Math.max(from, l.t - step / 2), b = Math.min(to, l.t + step / 2);
+    const last = out[out.length - 1];
+    if (last && a - last[1] < 0.01) last[1] = r3(b);
+    else out.push([r3(a), r3(b)]);
+  }
+  return out;
+}
+
+export function lookSummary(looks: SubjectLook[]): string {
+  const bad = looks.filter((l) => !l.ok);
+  const lines = bad.slice(0, 12).map((l) => `${r3(l.t)}초: ${l.missing.length ? `${l.missing.join(", ")} 없음` : ""}${l.bigOther ? " 다른 사람이 크게 나옴" : ""}`.trim());
+  return `따라갈 사람이 모두 화면 안에 있는 비율: ${percentOk(looks)}% (${looks.length}곳, 자동).${lines.length ? ` 문제 있는 곳:\n${lines.join("\n")}` : ""}`;
+}
 
 export type Gap = [number, number];
 

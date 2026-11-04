@@ -99,6 +99,8 @@ export type Clip = {
   /** Reframe for 360 sources. */
   view?: View;
   viewKeys?: ViewKey[];
+  /** People this clip follows, with their head positions (source time, panorama sheet). */
+  subjects?: { name: string; marks: { t: number; x: number; y: number }[] }[];
   fit?: "fit" | "fill";
   fadeIn?: number;
   fadeOut?: number;

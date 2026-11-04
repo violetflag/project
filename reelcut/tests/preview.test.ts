@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
 import { captionLines, draftCaptions, keyWordIndex, moveWordPrev, setHidden, setLineText, spokenIndex, toAss, toSrt, wordKey } from "../src/captions";
-import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, mergeSkills, parseSkillCommand, runChainSteps, skillFromText, skillToText, upsertSkill } from "../src/skills";
+import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, laterStepOf, mergeSkills, parseSkillCommand, runChainSteps, skillFromText, skillToText, upsertSkill } from "../src/skills";
+import { applyVerdicts, badSpans, frameGroup, percentOk, saneMarks, subjectLooks, thinMarks } from "../src/framing";
 import { TOOLS } from "../src/agent";
 import { NOT_IN_SCRIPT, SDK, transpileScript } from "../src/script";
 import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
@@ -294,7 +295,7 @@ describe("skills and gaze", () => {
     const words = new Set<string>();
     for (const k of BUILTIN_SKILLS) for (const m of k.body.matchAll(/\b([a-z]+_[a-z_]+)\b/g)) words.add(m[1]);
     // Values and guide names that look like tool names.
-    const allowed = new Set([...BUILTIN_SKILLS.map((k) => k.name), "jump_cut", "break_by", "max_chars", "cut_source", "add_music", "add_overlay", "shrink_balanced", "shrink_small", "shrink_archive", "shrink_lecture", "break_before", "join_next", "move_word_prev", "fix_word", "set_line", "zoom_in", "zoom_out", "pan_left", "pan_right", "remove_range", "head_marks", "draft_id", "asset_id", "run_script", "set_view_keys"]);
+    const allowed = new Set([...BUILTIN_SKILLS.map((k) => k.name), "jump_cut", "break_by", "max_chars", "cut_source", "add_music", "add_overlay", "shrink_balanced", "shrink_small", "shrink_archive", "shrink_lecture", "break_before", "join_next", "move_word_prev", "fix_word", "set_line", "zoom_in", "zoom_out", "pan_left", "pan_right", "remove_range", "head_marks", "draft_id", "asset_id", "run_script", "set_view_keys", "not_ok_times", "ok_times"]);
     const unknown = [...words].filter((w) => !known.has(w) && !allowed.has(w));
     expect(unknown).toEqual([]);
     expect(BUILTIN_SKILLS).toHaveLength(33);
@@ -384,7 +385,7 @@ describe("merged skills", () => {
     const seen: string[] = [], shown: string[][] = [];
     const r = await runChainSteps(["가", "나", "다"], async (i, prev) => { seen.push(`${i}:${prev}`); return { ok: true, summary: `결과${i}` }; }, (s) => shown.push(s.map((x) => x.state)));
     expect(r.ok).toBe(true);
-    expect(seen).toEqual(["0:", "1:결과0", "2:결과1"]);
+    expect(seen).toEqual(["0:", "1:[1. 가] 결과0", "2:[1. 가] 결과0\n[2. 나] 결과1"]);
     expect(shown[0]).toEqual(["run", "wait", "wait"]);
     expect(shown[shown.length - 1]).toEqual(["done", "done", "done"]);
   });
@@ -400,12 +401,83 @@ describe("merged skills", () => {
     const thrown = await runChainSteps(["가", "나"], async () => { throw new Error("끊김"); }, () => {});
     expect(thrown).toMatchObject({ ok: false, failed: 0 });
   });
-  it("tells the AI to do only this step, from the last result", () => {
-    const n = chainStepNote("t", ["찾기", "만들기"], 0, "find", "쌍둥이", "");
+  it("gives the step only its own guide and the results so far", () => {
+    const n = chainStepNote("t", ["찾기", "만들기"], 0, a, "쌍둥이", "");
     expect(n).toContain("1/2단계");
-    expect(n).toContain('"find"');
-    expect(n).toContain("미리 하지 마세요");
-    expect(chainStepNote("t", ["찾기", "만들기"], 1, "make", "", "편집본 x")).toContain("편집본 x");
+    expect(n).toContain("찾는다");
+    expect(n).not.toContain("만든다");
+    expect(n).toContain("지금 하지 마세요");
+    const later = chainStepNote("t", ["찾기", "만들기"], 1, b, "", "[1. 찾기] 됨");
+    expect(later).toContain("[1. 찾기] 됨");
+    expect(later).toContain("마지막 단계");
+  });
+  it("passes a list on to the next step as it is", async () => {
+    const seen: string[] = [];
+    await runChainSteps(["가", "나"], async (i, prev) => { seen.push(prev); return { ok: true, summary: "됨", items: i ? undefined : [{ from: 284, to: 299 }] }; }, () => {});
+    expect(seen[1]).toContain('[{"from":284,"to":299}]');
+  });
+  it("holds back tools that belong to a later step", () => {
+    const find = { name: "find", description: "", body: "scan_gaze와 add_markers를 씁니다" };
+    const make = { name: "make", description: "", body: "create_draft로 만들고 add_markers, frame_subject" };
+    const later = [{ label: "만들기", skill: make }];
+    expect(laterStepOf("create_draft", find, later)).toBe("만들기");
+    expect(laterStepOf("frame_subject", find, later)).toBe("만들기");
+    // Named by this step's own guide, or only reading: free to use.
+    expect(laterStepOf("add_markers", find, later)).toBeNull();
+    expect(laterStepOf("view_frames", find, later)).toBeNull();
+    expect(laterStepOf("get_draft", find, [{ label: "x", skill: { ...make, body: "get_draft" } }])).toBeNull();
+    // Not any later step's job either.
+    expect(laterStepOf("set_look", find, later)).toBeNull();
+    expect(laterStepOf("create_draft", make, [])).toBeNull();
+  });
+});
+
+describe("who is in frame", () => {
+  const view = (yaw: number, hfov = 90) => ({ yaw, pitch: 0, roll: 0, hfov });
+  // x 480 is straight ahead; a yaw of 0 sees it.
+  const every = (x: number, to: number) => Array.from({ length: to / 2 + 1 }, (_, i) => ({ t: i * 2, x, y: 260 }));
+  const twins = [{ name: "첫째", marks: every(470, 10) }, { name: "둘째", marks: every(500, 4) }];
+  const at = (t: number, faces: { x: number; y: number; w: number }[] = []) => ({ t, faces });
+  it("sees both in frame, and a twin who has gone", () => {
+    const [a, b] = subjectLooks(twins, [at(1), at(9)], () => view(0), 9 / 16);
+    expect(a).toMatchObject({ missing: [], ok: true });
+    expect(b).toMatchObject({ missing: ["둘째"], ok: false });
+  });
+  it("sees a twin outside the frame when the view has turned away", () => {
+    const [a] = subjectLooks(twins, [at(1)], () => view(120), 9 / 16);
+    expect(a.missing).toEqual(["첫째", "둘째"]);
+  });
+  it("counts someone else's big face against the picture, but not a twin's or a small one", () => {
+    const big = { x: 400, y: 220, w: 40 }, small = { x: 420, y: 230, w: 8 }, twin = { x: 465, y: 255, w: 40 };
+    const [a, b, c] = subjectLooks(twins, [at(1, [big]), at(2, [small]), at(3, [twin])], () => view(0), 9 / 16);
+    expect(a).toMatchObject({ bigOther: true, ok: false, others: 1 });
+    expect(b).toMatchObject({ bigOther: false, ok: true, others: 1 });
+    expect(c).toMatchObject({ others: 0, ok: true });
+  });
+  it("lets what the AI saw overrule the automatic verdict", () => {
+    const looks = [{ t: 1, missing: [], others: 0, bigOther: false, ok: true }, { t: 2, missing: ["둘째"], others: 0, bigOther: false, ok: false }];
+    const r = applyVerdicts(looks, [1.2], [2.1]);
+    expect(r.map((l) => l.ok)).toEqual([false, true]);
+    expect(percentOk(r)).toBe(50);
+    expect(looks[0].ok).toBe(true);
+  });
+  it("joins bad looks into stretches inside the clip", () => {
+    const l = (t: number, ok: boolean) => ({ t, ok });
+    expect(badSpans([l(290, true), l(291, false), l(292, false), l(293, true), l(294, false)], 1, 290, 294.2)).toEqual([[290.5, 292.5], [293.5, 294.2]]);
+    expect(badSpans([l(1, true)], 1, 0, 2)).toEqual([]);
+  });
+  it("drops marks on the floor and jumps, and never aims straight down", () => {
+    const m = (t: number, x: number, y: number) => ({ t, x, y });
+    expect(saneMarks([m(0, 100, 300), m(1, 110, 470), m(2, 120, 310), m(2.2, 500, 310), m(3, 130, 320)]).map((x) => x.t)).toEqual([0, 2, 3]);
+    expect(saneMarks([m(0, 950, 300), m(1, 10, 300)])).toHaveLength(2);
+    const low = [{ name: "a", marks: [m(0, 480, 435), m(5, 480, 435)] }, { name: "b", marks: [m(0, 480, 435), m(5, 480, 435)] }];
+    const { keys } = frameGroup(low, 0, 5, { aspect: 9 / 16, hfov: 40 });
+    expect(Math.min(...keys.map((k) => k.view.pitch))).toBeGreaterThanOrEqual(-62);
+    expect(thinMarks([m(0, 1, 2), m(0.2, 1, 2), m(0.5, 1, 2)]).map((x) => x.t)).toEqual([0, 0.5]);
+    // In a tall frame an asked-for wide angle is held back; a wide frame keeps it.
+    const pair = [{ name: "a", marks: [m(0, 480, 300), m(5, 480, 300)] }, { name: "b", marks: [m(0, 490, 300), m(5, 490, 300)] }];
+    expect(Math.max(...frameGroup(pair, 0, 5, { aspect: 9 / 16, hfov: 110 }).keys.map((k) => k.view.hfov))).toBeLessThanOrEqual(85);
+    expect(frameGroup(pair, 0, 5, { aspect: 16 / 9, hfov: 110 }).keys[0].view.hfov).toBeCloseTo(110);
   });
 });
 

@@ -15,14 +15,14 @@ import {
 } from "./edit";
 import { exportAndWait } from "./exporter";
 import { CAPTION_PRESETS, TEXT_KINDS } from "./graphics";
-import { cleanKeys, frameGroup, frameSubject, normView, sampleKeys, snapRanges, type Mark, type Subject } from "./framing";
-import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSkillName, findSkill, isChain, mergeSkills, NOT_IN_BATCH, parseSkillCommand, runChainSteps, skillCatalog, stepLabel, upsertSkill, type Step } from "./skills";
+import { applyVerdicts, badSpans, cleanKeys, frameGroup, frameSubject, lookSummary, normView, percentOk, sampleKeys, saneMarks, snapRanges, subjectLooks, thinMarks, type Mark, type Subject, type SubjectLook } from "./framing";
+import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSkillName, findSkill, isChain, laterStepOf, mergeSkills, NOT_IN_BATCH, parseSkillCommand, runChainSteps, skillCatalog, stepLabel, upsertSkill, type Step, type StepResult } from "./skills";
 import { compactBudget, ctxLimit, estTokens, fmtK, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
 import { activeChat, asset, assetMap, editDraft, saveSkills, syncAssets, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
 import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
 import { runScript, stopScript } from "./script";
 import { captionLines, draftCaptions, joinNext, moveWordPrev, setBreak, setHidden, setLineText, wordKey } from "./captions";
-import type { AnimKey, Asset, ChatBlock, ChoiceCard, ChatMsg, ChatSession, Draft, Skill, TextItem, View, ViewKey, VolKey } from "./types";
+import type { AnimKey, Asset, ChatBlock, Clip, ChoiceCard, ChatMsg, ChatSession, Draft, Skill, TextItem, View, ViewKey, VolKey } from "./types";
 
 export const MODELS = [
   { id: "claude-opus-5-5", label: "Claude Opus 5.5" },
@@ -45,6 +45,7 @@ const SYSTEM = `당신은 Reelcut의 영상 편집 에이전트입니다. Reelcu
 - DJI Osmo 360 파일(.osv, .lrf/.lrv)은 360 영상입니다. 360 클립은 view로 어느 방향을 볼지 정합니다 (yaw: 좌우 -180~180, pitch: 위아래 -90~90, hfov: 화각 20~160, 기본 100).
 - 360 클립은 시점을 한 개(view)만 두지 않고 시점 키프레임(view_keys: 원본 시간 t마다 yaw/pitch/roll/hfov)으로 움직일 수 있습니다. 키 사이는 부드럽게 이어집니다(과하게 튀지 않는 곡선). 사람을 따라가는 화면은 frame_subject로 0.1초 간격 키프레임을 만드세요. yaw·roll은 범위를 벗어나도 앱이 -180~180으로 맞춥니다.
 - 360 영상을 자동 편집해 달라는 요청이면 먼저 get_playbook으로 작업 순서(360 자동편집)를 읽고 따르세요.
+- 360 영상에서 사람을 찾을 때는 equirect_sheet로 사방을 보세요. view_frames는 한 방향만, contact_sheet는 어안으로 보여 주므로, 거기 없다고 영상에 없는 것이 아닙니다.
 - 시간 단위는 모두 초입니다. 원본 시간(source)과 편집본 타임라인 시간(timeline)을 구분하세요.
 
 ## 일하는 방법
@@ -206,8 +207,8 @@ export const TOOLS = [
     input_schema: { type: "object", properties: { name: str, request: str }, required: ["name"] },
   },
   {
-    name: "finish_step", description: "병합 스킬의 지금 단계를 끝내고 결과를 알립니다. ok는 해냈는지, summary는 다음 단계가 이어 쓸 내용(편집본 id, 시각 등)이나 못 한 이유입니다. 부른 뒤 차례를 끝내세요.",
-    input_schema: { type: "object", properties: { ok: { type: "boolean" }, summary: str }, required: ["ok", "summary"] },
+    name: "finish_step", description: "병합 스킬의 지금 단계를 끝내고 결과를 알립니다. ok는 해냈는지, summary는 결과나 못 한 이유입니다. 결과가 여러 개이면(장면 구간 등) items에 하나씩 넣습니다. 다음 단계에 그대로 넘어갑니다. 부른 뒤 차례를 끝내세요.",
+    input_schema: { type: "object", properties: { ok: { type: "boolean" }, summary: str, items: { type: "array", items: { type: "object" } } }, required: ["ok", "summary"] },
   },
   { name: "delete_skill", description: "사용자가 만든 스킬을 지웁니다.", input_schema: { type: "object", properties: { name: str }, required: ["name"] } },
   {
@@ -299,7 +300,11 @@ export const TOOLS = [
     },
   },
   {
-    name: "check_framing", description: "클립의 시점 키프레임으로 실제 잡히는 화면을 원본 시간 times에서 확인합니다(없으면 클립 안 고르게 6곳). 머리가 위 1/3 선 근처인지, 잘리지 않았는지 보세요. 여러 사람(쌍둥이 등)을 담는 클립이면 모든 머리가 화면 안에 함께 있어야 합니다. 얼굴이 화면 가장자리에 걸린 곳은 자동으로 찾아 알려 줍니다.",
+    name: "trim_to_subjects", description: "따라갈 사람이 모두 화면 안에 있지 않은 부분을 편집본에서 빼고, 모두 나오는 비율을 전과 후로 알려 줍니다. check_framing 사진을 보고 판단한 것을 넣으세요: not_ok_times는 빠졌거나 어른이 화면을 차지한 원본 시각, ok_times는 괜찮은 시각(자동 판단이 틀렸을 때). apply가 false면 비율만 알려 줍니다.",
+    input_schema: { type: "object", properties: { draft_id: draftId, clip_ids: { type: "array", items: str }, not_ok_times: { type: "array", items: num }, ok_times: { type: "array", items: num }, apply: { type: "boolean" } } },
+  },
+  {
+    name: "check_framing", description: "클립의 시점 키프레임으로 실제 잡히는 화면을 확인합니다. times를 안 주면 문제가 있는 곳과 클립 전체에서 고릅니다. 머리가 위 1/3 선 근처인지, 잘리지 않았는지 보세요. frame_subject의 subjects로 사람을 정한 클립이면 1초쯤마다 얼굴 인식과 추적으로 누가 화면 안에 있는지, 다른 사람이 크게 나오는지 재서 비율과 함께 알려 줍니다. 쌍둥이처럼 둘을 담을 때는 둘 다 화면에 있는지 사진으로 직접 확인하세요.",
     input_schema: { type: "object", properties: { draft_id: draftId, clip_id: str, times: { type: "array", items: num } }, required: ["clip_id"] },
   },
   {
@@ -471,6 +476,8 @@ function applyOps(d: Draft, ops: any[]): Draft {
 async function run(name: string, inp: any): Promise<Out> {
   const p = st.project;
   if (!p) throw new Error("열린 프로젝트가 없습니다");
+  const waitFor = stepNow && laterStepOf(name, stepNow.current, stepNow.later);
+  if (waitFor) throw new Error(`${name}은 다음 단계 "${waitFor}"의 일입니다. 지금은 쓸 수 없습니다. 이 단계의 결과를 finish_step으로 넘기세요.`);
   switch (name) {
     case "get_project_overview": return overview();
     case "get_transcript": {
@@ -563,7 +570,7 @@ async function run(name: string, inp: any): Promise<Out> {
     }
     case "finish_step": {
       if (!chainRunning) return "지금은 병합 스킬을 실행하는 중이 아닙니다.";
-      stepReport = { ok: inp.ok !== false, summary: String(inp.summary ?? "") };
+      stepReport = { ok: inp.ok !== false, summary: String(inp.summary ?? ""), items: Array.isArray(inp.items) ? inp.items : undefined };
       return "기록했습니다. 차례를 끝내세요.";
     }
     case "delete_skill": {
@@ -727,6 +734,9 @@ async function run(name: string, inp: any): Promise<Out> {
           note += `\n자동 추적을 못 해 표시만 썼습니다: ${e}`;
         }
       }
+      // A tracker that slid onto the floor or jumped away must not steer the view.
+      people = people.map((p) => ({ ...p, marks: saneMarks(p.marks) })).filter((p) => p.marks.length);
+      if (!people.length) throw new Error("쓸 만한 머리 위치가 남지 않았습니다. 표시를 다시 찍어 주세요");
       if (people.length > 1 || inp.track !== false) {
         const g = frameGroup(people, from, to, opts);
         keys = g.keys;
@@ -736,7 +746,8 @@ async function run(name: string, inp: any): Promise<Out> {
         keys = frameSubject(marks, from, to, opts);
       }
       if (!keys.length) throw new Error("키프레임을 만들 수 없습니다 (marks나 구간 확인)");
-      const d = updateClip(d0, c.id, { viewKeys: keys });
+      // Remembered so check_framing can tell who is in frame.
+      const d = updateClip(d0, c.id, { viewKeys: keys, ...(subjects.length ? { subjects: people.map((p) => ({ name: p.name, marks: thinMarks(p.marks) })) } : {}) });
       editDraft("AI: 사람 따라가기", () => d, d0.id);
       return `${c.id}에 시점 키프레임 ${keys.length}개를 넣었습니다 (원본 ${keys[0].t}–${keys[keys.length - 1].t}초, ${r3(inp.step ?? 0.1)}초 간격, 머리 위 여백 ${inp.headroom ?? 0.33}).${note} check_framing으로 확인하세요.`;
     }
@@ -749,24 +760,59 @@ async function run(name: string, inp: any): Promise<Out> {
       return `키프레임 ${ks.length}개 (${shown.length}개 표시) t | yaw | pitch | roll | hfov\n` + shown.map((k) => `${k.t} | ${k.view.yaw} | ${k.view.pitch} | ${k.view.roll} | ${k.view.hfov}`).join("\n");
     }
     case "check_framing": {
-      const c = getDraft(inp.draft_id).clips.find((x) => x.id === inp.clip_id);
+      const d = getDraft(inp.draft_id);
+      const c = d.clips.find((x) => x.id === inp.clip_id);
       if (!c) throw new Error(`클립 없음: ${inp.clip_id}`);
       const a = getAsset(c.asset);
       if (!is360(a)) throw new Error("360 영상 클립이 아닙니다");
-      const times: number[] = (inp.times?.length ? inp.times : Array.from({ length: 6 }, (_, i) => c.start + ((i + 0.5) * (c.end - c.start)) / 6)).slice(0, 8);
       const lens = { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 };
-      const out: ChatBlock[] = [{ type: "text", text: "머리가 화면 위에서 약 1/3 선에 있고 위·아래가 잘리지 않아야 합니다. 어긋나면 marks를 고쳐 frame_subject를 다시 하세요." }];
+      const looks = c.subjects?.length ? await lookAtClip(d, c) : [];
+      // The pictures show the worst moments first, then the rest of the clip evenly.
+      const evenly = Array.from({ length: 6 }, (_, i) => c.start + ((i + 0.5) * (c.end - c.start)) / 6);
+      const bad = looks.filter((l) => !l.ok).map((l) => l.t);
+      const picks: number[] = inp.times?.length ? inp.times : [...bad.filter((_, i) => i % Math.max(1, Math.ceil(bad.length / 4)) === 0).slice(0, 4), ...evenly];
+      const times = [...new Set(picks.map(r3))].sort((x, y) => x - y).slice(0, 8);
+      const head = "머리가 화면 위에서 약 1/3 선에 있고 위·아래가 잘리지 않아야 합니다. 어긋나면 marks를 고쳐 frame_subject를 다시 하세요.";
+      const out: ChatBlock[] = [{ type: "text", text: c.subjects?.length ? `${head}\n${lookSummary(looks)}\n자동 판단은 얼굴 인식과 추적 기준이라 틀릴 수 있습니다. 아래 사진을 직접 보고 누가 있는지 판단하세요. 따라갈 사람이 빠졌거나 다른 어른이 화면을 차지하면 표시를 고쳐 frame_subject를 다시 하고, 고칠 수 없으면 trim_to_subjects로 그 부분을 뺍니다.` : head }];
       const seen = await api.faceCheck(a.info.path, lens, times.map((t) => [t, viewAt(c.view, c.viewKeys, t)] as [number, View])).catch(() => []);
-      times.forEach((t, i) => void (seen[i] && (seen[i].t = t)));
       for (let i = 0; i < times.length; i++) {
         const t = times[i];
         const v = viewAt(c.view, c.viewKeys, t);
         const [b] = await api.frames(a.info.path, [t], 640, v, lens);
         const f = seen[i];
         const faces = f ? ` | 얼굴 ${f.faces}개${f.edges.length ? ` · 가장자리에 걸림: ${f.edges.join(", ")}` : ""}` : "";
-        out.push({ type: "text", text: `${r3(t)}초 | yaw ${v.yaw} pitch ${v.pitch} hfov ${v.hfov}${faces}` }, img(b));
+        const l = looks.length ? looks.reduce((x, y) => (Math.abs(y.t - t) < Math.abs(x.t - t) ? y : x)) : null;
+        const who = l ? ` | 자동: ${l.ok ? "모두 안" : `${l.missing.length ? `${l.missing.join(", ")} 없음` : ""}${l.bigOther ? " 다른 사람이 크게 나옴" : ""}`.trim()}` : "";
+        out.push({ type: "text", text: `${r3(t)}초 | yaw ${v.yaw} pitch ${v.pitch} hfov ${v.hfov}${faces}${who}` }, img(b));
       }
       return out;
+    }
+    case "trim_to_subjects": {
+      const d0 = getDraft(inp.draft_id);
+      const clips = d0.clips.filter((c) => c.subjects?.length && !isGap(c) && (!inp.clip_ids?.length || inp.clip_ids.includes(c.id)));
+      if (!clips.length) throw new Error("따라갈 사람을 정한 클립이 없습니다. frame_subject의 subjects를 먼저 하세요");
+      const notOk = (inp.not_ok_times ?? []).map(Number), yes = (inp.ok_times ?? []).map(Number);
+      const before: { ok: boolean }[] = [], after: { ok: boolean }[] = [];
+      const cuts: Record<string, [number, number][]> = {};
+      const lines: string[] = [];
+      for (const c of clips) {
+        const looks = applyVerdicts(await lookAtClip(d0, c), notOk, yes);
+        const step = looks.length > 1 ? looks[1].t - looks[0].t : 1;
+        const spans = badSpans(looks, step, c.start, c.end);
+        before.push(...looks);
+        const left = spans.reduce((n, [x, y]) => n - (y - x), c.end - c.start);
+        if (inp.apply !== false && spans.length && left >= 1) {
+          cuts[c.id] = spans;
+          after.push(...looks.filter((l) => !spans.some(([x, y]) => l.t >= x && l.t < y)));
+          lines.push(`${c.id}: 원본 ${spans.map(([x, y]) => `${r3(x)}–${r3(y)}`).join(", ")}초를 뺐습니다`);
+        } else {
+          after.push(...looks);
+          if (spans.length) lines.push(`${c.id}: 맞지 않는 구간 ${spans.map(([x, y]) => `${r3(x)}–${r3(y)}`).join(", ")}초${left < 1 ? " (빼면 거의 남지 않아 그대로 두었습니다)" : " (빼지 않았습니다)"}`);
+        }
+      }
+      if (Object.keys(cuts).length) editDraft("AI: 사람이 없는 부분 빼기", (x) => cutSource(x, cuts), d0.id);
+      const d = getDraft(d0.id);
+      return `따라갈 사람이 모두 화면 안에 있는 비율(살펴본 ${after.length}곳 기준, 자동 판단과 AI가 본 것을 합침): ${percentOk(before)}% → ${percentOk(after)}%. 길이 ${r3(draftDuration(d0))}초 → ${r3(draftDuration(d))}초.\n${lines.join("\n") || "뺀 곳이 없습니다."}`;
     }
     case "snap_cuts": {
       const d0 = getDraft(inp.draft_id);
@@ -1058,7 +1104,9 @@ export const stopAgent = () => {
 let nextNote = "";
 let turnNote = "";
 let chainRunning = false;
-let stepReport: { ok: boolean; summary: string } | null = null;
+let stepReport: StepResult | null = null;
+/** The step of a merged skill now running; tools belonging to later steps wait. */
+let stepNow: { current: Skill; later: { label: string; skill: Skill }[] } | null = null;
 let pendingChain: { skill: Skill; request: string } | null = null;
 
 /** Tokens the skills in force will add to the next request. */
@@ -1103,7 +1151,8 @@ export async function runChain(chain: Skill, request: string) {
     const end = await runChainSteps(labels, async (i, prev) => {
       stepReport = null;
       const head = `[${i + 1}/${labels.length}] ${labels[i]}`;
-      nextNote = chainStepNote(chain.name, labels, i, parts[i].skill.name, request, prev);
+      stepNow = { current: parts[i].skill, later: parts.slice(i + 1).map((p) => ({ label: stepLabel(p.step), skill: p.skill })) };
+      nextNote = chainStepNote(chain.name, labels, i, parts[i].skill, request, prev);
       await ask(head);
       if (stopFlag) return { ok: false, summary: "사용자가 멈췄습니다" };
       if (!stepReport) {
@@ -1116,8 +1165,25 @@ export async function runChain(chain: Skill, request: string) {
     toast(`${chain.name}: ${end.message}`);
   } finally {
     chainRunning = false;
+    stepNow = null;
     nextNote = "";
   }
+}
+
+/** What each moment of a clip shows, by the face detector on the panorama and the people's tracked heads. */
+const clipFaces = new Map<string, { t: number; faces: { x: number; y: number; w: number }[] }[]>();
+async function lookAtClip(d: Draft, c: Clip): Promise<SubjectLook[]> {
+  const a = getAsset(c.asset);
+  const step = Math.max(1, (c.end - c.start) / 60);
+  const key = `${a.id}:${r3(c.start)}:${r3(c.end)}:${step}`;
+  let seen = clipFaces.get(key);
+  if (!seen) {
+    const lens = { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 };
+    seen = await api.scanGaze(a.info.path, lens, c.start, c.end, step);
+    clipFaces.set(key, seen);
+  }
+  const [aw, ah] = d.aspect.split(":").map(Number);
+  return subjectLooks(c.subjects ?? [], seen, (t) => viewAt(c.view, c.viewKeys, t), aw / ah || 16 / 9);
 }
 
 function stateNote(): string {
@@ -1324,7 +1390,7 @@ export const TOOL_LABEL: Record<string, string> = {
   get_project_overview: "프로젝트 살펴보는 중", get_transcript: "대본 읽는 중", search_transcript: "대본 찾는 중", view_frames: "장면 보는 중",
   contact_sheet: "영상 훑어보는 중", create_draft: "편집본 만드는 중", get_draft: "편집본 확인 중", edit_draft: "편집하는 중",
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
-  run_script: "스크립트 실행 중", get_sdk_types: "스크립트 API 읽는 중", measure_loudness: "소리 크기 재는 중", find_beats: "박자 찾는 중", find_scene_cuts: "장면 바뀌는 곳 찾는 중", find_audio_events: "소리 구간 찾는 중", scan_gaze: "카메라 보는 구간 찾는 중", organize_media: "미디어 정리하는 중", merge_skills: "스킬 합치는 중", run_merged_skill: "병합 스킬 준비 중", finish_step: "단계 마치는 중", get_captions: "자막 읽는 중", edit_captions: "자막 고치는 중", fix_words: "받아쓰기 고치는 중", set_translation: "번역 넣는 중", paste_attributes: "속성 붙여넣는 중", sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", ask_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
+  run_script: "스크립트 실행 중", get_sdk_types: "스크립트 API 읽는 중", measure_loudness: "소리 크기 재는 중", find_beats: "박자 찾는 중", find_scene_cuts: "장면 바뀌는 곳 찾는 중", find_audio_events: "소리 구간 찾는 중", scan_gaze: "카메라 보는 구간 찾는 중", organize_media: "미디어 정리하는 중", trim_to_subjects: "사람이 없는 부분 빼는 중", merge_skills: "스킬 합치는 중", run_merged_skill: "병합 스킬 준비 중", finish_step: "단계 마치는 중", get_captions: "자막 읽는 중", edit_captions: "자막 고치는 중", fix_words: "받아쓰기 고치는 중", set_translation: "번역 넣는 중", paste_attributes: "속성 붙여넣는 중", sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", ask_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
 

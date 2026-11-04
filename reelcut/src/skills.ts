@@ -154,37 +154,49 @@ export function chainSkills(chain: Skill, user: Skill[]): { step: ChainStep; ski
   });
 }
 
-/** Runs steps in order, each given the summary of the one before; the first failure stops the rest. */
-export async function runChainSteps(labels: string[], runStep: (i: number, prev: string) => Promise<{ ok: boolean; summary: string }>, onChange: (states: ChainRun["steps"]) => void): Promise<{ ok: boolean; failed?: number; message: string }> {
+export type StepResult = { ok: boolean; summary: string; items?: unknown[] };
+
+/** Runs steps in order, each given the results of all before it; the first failure stops the rest. */
+export async function runChainSteps(labels: string[], runStep: (i: number, prev: string) => Promise<StepResult>, onChange: (states: ChainRun["steps"]) => void): Promise<{ ok: boolean; failed?: number; message: string }> {
   const states: ChainRun["steps"] = labels.map((label) => ({ label, state: "wait" }));
   const show = () => onChange(states.map((x) => ({ ...x })));
-  let prev = "";
+  const results: string[] = [];
   for (let i = 0; i < labels.length; i++) {
     states[i].state = "run";
     show();
-    let r: { ok: boolean; summary: string };
-    try { r = await runStep(i, prev); } catch (e) { r = { ok: false, summary: String((e as Error)?.message ?? e) }; }
+    let r: StepResult;
+    try { r = await runStep(i, results.join("\n")); } catch (e) { r = { ok: false, summary: String((e as Error)?.message ?? e) }; }
     states[i] = { ...states[i], state: r.ok ? "done" : "fail", note: r.summary };
     if (!r.ok) {
       for (let j = i + 1; j < labels.length; j++) states[j].state = "skip";
       show();
       return { ok: false, failed: i, message: `${i + 1}/${labels.length}단계 "${labels[i]}"에서 멈췄습니다: ${r.summary}` };
     }
-    prev = r.summary;
+    results.push(`[${i + 1}. ${labels[i]}] ${r.summary}${r.items?.length ? `\n목록: ${JSON.stringify(r.items)}` : ""}`);
     show();
   }
   return { ok: true, message: `${labels.length}단계를 모두 마쳤습니다.` };
 }
 
+/** Tools that change the work: while one step runs, those only a later step's guide names must wait. */
+const CHANGES_WORK = new Set(["create_draft", "edit_draft", "delete_draft", "remove_silences", "remove_fillers", "add_markers", "set_captions", "edit_captions", "fix_words", "set_translation", "auto_color", "set_look", "paste_attributes", "set_motion", "set_volume_keys", "fit_music", "add_text", "remove_text", "frame_subject", "trim_to_subjects", "snap_cuts", "multicam_draft", "sync_media", "organize_media", "export_draft"]);
+const names = (body: string, tool: string) => new RegExp(`\\b${tool}\\b`).test(body);
+
+/** The later step a tool belongs to, when using it now would be doing that step's job early. */
+export function laterStepOf(tool: string, current: Skill, later: { label: string; skill: Skill }[]): string | null {
+  if (!CHANGES_WORK.has(tool) || names(current.body, tool)) return null;
+  return later.find((x) => names(x.skill.body, tool))?.label ?? null;
+}
+
 /** What the AI is told for one step of a merged skill. */
-export function chainStepNote(chainName: string, labels: string[], i: number, skillName: string, request: string, prev: string): string {
+export function chainStepNote(chainName: string, labels: string[], i: number, skill: Skill, request: string, prev: string): string {
   return [
-    `<merged-skill>병합 스킬 "${chainName}"의 ${i + 1}/${labels.length}단계 "${labels[i]}"입니다. 이번 차례에는 이 단계만 끝까지 합니다.`,
-    `1. get_playbook으로 "${skillName}" 안내를 읽고 따릅니다.`,
-    `2. 이번 단계에서 할 일은 "${labels[i]}"뿐입니다. 사용자의 전체 요청은 참고만 하고, 그중 다른 단계에 속하는 일은 하지 않습니다: ${request || "(따로 없음)"}`,
-    prev ? `3. 앞 단계의 결과입니다. 여기에 이어서 합니다: ${prev}` : "",
-    labels[i + 1] ? `다음 단계 "${labels[i + 1]}"는 앱이 이어서 시킵니다. 미리 하지 마세요.` : "이것이 마지막 단계입니다.",
-    `끝나면 finish_step을 부르세요. ok는 해냈는지, summary에는 다음 단계가 이어 쓸 편집본 id와 시각을 적습니다. 할 수 없으면 ok를 false로 하고 이유를 적습니다.</merged-skill>`,
+    `<merged-skill>병합 스킬 "${chainName}"의 ${i + 1}/${labels.length}단계 "${labels[i]}"입니다. 이번 차례에는 이 단계의 일만 합니다.`,
+    `이 단계의 안내입니다(get_playbook으로 다시 읽을 필요 없습니다):\n${skill.body}`,
+    `이번 작업의 전체 목표입니다. 이 단계에 속하는 부분만 참고하세요: ${request || "(따로 없음)"}`,
+    prev ? `앞 단계의 결과입니다. 다시 찾지 말고 이것을 그대로 이어서 씁니다:\n${prev}` : "",
+    labels[i + 1] ? `다음 단계 "${labels.slice(i + 1).join('", "')}"의 일은 지금 하지 마세요. 앱이 이어서 시키며, 그 단계의 도구는 지금 막혀 있습니다.` : "이것이 마지막 단계입니다.",
+    `끝나면 finish_step을 부르세요. ok는 해냈는지, summary는 결과나 못 한 이유입니다. 결과가 여러 개이면(장면 구간 등) 하나씩 items에 넣습니다. 예: [{"asset_id":"…","from":284,"to":299,"note":"둘이 함께"}]. 다음 단계는 이 목록만 받습니다.</merged-skill>`,
   ].filter(Boolean).join("\n");
 }
 
