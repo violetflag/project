@@ -121,4 +121,4 @@ export function expandSkillCommand(text: string, user: Skill[]): string {
 export type Step = { tool: string; input?: Record<string, unknown> };
 
 /** Tools a batch may not call: itself, and those that wait for the user or read a guide. */
-export const NOT_IN_BATCH = new Set(["run_steps", "ask_options", "get_playbook"]);
+export const NOT_IN_BATCH = new Set(["run_steps", "run_script", "ask_options", "get_playbook"]);

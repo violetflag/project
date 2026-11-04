@@ -148,7 +148,7 @@ pub fn find_beats(s: &[f32], from: f64) -> Value {
         beats.push(((from + at as f64 / fps) * 1000.0).round() / 1000.0);
         p += period;
     }
-    json!({ "bpm": (fps * 60.0 / period * 10.0).round() / 10.0, "confidence": (confidence * 100.0).round() / 100.0, "beats": beats })
+    json!({ "bpm": (fps * 60.0 / period * 10.0).round() / 10.0, "confidence": (confidence as f64 * 100.0).round() / 100.0, "beats": beats })
 }
 
 /// Stretches that stand out by level: silence, a short loud burst, or a long loud passage.

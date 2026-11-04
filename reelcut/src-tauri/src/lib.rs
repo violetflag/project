@@ -375,6 +375,59 @@ async fn find_faces(app: St<'_>, req: FindFaces) -> Result<Vec<Value>, String> {
 }
 
 #[derive(serde::Deserialize)]
+struct ScriptFiles {
+    op: String,
+    path: String,
+    #[serde(default)]
+    text: String,
+    roots: Vec<String>,
+}
+
+/// A script's only way to files: listing and reading inside `roots`, writing a named file into the first.
+#[tauri::command]
+async fn script_files(req: ScriptFiles) -> Result<Value, String> {
+    blocking(move || {
+        let roots: Vec<PathBuf> = req.roots.iter().filter_map(|r| std::fs::canonicalize(r).ok()).collect();
+        let inside = |p: &str| -> Result<PathBuf, String> {
+            let c = std::fs::canonicalize(p).map_err(|e| format!("{p}: {e}"))?;
+            if roots.iter().any(|r| c.starts_with(r)) {
+                Ok(c)
+            } else {
+                Err(format!("이 위치는 스크립트에서 쓸 수 없습니다: {p}"))
+            }
+        };
+        match req.op.as_str() {
+            "list" => {
+                let mut out = Vec::new();
+                for e in std::fs::read_dir(inside(&req.path)?).map_err(|e| e.to_string())?.flatten() {
+                    let m = e.metadata().map_err(|e| e.to_string())?;
+                    out.push(json!({ "name": e.file_name().to_string_lossy(), "path": e.path().to_string_lossy(), "dir": m.is_dir(), "size": m.len() }));
+                }
+                Ok(json!(out))
+            }
+            "read" => {
+                let p = inside(&req.path)?;
+                if std::fs::metadata(&p).map_err(|e| e.to_string())?.len() > 5 << 20 {
+                    return Err("5MB가 넘는 파일은 읽을 수 없습니다".into());
+                }
+                Ok(json!(String::from_utf8_lossy(&std::fs::read(&p).map_err(|e| e.to_string())?)))
+            }
+            "write" => {
+                if req.path.is_empty() || req.path.contains(['/', '\\', ':']) || req.path.starts_with('.') {
+                    return Err("파일 이름만 쓸 수 있습니다".into());
+                }
+                let dir = roots.first().ok_or("내보낼 폴더가 없습니다")?;
+                let p = dir.join(&req.path);
+                std::fs::write(&p, req.text.as_bytes()).map_err(|e| e.to_string())?;
+                Ok(json!(p.to_string_lossy()))
+            }
+            o => Err(format!("모르는 동작: {o}")),
+        }
+    })
+    .await
+}
+
+#[derive(serde::Deserialize)]
 struct MeasureReq {
     what: String,
     path: String,
@@ -1160,6 +1213,7 @@ pub fn run() {
             find_faces,
             scan_gaze,
             measure,
+            script_files,
             track_people,
             face_check,
             live_stop,

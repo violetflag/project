@@ -56,6 +56,7 @@ export const api = {
   liveStop: (slot: string) => invoke<boolean>("live_stop", { slot }),
   calibrate360: (info: MediaInfo, lens: Lens) => invoke<Stitch>("calibrate_360", { info, lens }),
   measure: (what: "loudness" | "beats" | "events" | "scenes", path: string, from: number, to: number, threshold = 0) => invoke<any>("measure", { req: { what, path, from, to, threshold } }),
+  scriptFiles: (op: "list" | "read" | "write", path: string, text: string, roots: string[]) => invoke<any>("script_files", { req: { op, path, text, roots } }),
   scanGaze: (path: string, lens: Lens | null, from: number, to: number, step: number) => invoke<{ t: number; faces: { x: number; y: number; w: number; h: number; score: number; front: number }[] }[]>("scan_gaze", { req: { path, lens, from, to, step } }),
   findFaces: (path: string, lens: Lens, times: number[]) => invoke<{ t: number; faces: { x: number; y: number; w: number; h: number; score: number }[] }[]>("find_faces", { req: { path, lens, times } }),
   trackPeople: (path: string, lens: Lens, from: number, to: number, subjects: { name: string; seeds: [number, number, number][] }[]) =>

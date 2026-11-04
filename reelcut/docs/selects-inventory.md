@@ -852,3 +852,8 @@ Selects has **no 360 support**. It imports `.insv` and `.lrv` as flat video and 
 
 - 사람 오려내기(person.matte): 모델을 내려받지 않기로 John이 정했습니다(2026-11-04). 2.15.0에 포함하지 않았고, 내려받기 버튼도 두지 않았습니다.
 - 인터넷 브라우저, CAPTCHA 풀기, Google·이미지·YouTube 검색, 플러그인 패널과 게시 스킬: Reelcut에 해당 기능이 없어 넣지 않았습니다. CAPTCHA 풀기는 앞으로도 넣지 않습니다.
+
+## 2.16.0에서 맞춘 것
+
+- run_script: TypeScript 스크립트와 Reelcut SDK(`sdk/reelcut.d.ts`). 워커 샌드박스, 시간 제한, 되돌리기 한 번. 스크립트 안에서 내보내기와 지우기는 할 수 없습니다.
+- 분석: 소리 크기, 박자, 화면이 바뀌는 곳, 소리 구간. 소리 구간은 크기로만 나눕니다.

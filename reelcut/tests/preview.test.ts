@@ -3,6 +3,8 @@ import { promptName } from "../src/chats";
 import { captionLines, draftCaptions, keyWordIndex, moveWordPrev, setHidden, setLineText, spokenIndex, toAss, toSrt, wordKey } from "../src/captions";
 import { BUILTIN_SKILLS, expandSkillCommand, skillFromText, skillToText } from "../src/skills";
 import { TOOLS } from "../src/agent";
+import { NOT_IN_SCRIPT, SDK, transpileScript } from "../src/script";
+import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
 import { CAPTION_PRESETS, STICKERS, stickerSvgPath, textEvent, textLook } from "../src/graphics";
 import { BUILTIN_SKILLS, cleanSkillName, findSkill, skillCatalog, upsertSkill } from "../src/skills";
 import { gazeSpans, CLIP_ATTRS, pasteAttrs, toSegs, transitionLook, TRANSITIONS, multicamDraft, isDefaultColor, LOOKS, animAt, DEFAULT_CAPTION, fitMusic, mergeScenes, movePreset, volAt, newDraft, playableInWebView, previewSource, searchScenes } from "../src/edit";
@@ -310,5 +312,34 @@ describe("skills and gaze", () => {
     const f = (front: number) => ({ front });
     const spans = gazeSpans([{ t: 0, faces: [f(0.9)] }, { t: 2, faces: [f(0.8), f(0.7)] }, { t: 4, faces: [f(0.1)] }, { t: 6, faces: [] }, { t: 8, faces: [f(0.6)] }], 2);
     expect(spans).toEqual([{ from: 0, to: 4, faces: 2 }, { from: 8, to: 10, faces: 1 }]);
+  });
+});
+
+describe("run_script", () => {
+  it("declares every SDK method in the .d.ts and nothing more", () => {
+    const body = SDK_TYPES.slice(SDK_TYPES.indexOf("declare const reelcut"));
+    const declared: string[] = [];
+    let group = "";
+    for (const l of body.split("\n")) {
+      const g = /^  (\w+): \{$/.exec(l);
+      if (g) group = g[1];
+      const m = /^    (\w+)\(/.exec(l);
+      if (m) declared.push(`${group}.${m[1]}`);
+    }
+    expect(declared.sort()).toEqual(Object.keys(SDK).sort());
+  });
+  it("translates TypeScript and allows a top-level return", async () => {
+    const js = await transpileScript("const n: number = 2;\nreturn n + 1;");
+    expect(js).toContain("return n + 1");
+    expect(js).not.toContain(": number");
+    expect(new (Object.getPrototypeOf(async function () {}).constructor)(js)()).resolves.toBe(3);
+  });
+  it("refuses imports and reports errors by the script's own line", async () => {
+    await expect(transpileScript('import x from "fs";')).rejects.toThrow("import");
+    await expect(transpileScript('const m = await import("fs");')).rejects.toThrow("import");
+    await expect(transpileScript("const a = 1;\nconst = 2;")).rejects.toThrow("2번째 줄");
+  });
+  it("keeps exporting, deleting and asking out of scripts", () => {
+    for (const n of ["export_draft", "delete_draft", "ask_options", "run_script"]) expect(NOT_IN_SCRIPT.has(n)).toBe(true);
   });
 });

@@ -245,6 +245,27 @@ export function editDraft(label: string, fn: (d: Draft) => Draft, id = st.draftI
   mutate((p) => ({ ...p, drafts: p.drafts.map((x) => (x.id === id ? { ...nd, updated: Date.now() } : x)) }));
 }
 
+/** Everything until commit or rollback counts as one undo step (a script's changes). */
+export function beginUndoGroup(label: string) {
+  const mark = undoStack.length, before = st.project!.drafts, draftId = st.draftId;
+  const words = new Map(st.project!.assets.map((a) => [a.id, { words: a.words, folder: a.folder }]));
+  const folders = st.project!.folders;
+  return {
+    /** Returns whether anything changed. */
+    commit() {
+      undoStack.length = Math.min(undoStack.length, mark);
+      const changed = st.project?.drafts !== before;
+      if (changed) undoStack.push({ drafts: before, draftId, label });
+      return changed;
+    },
+    rollback() {
+      undoStack.length = Math.min(undoStack.length, mark);
+      mutate((p) => ({ ...p, drafts: before, folders, assets: p.assets.map((a) => (words.has(a.id) ? { ...a, ...words.get(a.id)! } : a)) }));
+      set({ draftId });
+    },
+  };
+}
+
 export function setDrafts(label: string, drafts: Draft[], draftId = st.draftId) {
   checkpoint(label);
   mutate((p) => ({ ...p, drafts }));

@@ -18,6 +18,8 @@ import { cleanKeys, frameGroup, frameSubject, normView, sampleKeys, snapRanges, 
 import { BUILTIN_SKILLS, cleanSkillName, findSkill, NOT_IN_BATCH, skillCatalog, upsertSkill, type Step } from "./skills";
 import { compactBudget, ctxLimit, estTokens, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
 import { activeChat, asset, assetMap, editDraft, saveSkills, syncAssets, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
+import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
+import { runScript, stopScript } from "./script";
 import { captionLines, draftCaptions, joinNext, moveWordPrev, setBreak, setHidden, setLineText, wordKey } from "./captions";
 import type { AnimKey, Asset, ChatBlock, ChoiceCard, ChatMsg, ChatSession, Draft, TextItem, View, ViewKey, VolKey } from "./types";
 
@@ -199,6 +201,11 @@ export const TOOLS = [
     name: "ask_options", description: "사용자에게 고를 수 있는 카드를 보여 주고, 고를 때까지 기다렸다가 고른 것을 돌려줍니다(하이라이트 후보, 길이 선택, 대상이 애매할 때). 차례를 끝내지 말고 결과를 받아 이어서 작업하세요. 추천하는 것을 맨 앞에 두면 추천으로 표시됩니다. 선택지마다 meaning에 고르면 무엇을 할지(시각까지 구체적으로) 적으세요. 그 글이 그대로 돌아옵니다. multi_select를 켜면 여러 개를 고를 수 있습니다.",
     input_schema: { type: "object", properties: { question: str, multi_select: { type: "boolean" }, recommended: { type: "boolean", description: "첫 번째를 추천으로 표시 (기본 켬)" }, options: { type: "array", items: { type: "object", properties: { label: str, detail: str, meaning: str }, required: ["label", "meaning"] } } }, required: ["question", "options"] },
   },
+  {
+    name: "run_script", description: "TypeScript 스크립트를 실행합니다. 반복, 계산, 조건이 필요하거나 도구를 여러 번 부를 일에 씁니다(예: 박자마다 컷, 편집본 여러 개). 쓰기 전에 get_sdk_types로 reelcut API를 읽으세요. 코드는 함수 본문입니다: await를 바로 쓰고 return으로 결과를 돌려주며 console.log도 돌아옵니다. import, 인터넷, 파일 직접 접근은 안 되고 전부 reelcut을 거칩니다. 바뀐 것은 되돌리기 한 번으로 돌아가고, 실패하거나 시간을 넘기면 모두 되돌립니다. 내보내기, 지우기, 사용자에게 묻기는 스크립트 밖에서 하세요.",
+    input_schema: { type: "object", properties: { script: str, summary: { ...str, description: "무엇을 하는지 한 줄" }, timeout_seconds: { ...num, description: "기본 60, 최대 600" }, max_result_bytes: { ...num, description: "돌려받을 결과 크기, 기본 20000" } }, required: ["script", "summary"] },
+  },
+  { name: "get_sdk_types", description: "run_script에서 쓰는 reelcut API의 타입 선언(.d.ts)을 읽습니다.", input_schema: { type: "object", properties: {} } },
   {
     name: "run_steps", description: "여러 도구를 한 번에 차례로 실행합니다(예: 클립마다 같은 작업). steps: [{tool, input}], 앞 단계가 실패하면 멈춥니다(stop_on_error 기본 켬). 그림을 돌려주는 도구의 그림은 빠지고 글만 돌아옵니다. 그림을 봐야 하면 따로 부르세요. ask_options, get_playbook은 넣을 수 없습니다.",
     input_schema: { type: "object", properties: { stop_on_error: { type: "boolean" }, steps: { type: "array", items: { type: "object", properties: { tool: str, input: { type: "object" } }, required: ["tool"] } } }, required: ["steps"] },
@@ -542,6 +549,23 @@ async function run(name: string, inp: any): Promise<Out> {
       mutateChat((c) => ({ ...c, cards: [...(c.cards ?? []), card] }), sid);
       set({ agentStatus: "고르기를 기다리는 중…" });
       return await new Promise<string>((res) => waiting.set(card.id, res));
+    }
+    case "get_sdk_types": return SDK_TYPES;
+    case "run_script": {
+      const secs = Math.max(1, Math.min(Number(inp.timeout_seconds) || 60, 600));
+      const max = Math.max(200, Number(inp.max_result_bytes) || 20000);
+      const textOf = (out: Out) => (typeof out === "string" ? out : out.filter((b) => b.type === "text").map((b) => String(b.text)).join(" "));
+      const clip = (t: string) => (t.length > max ? `${t.slice(0, max)}\n… (${t.length}자 중 ${max}자까지)` : t);
+      try {
+        const r = await runScript(String(inp.script ?? ""), { summary: String(inp.summary ?? ""), timeoutMs: secs * 1000, call: async (name, input) => textOf(await run(name.replace(/^mcp__\w+__/, ""), input)) });
+        const parts = [`완료. ${r.changed ? "바뀐 것은 되돌리기 한 번으로 돌아갑니다." : "바뀐 것은 없습니다."}`];
+        if (r.logs.length) parts.push(`console:\n${r.logs.join("\n")}`);
+        if (r.value !== undefined) parts.push(`결과:\n${JSON.stringify(r.value)}`);
+        return clip(parts.join("\n"));
+      } catch (e) {
+        const logs: string[] = (e as any).logs ?? [];
+        throw new Error(clip(`${(e as Error).message ?? e}${logs.length ? `\nconsole:\n${logs.join("\n")}` : ""}`));
+      }
     }
     case "run_steps": {
       const steps: Step[] = inp.steps ?? [];
@@ -991,6 +1015,7 @@ export const answerCardText = (card: ChoiceCard, text: string) => endWait(card.i
 
 export const stopAgent = () => {
   stopFlag = true;
+  stopScript();
   for (const id of [...waiting.keys()]) endWait(id, "사용자가 작업을 멈췄습니다. 여기서 끝내세요.");
   if (ccRunning) api.ccStop().catch(() => {});
 };
@@ -1189,7 +1214,7 @@ export const TOOL_LABEL: Record<string, string> = {
   get_project_overview: "프로젝트 살펴보는 중", get_transcript: "대본 읽는 중", search_transcript: "대본 찾는 중", view_frames: "장면 보는 중",
   contact_sheet: "영상 훑어보는 중", create_draft: "편집본 만드는 중", get_draft: "편집본 확인 중", edit_draft: "편집하는 중",
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
-  measure_loudness: "소리 크기 재는 중", find_beats: "박자 찾는 중", find_scene_cuts: "장면 바뀌는 곳 찾는 중", find_audio_events: "소리 구간 찾는 중", scan_gaze: "카메라 보는 구간 찾는 중", organize_media: "미디어 정리하는 중", get_captions: "자막 읽는 중", edit_captions: "자막 고치는 중", fix_words: "받아쓰기 고치는 중", set_translation: "번역 넣는 중", paste_attributes: "속성 붙여넣는 중", sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", ask_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
+  run_script: "스크립트 실행 중", get_sdk_types: "스크립트 API 읽는 중", measure_loudness: "소리 크기 재는 중", find_beats: "박자 찾는 중", find_scene_cuts: "장면 바뀌는 곳 찾는 중", find_audio_events: "소리 구간 찾는 중", scan_gaze: "카메라 보는 구간 찾는 중", organize_media: "미디어 정리하는 중", get_captions: "자막 읽는 중", edit_captions: "자막 고치는 중", fix_words: "받아쓰기 고치는 중", set_translation: "번역 넣는 중", paste_attributes: "속성 붙여넣는 중", sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", ask_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
 };
 
