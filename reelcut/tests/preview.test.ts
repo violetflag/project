@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
 import { captionLines, draftCaptions, keyWordIndex, moveWordPrev, setHidden, setLineText, spokenIndex, toAss, toSrt, wordKey } from "../src/captions";
-import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, laterStepOf, mergeSkills, parseSkillCommand, runChainSteps, skillFromText, skillToText, upsertSkill } from "../src/skills";
+import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSummary, findSkill, laterStepOf, looksForPeople, panoramaTimes, rangeFromText, mergeSkills, parseSkillCommand, runChainSteps, skillFromText, skillToText, upsertSkill } from "../src/skills";
 import { applyVerdicts, badSpans, frameGroup, percentOk, saneMarks, subjectLooks, thinMarks } from "../src/framing";
+import { PEOPLE_360_RULE, PLAYBOOK_360 } from "../src/playbook";
 import { TOOLS } from "../src/agent";
 import { NOT_IN_SCRIPT, SDK, transpileScript } from "../src/script";
 import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
@@ -513,5 +514,32 @@ describe("skills in force together", () => {
     expect(activeNote([a, b, m], ["m"], []).note).toBe("");
     expect(activeBudget(90000)).toBe(9000);
     expect(activeBudget(950000)).toBe(20000);
+  });
+});
+
+describe("looking for people in 360 footage", () => {
+  it("says so in every guide that looks for people", () => {
+    expect(PEOPLE_360_RULE).toContain("equirect_sheet");
+    expect(PEOPLE_360_RULE).toContain("find_faces");
+    expect(PLAYBOOK_360).toContain(PEOPLE_360_RULE);
+    for (const n of ["face_to_camera", "vertical_reframe", "shot_list", "family_recap", "highlights", "vlog_edit", "360_auto_edit"]) expect(findSkill([], n)?.body, n).toContain(PEOPLE_360_RULE);
+  });
+  it("asks for the search only in steps that look for people", () => {
+    expect(looksForPeople(findSkill([], "face_to_camera")!)).toBe(true);
+    expect(looksForPeople(findSkill([], "title_design")!)).toBe(false);
+    expect(looksForPeople({ name: "twins", description: "쌍둥이 장면 찾기", body: "순서" })).toBe(true);
+  });
+  it("cleans tool markup out of a step's summary", () => {
+    expect(cleanSummary('구간을 넘깁니다.</summary>\n<parameter name="items">[]')).toBe("구간을 넘깁니다.");
+    expect(cleanSummary("284<299초 그대로")).toBe("284<299초 그대로");
+  });
+  it("reads a range from the request and spreads looks across it", () => {
+    expect(rangeFromText("원본 270~300초에서 찾아")).toEqual([270, 300]);
+    expect(rangeFromText("4분~6분 사이")).toEqual([240, 360]);
+    expect(rangeFromText("쌍둥이 찾아")).toBeNull();
+    const t = panoramaTimes(270, 300);
+    expect(t).toHaveLength(16);
+    expect(t[0]).toBeGreaterThan(270);
+    expect(t[15]).toBeLessThan(300);
   });
 });

@@ -1,7 +1,7 @@
 // Skills: step-by-step guides the AI reads before a kind of job (get_playbook). A few come with the
 // app; the user's own are kept in the app store ("skills") and shared by every project. The AI sees
 // only the list (name, description, trigger words) in its instructions and reads a guide when needed.
-import { PLAYBOOK_360 } from "./playbook";
+import { PEOPLE_360_RULE, PLAYBOOK_360 } from "./playbook";
 import { LIBRARY } from "./skills-lib";
 import type { ChainRun, ChainStep, Skill } from "./types";
 
@@ -15,6 +15,7 @@ const VLOG = `# 브이로그 편집 순서
 - 받아쓰기가 없고 말소리가 있으면 transcribe를 먼저 합니다.
 
 ## 고르기
+${PEOPLE_360_RULE}
 1. contact_sheet로 전체를 훑고, 본 것을 save_scene_notes로 남깁니다. 나중에 search_scenes로 찾을 수 있습니다.
 2. scan_bad_shots로 흐리거나 흔들린 구간을 확인하고 피합니다.
 3. 이야기의 모양을 정합니다: 어디 갔는지 보여 주는 시작, 가장 즐거운 순간들, 마무리. 첫 5초 안에 가장 눈길을 끄는 장면이나 말을 둡니다.
@@ -34,6 +35,8 @@ const VLOG = `# 브이로그 편집 순서
 `;
 
 const HIGHLIGHTS = `# 하이라이트·쇼츠 후보 고르기
+
+${PEOPLE_360_RULE}
 
 ## 순서
 1. 받아쓰기(get_transcript)와 장면 설명(search_scenes, contact_sheet)으로 재미있거나 감동적인 순간을 찾습니다. 말이 있으면 앞뒤 맥락 없이도 이해되는 구간을 고릅니다.
@@ -187,6 +190,23 @@ export function laterStepOf(tool: string, current: Skill, later: { label: string
   if (!CHANGES_WORK.has(tool) || names(current.body, tool)) return null;
   return later.find((x) => names(x.skill.body, tool))?.label ?? null;
 }
+
+/** A step's summary without tool-call markup a model sometimes leaks into it. */
+export const cleanSummary = (s: string) => s.replace(/<\/?(?:summary|parameter|invoke|items)\b[\s\S]*$/, "").trim();
+
+/** A guide whose job is finding people or scenes: built in with the rule, or a user's that says it finds. */
+export const looksForPeople = (s: Skill) => s.body.includes(PEOPLE_360_RULE) || /찾|find|search/i.test(`${s.name} ${s.description} ${s.body}`);
+
+/** A range of seconds named in a request ("270~300초", "4분~6분"). */
+export function rangeFromText(text: string): [number, number] | null {
+  const sec = /(\d+(?:\.\d+)?)\s*초?\s*[~–-]\s*(\d+(?:\.\d+)?)\s*초/.exec(text);
+  if (sec) return [Number(sec[1]), Number(sec[2])];
+  const min = /(\d+(?:\.\d+)?)\s*분\s*[~–-]\s*(\d+(?:\.\d+)?)\s*분/.exec(text);
+  return min ? [Number(min[1]) * 60, Number(min[2]) * 60] : null;
+}
+
+/** Evenly spread moments to look at across a range. */
+export const panoramaTimes = (from: number, to: number, n = 16) => Array.from({ length: n }, (_, i) => Math.round((from + ((i + 0.5) * (to - from)) / n) * 100) / 100);
 
 /** What the AI is told for one step of a merged skill. */
 export function chainStepNote(chainName: string, labels: string[], i: number, skill: Skill, request: string, prev: string): string {

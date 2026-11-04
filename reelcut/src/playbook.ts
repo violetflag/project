@@ -1,11 +1,15 @@
 // Step-by-step guide the AI reads (get_playbook) for turning a long 360 recording into a short edit
 // that follows people. Written for Reelcut's own tools.
 
+/** How to look for people in 360 footage; every guide that looks for people says this. */
+export const PEOPLE_360_RULE = "360 영상에서 사람을 찾을 때는 equirect_sheet나 find_faces로 파노라마 전체를 봅니다. contact_sheet는 어안이고 view_frames는 한 방향만 보여 주므로, 거기 없다고 영상에 없다고 판단하면 안 됩니다.";
+
 export const PLAYBOOK_360 = `# 360 영상 자동 편집 순서 (Reelcut 도구 기준)
 
 필요한 것: 360 원본(.osv 등), 따라갈 사람(누구인지), 목표 길이(말이 없으면 원본의 1/3).
 
 ## 늘 지킬 것
+- ${PEOPLE_360_RULE}
 - 머리는 화면 위에서 1/3 지점. 몸통이 아니라 머리 위치를 기준으로 합니다.
 - 말 중간에서 끊지 않습니다. 컷은 말 틈에서.
 - 한 컷은 4~30초. 주인공 중심으로 하되 다른 가족도 전체의 10~15%.

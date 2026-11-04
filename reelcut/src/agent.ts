@@ -16,10 +16,11 @@ import {
 import { exportAndWait } from "./exporter";
 import { CAPTION_PRESETS, TEXT_KINDS } from "./graphics";
 import { applyVerdicts, badSpans, cleanKeys, frameGroup, frameSubject, lookSummary, normView, percentOk, sampleKeys, saneMarks, snapRanges, subjectLooks, thinMarks, type Mark, type Subject, type SubjectLook } from "./framing";
-import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSkillName, findSkill, isChain, laterStepOf, mergeSkills, NOT_IN_BATCH, parseSkillCommand, runChainSteps, skillCatalog, stepLabel, upsertSkill, type Step, type StepResult } from "./skills";
+import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSkillName, cleanSummary, findSkill, isChain, laterStepOf, looksForPeople, mergeSkills, NOT_IN_BATCH, panoramaTimes, parseSkillCommand, rangeFromText, runChainSteps, skillCatalog, stepLabel, upsertSkill, type Step, type StepResult } from "./skills";
 import { compactBudget, ctxLimit, estTokens, fmtK, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
 import { activeChat, asset, assetMap, editDraft, saveSkills, syncAssets, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
 import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
+import { PEOPLE_360_RULE } from "./playbook";
 import { runScript, stopScript } from "./script";
 import { captionLines, draftCaptions, joinNext, moveWordPrev, setBreak, setHidden, setLineText, wordKey } from "./captions";
 import type { AnimKey, Asset, ChatBlock, Clip, ChoiceCard, ChatMsg, ChatSession, Draft, Skill, TextItem, View, ViewKey, VolKey } from "./types";
@@ -45,7 +46,7 @@ const SYSTEM = `당신은 Reelcut의 영상 편집 에이전트입니다. Reelcu
 - DJI Osmo 360 파일(.osv, .lrf/.lrv)은 360 영상입니다. 360 클립은 view로 어느 방향을 볼지 정합니다 (yaw: 좌우 -180~180, pitch: 위아래 -90~90, hfov: 화각 20~160, 기본 100).
 - 360 클립은 시점을 한 개(view)만 두지 않고 시점 키프레임(view_keys: 원본 시간 t마다 yaw/pitch/roll/hfov)으로 움직일 수 있습니다. 키 사이는 부드럽게 이어집니다(과하게 튀지 않는 곡선). 사람을 따라가는 화면은 frame_subject로 0.1초 간격 키프레임을 만드세요. yaw·roll은 범위를 벗어나도 앱이 -180~180으로 맞춥니다.
 - 360 영상을 자동 편집해 달라는 요청이면 먼저 get_playbook으로 작업 순서(360 자동편집)를 읽고 따르세요.
-- 360 영상에서 사람을 찾을 때는 equirect_sheet로 사방을 보세요. view_frames는 한 방향만, contact_sheet는 어안으로 보여 주므로, 거기 없다고 영상에 없는 것이 아닙니다.
+- ${PEOPLE_360_RULE}
 - 시간 단위는 모두 초입니다. 원본 시간(source)과 편집본 타임라인 시간(timeline)을 구분하세요.
 
 ## 일하는 방법
@@ -476,6 +477,7 @@ function applyOps(d: Draft, ops: any[]): Draft {
 async function run(name: string, inp: any): Promise<Out> {
   const p = st.project;
   if (!p) throw new Error("열린 프로젝트가 없습니다");
+  if (name === "find_faces" || name === "equirect_sheet" || name === "track_people") sawPanorama = true;
   const waitFor = stepNow && laterStepOf(name, stepNow.current, stepNow.later);
   if (waitFor) throw new Error(`${name}은 다음 단계 "${waitFor}"의 일입니다. 지금은 쓸 수 없습니다. 이 단계의 결과를 finish_step으로 넘기세요.`);
   switch (name) {
@@ -520,7 +522,8 @@ async function run(name: string, inp: any): Promise<Out> {
       // 360: a flat view straight from the original (an .osv's two lens tracks put side by side).
       const lens = r360 ? { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 } : undefined;
       const shots = await api.frames(a.info.path, times, 768, r360 ? normView(inp.view) : undefined, lens);
-      return shots.flatMap((b, i) => [{ type: "text", text: `${a.info.name} ${r3(times[i])}초` }, img(b)]);
+      const pics: ChatBlock[] = shots.flatMap((b, i) => [{ type: "text", text: `${a.info.name} ${r3(times[i])}초` }, img(b)]);
+      return r360 ? [{ type: "text", text: `한 방향만 보이는 사진입니다. ${PEOPLE_360_RULE}` }, ...pics] : pics;
     }
     case "contact_sheet": {
       const a = getAsset(inp.asset_id);
@@ -530,7 +533,7 @@ async function run(name: string, inp: any): Promise<Out> {
       // An .osv's .lrf (both lenses side by side) reads quicker than the full-size original.
       const path = a.info.layout360 === "dual" && a.info.lrf ? a.info.lrf : a.info.path;
       const b = await api.contactSheet(path, start, every, cols, rows, 240);
-      return [{ type: "text", text: `${a.info.name}: ${r3(start)}초부터 ${r3(every)}초 간격, ${cols}×${rows}칸 (왼쪽 위부터 오른쪽으로)${is360(a) ? " — 360 원본의 어안 렌즈 그림이라 둥글게 휘어 보입니다. 특정 방향은 view_frames로 보세요" : ""}` }, img(b)];
+      return [{ type: "text", text: `${a.info.name}: ${r3(start)}초부터 ${r3(every)}초 간격, ${cols}×${rows}칸 (왼쪽 위부터 오른쪽으로)${is360(a) ? "" + PEOPLE_360_RULE + " — 360 원본의 어안 렌즈 그림이라 둥글게 휘어 보입니다. 특정 방향은 view_frames로 보세요" : ""}` }, img(b)];
     }
     case "create_draft": {
       let d = newDraft(String(inp.name || "새 편집본"), inp.aspect || "16:9");
@@ -570,7 +573,21 @@ async function run(name: string, inp: any): Promise<Out> {
     }
     case "finish_step": {
       if (!chainRunning) return "지금은 병합 스킬을 실행하는 중이 아닙니다.";
-      stepReport = { ok: inp.ok !== false, summary: String(inp.summary ?? ""), items: Array.isArray(inp.items) ? inp.items : undefined };
+      // A step that looks for people in 360 footage cannot end before the whole panorama has been searched:
+      // what it reports may rest on a fisheye or one-way picture, however it is worded.
+      const round = (st.project?.assets ?? []).filter(is360);
+      if (!sawPanorama && round.length && stepNow && looksForPeople(stepNow.current)) {
+        sawPanorama = true;
+        const asked = rangeFromText(stepNow?.request ?? "");
+        const found: string[] = [];
+        for (const a of round.slice(0, 4)) {
+          const [from, to] = asked ? [Math.max(0, asked[0]), Math.min(a.info.duration, asked[1])] : [0, a.info.duration];
+          if (to <= from) continue;
+          found.push(`${a.id} ${a.info.name}:\n${String(await run("find_faces", { asset_id: a.id, times: panoramaTimes(from, to) }))}`);
+        }
+        return `아직 이 단계를 끝내지 않았습니다. ${PEOPLE_360_RULE} 파노라마를 보지 않아서 앱이 find_faces를 돌렸습니다:\n${found.join("\n")}\n얼굴이 있는 시각을 equirect_sheet로 보고, 앞에서 판단한 것을 고친 뒤 finish_step을 다시 부르세요.`;
+      }
+      stepReport = { ok: inp.ok !== false, summary: cleanSummary(String(inp.summary ?? "")), items: Array.isArray(inp.items) ? inp.items : undefined };
       return "기록했습니다. 차례를 끝내세요.";
     }
     case "delete_skill": {
@@ -1106,7 +1123,9 @@ let turnNote = "";
 let chainRunning = false;
 let stepReport: StepResult | null = null;
 /** The step of a merged skill now running; tools belonging to later steps wait. */
-let stepNow: { current: Skill; later: { label: string; skill: Skill }[] } | null = null;
+let stepNow: { request: string; current: Skill; later: { label: string; skill: Skill }[] } | null = null;
+/** Whether this step has looked at a whole panorama. */
+let sawPanorama = false;
 let pendingChain: { skill: Skill; request: string } | null = null;
 
 /** Tokens the skills in force will add to the next request. */
@@ -1151,7 +1170,8 @@ export async function runChain(chain: Skill, request: string) {
     const end = await runChainSteps(labels, async (i, prev) => {
       stepReport = null;
       const head = `[${i + 1}/${labels.length}] ${labels[i]}`;
-      stepNow = { current: parts[i].skill, later: parts.slice(i + 1).map((p) => ({ label: stepLabel(p.step), skill: p.skill })) };
+      sawPanorama = false;
+      stepNow = { request, current: parts[i].skill, later: parts.slice(i + 1).map((p) => ({ label: stepLabel(p.step), skill: p.skill })) };
       nextNote = chainStepNote(chain.name, labels, i, parts[i].skill, request, prev);
       await ask(head);
       if (stopFlag) return { ok: false, summary: "사용자가 멈췄습니다" };

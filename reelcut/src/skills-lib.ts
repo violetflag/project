@@ -1,5 +1,6 @@
 // The guides that come with the app, one for each kind of job. Each one only names tools the AI really
 // has here; web browsing and paid generation are not part of Reelcut, so nothing here assumes them.
+import { PEOPLE_360_RULE } from "./playbook";
 import type { Skill } from "./types";
 
 const g = (name: string, description: string, triggers: string[], body: string): Skill => ({ name, description, triggers, body });
@@ -39,6 +40,8 @@ export const LIBRARY: Skill[] = [
 4. get_transcript(draft_id)로 편집본을 다시 읽어 문장이 끊기거나 앞뒤가 안 맞는 곳을 고칩니다.
 5. 전체 길이가 목표와 맞는지 확인하고, 뺀 내용 중 아까운 것을 한 줄로 알려 줍니다.`),
   g("shot_list", "장면 목록으로 몽타주·B롤 만들기", ["몽타주", "B롤", "장면 찾아", "인서트", "화면 위주"], `# 화면으로 편집하기
+
+${PEOPLE_360_RULE}
 
 1. 어떤 장면이 몇 개 필요한지 먼저 적습니다. 빼야 할 것도 적습니다(예: 흔들림, 사람 없음).
 2. search_scenes로 프로젝트 전체를 찾습니다. 설명이 없으면 contact_sheet로 보고 save_scene_notes로 남깁니다.
@@ -87,7 +90,8 @@ export const LIBRARY: Skill[] = [
 2. 직접 눈으로 판단하지 말고 검사 결과를 씁니다. 필요하면 view_frames로 앞뒤만 확인합니다.
 3. 편집본에 쓸 때는 원본 시각을 타임라인 시각으로 바꿔 알려 주거나 add_markers로 표시합니다.
 4. 카메라가 여럿이면 카메라마다 검사하고, 사람이 정면으로 보이는 카메라를 고릅니다.
-5. 360 영상은 카메라가 사방을 찍으므로 "카메라 쪽"은 "렌즈 쪽"입니다. 누가 나오는지는 equirect_sheet로 사방을 보고 판단합니다. view_frames는 한 방향만 보여 줍니다. 찾은 구간을 원본 시각 목록으로 알립니다.`),
+5. 360 영상은 카메라가 사방을 찍으므로 "카메라 쪽"은 "렌즈 쪽"입니다. 찾은 구간을 원본 시각 목록으로 알립니다.
+6. ${PEOPLE_360_RULE}`),
   g("remove_bad_shots", "흐리거나 흔들린 구간 없애기", ["흐린", "흔들", "초점", "못 쓰는"], `# 나쁜 구간 없애기
 
 1. scan_bad_shots로 편집본에 쓰인 미디어를 검사합니다.
@@ -173,6 +177,8 @@ Reelcut은 음악이나 목소리를 새로 만들지 않습니다. 프로젝트
 - 설정은 오른쪽 위 톱니입니다. 받아쓰기 엔진, 모델, AI 지침, 스킬이 있습니다.`),
   g("vertical_reframe", "가로 영상을 세로 쇼츠 화면으로", ["세로", "9:16", "숏폼 비율", "릴스 비율"], `# 세로로 바꾸기
 
+${PEOPLE_360_RULE}
+
 1. 편집본이 없으면 create_draft로 만들고, 있으면 edit_draft의 aspect로 9:16을 정합니다. 앞에서 받은 구간이 있으면 그대로 씁니다.
 2. 일반 영상은 set의 fit "fill"로 채운 뒤 transform의 x로 사람이 가운데 오게 옮깁니다. 사람이 움직이면 클립을 나눠 맞춥니다.
 3. 360 영상은 구간의 처음, 중간, 끝을 equirect_sheet와 find_faces로 보고 따라갈 사람의 머리 위치를 찾습니다. 누구인지는 사진을 보고 직접 판단합니다. 어린아이는 보통 수평선(y 240)보다 한참 아래에 있습니다. 어른을 아이로 잡지 마세요.
@@ -188,6 +194,8 @@ Reelcut은 음악이나 목소리를 새로 만들지 않습니다. 프로젝트
 3. 시점이 빨리 움직이면 키프레임 사이를 넓혀 천천히 따라가게 합니다.
 4. 일반 영상의 심한 흔들림은 remove_bad_shots 안내대로 뺍니다. 일반 영상의 안정화는 이 앱에 없으니 그렇다고 알립니다.`),
   g("family_recap", "가족 나들이 영상 한 편 만들기", ["가족", "아이", "아기", "나들이", "기념"], `# 가족 영상
+
+${PEOPLE_360_RULE}
 
 1. 아이들의 표정, 웃음, 처음 해 본 일을 먼저 찾습니다. get_transcript와 search_scenes를 함께 봅니다.
 2. 아이가 여럿이면 고르게 나오게 합니다. 쌍둥이는 둘이 같이 나오는 장면을 우선합니다. 얼굴 인식은 누구인지 구별하지 못하므로, 이름을 말하려면 대본이나 사용자의 설명에 근거합니다.
