@@ -444,9 +444,21 @@ pub fn is_project_folder(dir: &Path) -> bool {
     if dir.parent().is_none() || !dir.is_dir() {
         return false;
     }
-    let marked = std::fs::read_to_string(dir.join("README.txt")).is_ok_and(|t| t.starts_with("Reelcut 프로젝트 폴더"));
+    let marked = std::fs::read_to_string(dir.join("README.txt")).is_ok_and(|t| t.trim_start_matches('\u{feff}').starts_with("Reelcut 프로젝트 폴더"));
     let file = dir.join(format!("{base}.{EXT}")).is_file() || dir.join(format!("{base}.{EXT}.bak")).is_file();
-    marked || (file && [CHATS, LOGS, BACKUPS].iter().any(|s| dir.join(s).is_dir()))
+    marked || (file && [CHATS, LOGS, BACKUPS].iter().any(|s| dir.join(s).is_dir())) || holds_own_chats(dir)
+}
+
+/// A project file here whose conversations are in this folder's 대화 (conversation ids are random,
+/// so no other folder matches by chance): a project folder renamed in Explorer, whose project file
+/// keeps its old name until the next save, even when its README was deleted.
+fn holds_own_chats(dir: &Path) -> bool {
+    dir.join(CHATS).is_dir()
+        && project_files(dir).iter().filter_map(|p| read_doc(p).ok()).any(|d| {
+            d.pointer("/project/chats").and_then(Value::as_array).is_some_and(|cs| {
+                cs.iter().filter_map(|c| c["id"].as_str()).any(|sid| ok_id(sid).is_ok() && dir.join(CHATS).join(format!("{sid}.jsonl")).is_file())
+            })
+        })
 }
 
 /// Holds nothing but what Reelcut puts into a project folder, so renaming it or moving it to the
@@ -733,6 +745,10 @@ pub struct RegFile {
     /// a rename or move is the one this app wrote, not a snapshot copy the user made beside it.
     #[serde(default)]
     pub sums: HashMap<String, String>,
+    /// When that file was written (ms): a copy of the folder whose file is older than this (a
+    /// snapshot made in Explorer) opens as a copy, never as the project's folder.
+    #[serde(default)]
+    pub sum_at: HashMap<String, u64>,
 }
 
 /// `recreated` as 2.18.1 wrote it (a list of ids, no time) or as a map of id → ms.
@@ -786,6 +802,21 @@ impl Reg {
         self.file.folders.insert(id.to_string(), dir.to_string_lossy().into_owned());
         self.file.names.insert(id.to_string(), folder_name(name));
         self.file.recreated.remove(id);
+        // What this folder holds now is what later finds and opens compare with (not the file of
+        // a folder made meanwhile, which a takeover just moved to the trash).
+        match project_files(dir).into_iter().find(|p| file_id(p).as_deref() == Some(id)) {
+            Some(p) => {
+                if let Ok(b) = std::fs::read(&p) {
+                    self.file.sums.insert(id.to_string(), digest(&b));
+                    let t = std::fs::metadata(&p).and_then(|m| m.modified()).ok().and_then(ms_of);
+                    self.file.sum_at.insert(id.to_string(), t.unwrap_or_else(now_ms));
+                }
+            }
+            None => {
+                self.file.sums.remove(id);
+                self.file.sum_at.remove(id);
+            }
+        }
         self.store()
     }
     /// The project's folder when it has one: where it was registered, or (after it was renamed or
@@ -853,6 +884,7 @@ impl Reg {
             return Ok(());
         }
         self.file.sums.insert(id.to_string(), sum.to_string());
+        self.file.sum_at.insert(id.to_string(), now_ms());
         self.store()
     }
     /// Renames the folder (and its project file) after the project was renamed in the app.
@@ -935,6 +967,9 @@ fn find_folder(root: &Path, id: &str, old: Option<&Path>, sum: Option<&str>) -> 
         .map(|e| e.path())
         .filter(|p| p.is_dir() && folder_id(p).as_deref() == Some(id))
         .map(|p| (sum.is_some_and(|s| holds_sum(&p, id, s)), std::fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH), p))
+        // Never a folder made meanwhile and moved there by a takeover: only the one holding the
+        // last written file, when that is known.
+        .filter(|x| sum.is_none() || x.0)
         .collect();
     trashed.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
     (trashed.into_iter().next().map(|x| x.2), false)
@@ -1284,8 +1319,20 @@ pub fn open_file(data: &Path, docs: Option<&Path>, home: &Path, path: &Path, tim
                 }
                 None => Ok((false, o.folder.clone(), None)),
             },
-            // Moved or renamed while the app was closed, or first opened on this PC.
+            // Moved or renamed while the app was closed, or first opened on this PC. When the
+            // project is registered and what its last save wrote is known, its own folder (renamed
+            // or moved beside it) is looked for first, and a copy older than that last write (a
+            // snapshot made in Explorer) opens as a copy.
             None => {
+                if let Some(sum) = r.file.folders.contains_key(&id).then(|| r.file.sums.get(&id).cloned()).flatten() {
+                    if let Some(d) = r.locate(&root, &id, Some(&name)) {
+                        return Ok(if canon(&d) == here { (false, d, None) } else { (true, o.folder.clone(), None) });
+                    }
+                    let at = r.file.sum_at.get(&id).copied().unwrap_or(0);
+                    if at > 0 && !holds_sum(&o.folder, &id, &sum) && written_before(&p, at, &o.folder) {
+                        return Ok((true, o.folder.clone(), None));
+                    }
+                }
                 r.adopt(&id, &o.folder, &name)?;
                 Ok((false, o.folder.clone(), None))
             }
@@ -1444,30 +1491,41 @@ pub fn migrate(store: &Path, data: &Path, docs: Option<&Path>, home: &Path, save
     json!({ "saved": saved, "skipped": skipped, "failed": failed })
 }
 
-/// Moves a deleted project's folder to the trash (the store copy has its own trash). Only a
-/// folder Reelcut made is moved; the project is let go of either way.
+/// Moves a deleted project's folder to the trash (the store copy has its own trash).
 #[tauri::command]
 pub async fn project_trash(app: super::St<'_>, handle: tauri::AppHandle, id: String, time: String) -> Result<(), String> {
     let app = app.inner().clone();
     super::blocking(move || {
         let (docs, home) = places(&handle);
-        let _one = SAVING.lock();
-        let moved = with_reg(&app.data_dir, |r| {
-            let root = r.root(docs.as_deref(), &home);
-            let dir = r.folder(&id);
-            let moved = match dir {
-                Some(d) if is_project_folder(&d) && only_ours(&d) && !root.starts_with(&d) && !in_trash(&d) => trash_folder(&d, &root, &time).map(|to| Some((d, to))),
-                _ => Ok(None),
-            };
-            r.unbind(&id).and(moved)
-        });
-        OWNED.lock().get_or_insert_with(HashMap::new).remove(&id);
-        if let Some((from, to)) = moved? {
+        if let Some((from, to)) = trash_project(&app.data_dir, docs.as_deref(), &home, &id, &time)? {
             app.log("delete", &format!("project folder {} → {}", from.display(), to.display()));
         }
         Ok(())
     })
     .await
+}
+
+/// Home's delete: the project's folder goes to `_휴지통` when Reelcut made it, it holds only
+/// Reelcut's own files and it can be moved there; then the project lets go of it. A folder left
+/// where it is (it holds the user's files, is on another drive, or that drive is unplugged now)
+/// stays registered, so restoring the project from Home's 휴지통 finds that folder again.
+pub fn trash_project(data: &Path, docs: Option<&Path>, home: &Path, id: &str, time: &str) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    let _one = SAVING.lock();
+    let r = with_reg(data, |r| {
+        let root = r.root(docs, home);
+        let dir = r.folder(id);
+        let moved = match &dir {
+            Some(d) if is_project_folder(d) && only_ours(d) && !root.starts_with(d) && !in_trash(d) => trash_folder(d, &root, time).ok().map(|to| (d.clone(), to)),
+            _ => None,
+        };
+        let kept = moved.is_none() && (dir.is_some() || r.file.folders.get(id).is_some_and(|p| drive_gone(Path::new(p))));
+        if !kept {
+            r.unbind(id)?;
+        }
+        Ok(moved)
+    });
+    OWNED.lock().get_or_insert_with(HashMap::new).remove(id);
+    r
 }
 
 /// For 다른 이름으로 저장: the copy starts with the original's action log.
@@ -1935,6 +1993,109 @@ mod tests {
         // A registry from 2.18.1 (a list of ids, no time) still loads, nothing else lost.
         let r: RegFile = serde_json::from_str(r#"{"root":"D:/R","folders":{"x1":"D:/R/a"},"recreated":["x1"]}"#).unwrap();
         assert_eq!((r.recreated.get("x1"), r.folders.len(), r.root.as_str()), (Some(&0), 1, "D:/R"));
+    }
+
+    #[test]
+    fn a_project_deleted_from_home_comes_back_to_the_folder_it_left_in_place() {
+        let root = tmp("keepdel");
+        let (data, docs) = (root.join("data"), root.join("Docs"));
+        let p = sample("kdA", "여행", Path::new("/x"));
+        let dir = save_folder(&data, Some(&docs), &root, &p, "t").unwrap().file.parent().unwrap().to_path_buf();
+        // Kept next to the footage: moved there, a save made the folder again, and opening the
+        // moved one took over (the folder made meanwhile went to _휴지통).
+        let away = root.join("Videos").join("여행");
+        std::fs::create_dir_all(away.parent().unwrap()).unwrap();
+        std::fs::rename(&dir, &away).unwrap();
+        age(&away.join("여행.reelcut"));
+        save_folder(&data, Some(&docs), &root, &p, "t2").unwrap();
+        assert_eq!(open_at(&data, &docs, &root, &away.join("여행.reelcut"), "2026-11-05 1200")["conflict"], json!(false));
+        assert!(docs.join("Reelcut/_휴지통/여행 (2026-11-05 1200)").is_dir());
+        // The user puts an export in it, then deletes the project on Home: the folder stays
+        // where it is (it holds their file) and stays the project's.
+        std::fs::write(away.join("여행 완성.mp4"), b"v").unwrap();
+        assert_eq!(trash_project(&data, Some(&docs), &root, "kdA", "2026-11-05 1300").unwrap(), None);
+        assert!(away.join("여행 완성.mp4").is_file() && away.join("여행.reelcut").is_file());
+        // Brought back from Home's 휴지통: saves go to that folder, nothing is revived from
+        // _휴지통, and opening it is not a copy.
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t3").unwrap().file, away.join("여행.reelcut"));
+        assert!(!dir.exists() && docs.join("Reelcut/_휴지통/여행 (2026-11-05 1200)").is_dir());
+        assert_eq!(open_at(&data, &docs, &root, &away.join("여행.reelcut"), "t")["conflict"], json!(false));
+        // A folder holding only Reelcut's files goes to _휴지통 and comes back on restore.
+        std::fs::remove_file(away.join("여행 완성.mp4")).unwrap();
+        let (from, to) = trash_project(&data, Some(&docs), &root, "kdA", "2026-11-05 1400").unwrap().unwrap();
+        assert_eq!(from, away);
+        assert!(to.is_dir() && with_reg(&data, |r| r.file.folders.get("kdA").is_none()));
+        let back = save_folder(&data, Some(&docs), &root, &p, "t4").unwrap().file;
+        assert_eq!(back, dir.join("여행.reelcut"));
+        assert!(!to.exists() && docs.join("Reelcut/_휴지통/여행 (2026-11-05 1200)").is_dir());
+    }
+
+    #[test]
+    fn a_folder_taken_over_is_followed_when_renamed_later() {
+        let root = tmp("tkren");
+        let (data, docs) = (root.join("data"), root.join("Docs"));
+        let p = sample("trA", "여행", Path::new("/x"));
+        let dir = save_folder(&data, Some(&docs), &root, &p, "t").unwrap().file.parent().unwrap().to_path_buf();
+        let away = root.join("D").join("영상").join("여행");
+        std::fs::create_dir_all(away.parent().unwrap()).unwrap();
+        std::fs::rename(&dir, &away).unwrap();
+        age(&away.join("여행.reelcut"));
+        save_folder(&data, Some(&docs), &root, &p, "t2").unwrap();
+        // Taken over by a double-click, with no save after it; then renamed in Explorer.
+        assert_eq!(open_at(&data, &docs, &root, &away.join("여행.reelcut"), "2026-11-05 1200")["conflict"], json!(false));
+        let renamed = away.with_file_name("여행 최종");
+        std::fs::rename(&away, &renamed).unwrap();
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t3").unwrap().file, renamed.join("여행 최종.reelcut"));
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_snapshot_opened_before_the_next_save_opens_as_a_copy() {
+        let root = tmp("snapopen");
+        let (data, docs) = (root.join("data"), root.join("Docs"));
+        let mut p = sample("soA", "여행", Path::new("/x"));
+        let dir = save_folder(&data, Some(&docs), &root, &p, "t1").unwrap().file.parent().unwrap().to_path_buf();
+        let snap = dir.with_file_name("여행 - 복사본");
+        copy_tree(&dir, &snap);
+        age(&snap.join("여행.reelcut"));
+        let kept = std::fs::read(snap.join("여행.reelcut")).unwrap();
+        p["drafts"][0]["name"] = json!("둘째 편집본");
+        save_folder(&data, Some(&docs), &root, &p, "t2").unwrap();
+        // The original is renamed, and the snapshot is double-clicked before any save.
+        let renamed = dir.with_file_name("여행 최종");
+        std::fs::rename(&dir, &renamed).unwrap();
+        assert_eq!(open_at(&data, &docs, &root, &snap.join("여행.reelcut"), "t")["conflict"], json!(true));
+        assert_eq!(reg_folder(&data, "soA"), Some(renamed.clone()));
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t3").unwrap().file, renamed.join("여행 최종.reelcut"));
+        assert_eq!(std::fs::read(snap.join("여행.reelcut")).unwrap(), kept);
+        // Moved out of sight instead: the snapshot, older than the last save, is still a copy.
+        let moved = root.join("Archive").join("여행 최종");
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(&renamed, &moved).unwrap();
+        assert_eq!(open_at(&data, &docs, &root, &snap.join("여행.reelcut"), "t")["conflict"], json!(true));
+        assert_eq!(std::fs::read(snap.join("여행.reelcut")).unwrap(), kept);
+        // The moved folder itself, unchanged since the last save, is the project's folder.
+        assert_eq!(open_at(&data, &docs, &root, &moved.join("여행 최종.reelcut"), "t")["conflict"], json!(false));
+        assert_eq!(reg_folder(&data, "soA"), Some(moved));
+    }
+
+    #[test]
+    fn a_renamed_folder_without_its_readme_is_still_followed() {
+        let root = tmp("noreadme");
+        let (data, docs) = (root.join("data"), root.join("Docs"));
+        let p = sample("nrA", "여행", Path::new("/x"));
+        let dir = save_folder(&data, Some(&docs), &root, &p, "t").unwrap().file.parent().unwrap().to_path_buf();
+        std::fs::remove_file(dir.join("README.txt")).unwrap();
+        let renamed = dir.with_file_name("여행 최종");
+        std::fs::rename(&dir, &renamed).unwrap();
+        // Its project file still has the old name; its conversations show it is the project's.
+        assert!(is_project_folder(&renamed));
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t2").unwrap().file, renamed.join("여행 최종.reelcut"));
+        assert!(!dir.exists());
+        // A README saved with a byte-order mark still counts.
+        std::fs::write(renamed.join("README.txt"), format!("\u{feff}{README}")).unwrap();
+        std::fs::remove_dir_all(renamed.join(CHATS)).unwrap();
+        assert!(is_project_folder(&renamed));
     }
 
     #[test]

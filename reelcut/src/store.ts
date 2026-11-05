@@ -231,7 +231,15 @@ export async function loadProjects() {
  * asked for while one runs saves whichever project is open when it runs, which would be the next.
  */
 async function saveBeforeSwitch() {
-  if (st.project && (firstUnsaved || inFlight || queued)) await saveNow();
+  const p = st.project;
+  if (!p || !(firstUnsaved || inFlight || queued)) return;
+  try {
+    await saveNow();
+  } catch (e) {
+    // Not switched: the open project keeps its edits in memory for the next save (a full disk freed).
+    toast(`"${p.name}"을(를) 저장하지 못해 다른 프로젝트로 넘어가지 않았습니다: ${String((e as Error)?.message ?? e)}`);
+    throw e;
+  }
 }
 
 export async function createProject(name: string, aspect = "16:9", fps = 30): Promise<Project> {

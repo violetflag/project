@@ -245,6 +245,16 @@ describe("saving", () => {
     expect(st.project?.name).toBe("새 프로젝트");
   });
 
+  it("says so and stays on the open project when its last edit cannot be saved before a switch", async () => {
+    store.set("project-sD", JSON.stringify(proj("sD", { name: "비" })));
+    set({ project: proj("sC", { name: "에이" }), draftId: "d1", route: "home" });
+    vi.spyOn(api, "projectSave").mockRejectedValue(new Error("디스크 공간이 부족합니다"));
+    mutate((p) => ({ ...p, name: "에이 최종" }));
+    await expect(openProject("sD")).rejects.toThrow("디스크");
+    expect(st.project?.name).toBe("에이 최종");
+    expect(st.toast).toContain("다른 프로젝트로 넘어가지 않았습니다");
+  });
+
   it("never brings back a project deleted from Home while it was the last one open", async () => {
     set({ project: proj("s2"), draftId: "d1", route: "home" });
     await saveNow();
