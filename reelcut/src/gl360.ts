@@ -75,7 +75,7 @@ export const plainLens = (fov: number): LensShape => {
 };
 /** How the picture on the texture is laid out. "lenses": the back lens on the left half, the front on the right, joined here. */
 export type Proj = { kind: "equirect" } | { kind: "dfisheye"; fov: number; swap: boolean }
-  | { kind: "lenses"; back: LensShape; front: LensShape; yaw: number; pitch: number; roll: number; blend: number; band: number; fov: number };
+  | { kind: "lenses"; back: LensShape; front: LensShape; yaw: number; pitch: number; roll: number; blend: number; band: number; fov: number; every: number };
 
 const VS = `attribute vec2 p; varying vec2 uv; void main(){ uv = vec2(p.x*0.5+0.5, 0.5-p.y*0.5); gl_Position = vec4(p,0.0,1.0); }`;
 const LENS_AT = `vec2 lensAt(vec3 v, vec4 s, vec4 k, float k5){
@@ -197,6 +197,7 @@ export class Flat360 {
   private nodes = new Uint8Array(SEAM_NODES * 4);
   private seam = new SeamTrack();
   private seamFrame: number | string | null = null;
+  private seamTick = 0;
   private row = new Uint8Array((MARK_W * (MARK_BITS + 2)) * 4);
   constructor(public canvas: HTMLCanvasElement) {
     const gl = canvas.getContext("webgl", { preserveDrawingBuffer: true, antialias: false });
@@ -251,8 +252,10 @@ export class Flat360 {
   private updateSeam(proj: Extract<Proj, { kind: "lenses" }>, key: number | string, vsA: number, vsB: number) {
     const { gl } = this;
     if (key === this.seamFrame) return;
-    if (typeof key !== "number" || typeof this.seamFrame !== "number" || key < this.seamFrame || key - this.seamFrame > 3) this.seam.reset();
+    if (typeof key !== "number" || typeof this.seamFrame !== "number" || key < this.seamFrame || key - this.seamFrame > 3) { this.seam.reset(); this.seamTick = 0; }
     this.seamFrame = key;
+    const measure = !this.seam.started || this.seamTick % Math.max(1, proj.every) === 0;
+    this.seamTick++;
     if (!this.stripTex) {
       this.stripTex = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, this.stripTex);
@@ -273,6 +276,7 @@ export class Flat360 {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.bindTexture(gl.TEXTURE_2D, this.tex);
     }
+    if (measure) {
     const sp = this.stripProg!;
     gl.useProgram(sp);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.stripFb);
@@ -286,13 +290,16 @@ export class Flat360 {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.useProgram(this.prog);
     this.seam.update(this.stripPx);
-    this.seam.nodes(proj.band, this.nodes);
     (window as any).__seamStats?.push({ ...this.seam.last, k: key });
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    }
+    this.seam.ease();
+    (window as any).__seamMoved?.push(this.seam.last.moved);
+    this.seam.nodes(proj.band, this.nodes);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.seamTex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, SEAM_NODES, 1, gl.RGBA, gl.UNSIGNED_BYTE, this.nodes);
     gl.activeTexture(gl.TEXTURE0);
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
   }
   /** The frame number under the picture just uploaded. */
   private frameMark(w: number, h: number): number | null {

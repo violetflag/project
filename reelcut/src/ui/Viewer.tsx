@@ -57,7 +57,7 @@ function projOf(a: Asset): Proj {
     const f = layout === "dual" ? (s?.factory as any[] | undefined) : undefined;
     // The band lined up on each frame (src-tauri/src/pano.rs `Strip`); none for a plain blend.
     const band = s?.seam === "plain" ? 0 : (Math.max(0.5, ((fov - 180) / 2) * 0.7) * Math.PI) / 180;
-    return { kind: "lenses", back: shape(f?.[0]), front: shape(f?.[1]), yaw: s?.yaw ?? 0, pitch: s?.pitch ?? 0, roll: s?.roll ?? 0, blend: blendWidth(fov), band, fov };
+    return { kind: "lenses", back: shape(f?.[0]), front: shape(f?.[1]), yaw: s?.yaw ?? 0, pitch: s?.pitch ?? 0, roll: s?.roll ?? 0, blend: blendWidth(fov), band, fov, every: Math.max(1, Math.round((a.info.fps || 30) * 0.1)) };
   }
   return p.proj === "dfisheye" ? { kind: "dfisheye", fov: p.fov, swap: p.swap } : { kind: "equirect" };
 }

@@ -20,7 +20,7 @@ const mean = (a: Float32Array) => a.reduce((s, v) => s + v, 0) / a.length;
 describe("lining the lenses up along the seam", () => {
   it("finds a shift between the lenses and brings them together", () => {
     const t = new SeamTrack();
-    for (let i = 0; i < 6; i++) t.update(strip(1, 2));
+    for (let i = 0; i < 12; i++) { t.update(strip(1, 2)); t.ease(); }
     expect(mean(t.fx)).toBeCloseTo(1, 0);
     expect(mean(t.fy)).toBeCloseTo(2, 0);
     expect(t.last.aligned).toBeLessThan(t.last.plain * 0.5);
@@ -35,7 +35,7 @@ describe("lining the lenses up along the seam", () => {
   });
   it("matches the brightness half way", () => {
     const t = new SeamTrack();
-    for (let i = 0; i < 12; i++) t.update(strip(0, 0, 1.2));
+    for (let i = 0; i < 30; i++) { t.update(strip(0, 0, 1.2)); t.ease(); }
     expect(mean(t.gy)).toBeGreaterThan(1.05);
     expect(mean(t.gy)).toBeLessThan(1.15);
   });

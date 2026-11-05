@@ -1141,7 +1141,7 @@ pub fn motion_for(dir: &Path, ffmpeg: &Path, ffprobe: &Path, jobs: &Jobs, tag: &
 }
 
 /// Bump when the engine's picture changes, so kept clips are made again.
-pub const ENGINE_VERSION: u32 = 12;
+pub const ENGINE_VERSION: u32 = 13;
 
 /// How `render_flat` works: the lens size to decode at, the GPU, and the intermediate's quality.
 #[derive(Clone, Debug, Default)]
@@ -1216,7 +1216,8 @@ pub fn stills(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo,
     for (i, &t) in times.iter().enumerate() {
         let t = t.clamp(0.0, (info.duration - 1.0 / fps).max(0.0));
         let src = source_for(info, lens, t, 0.9 / fps, Some(px), false);
-        let mut st = Stitcher::new(&s, src.n() as f64, w as usize, h as usize, false, rs_of(m, &stab));
+        // The same seam as the export.
+        let mut st = Stitcher::new(&s, src.n() as f64, w as usize, h as usize, s.precise(), rs_of(m, &stab));
         let k0 = (t * fps).round().max(0.0) as usize;
         let at = move |_x: f64| view(t);
         let setup = setup_fn(m, &tg, k0, &stab, &at);
@@ -1556,19 +1557,47 @@ mod tests {
             }
         }
         println!("SEAM all: plain {:.2} lined up {:.2}; flow moves {:.3}, cut {:.4}", all[0], all[1], all[2], all[3]);
+        // Does the seam flicker? The picture's change from frame to frame on the seam against beside it, at
+        // a view that looks along the seam, with a nearly still camera where there is one.
+        for t in [1000.0, 700.0, 420.0, 1234.0] {
+            for flow in [false, true] {
+                let mut src = source_for(&info, &lens, t, 4.0, Some(1920), false);
+                src.gpu = true;
+                let mut sp = Stitcher::new(&s, src.n() as f64, 960, 540, flow, None);
+                let rot = matrix(ypr(90.0, -10.0, 0.0));
+                let setup = move |_k: usize, _t: f64| FrameSetup { rot, hfov: Some((91.0, 0.0)), omega: None };
+                let mut last: Option<Vec<u8>> = None;
+                let (mut on, mut off, mut n) = (0f64, 0f64, 0f64);
+                let mut cb = |_k: usize, f: &Frame<u8>| {
+                    if let Some(l) = &last {
+                        for y in 0..540 {
+                            for x in (440..520).chain(120..200) {
+                                let d = (f.p[0][y * 960 + x] as f64 - l[y * 960 + x] as f64).abs();
+                                if x >= 440 { on += d } else { off += d }
+                            }
+                        }
+                        n += 1.0;
+                    }
+                    last = Some(f.p[0].clone());
+                };
+                pano::run::<u8>(&bin("ffmpeg"), &Jobs::default(), "t", 0, &src, &mut sp, &setup, Sink::Call(&mut cb), |_| {}).unwrap();
+                let k = n * 540.0 * 80.0;
+                println!("SEAM flicker t {t}: lined up {flow}: on the seam {:.3}, beside it {:.3}", on / k, off / k);
+            }
+        }
         // What it costs an export.
-        for flow in [false, true] {
+        for (flow, ow, oh) in [(false, 1920, 1080), (true, 1920, 1080), (false, 3840, 2160), (true, 3840, 2160)] {
             let mut src = source_for(&info, &lens, 295.0, 8.0, None, false);
             src.gpu = true;
             src.crop = true;
-            let mut sp = Stitcher::new(&s, src.n() as f64, 1920, 1080, flow, None);
+            let mut sp = Stitcher::new(&s, src.n() as f64, ow, oh, flow, None);
             let rot = matrix(ypr(90.0, -10.0, 0.0));
             let setup = move |_k: usize, _t: f64| FrameSetup { rot, hfov: Some((91.0, 0.0)), omega: None };
             let mut frames = 0;
             let t0 = std::time::Instant::now();
             let mut cb = |_k: usize, _f: &Frame<u8>| frames += 1;
             pano::run::<u8>(&bin("ffmpeg"), &Jobs::default(), "t", 0, &src, &mut sp, &setup, Sink::Call(&mut cb), |_| {}).unwrap();
-            println!("SEAM speed lined up {flow}: {:.1} fps", frames as f64 / t0.elapsed().as_secs_f64());
+            println!("SEAM speed {ow} lined up {flow}: {:.1} fps; ms a frame: strips {:.1} measure {:.1} band {:.1}", frames as f64 / t0.elapsed().as_secs_f64(), sp.times[0] * 1000.0 / frames as f64, sp.times[1] * 1000.0 / frames as f64, sp.times[2] * 1000.0 / frames as f64);
         }
     }
 

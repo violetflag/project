@@ -1185,8 +1185,9 @@ fn export(handle: tauri::AppHandle, app: St<'_>, id: String, plan: render::Plan)
     Ok(out)
 }
 
-/// Oldest clips go first once the engine's kept clips pass `limit_mb`.
-fn prune_engine_cache(dir: &Path, limit_mb: u64) {
+/// Oldest clips go first once the engine's kept clips pass `limit_mb`; never one in `keep`, which the
+/// export still has to read (a long 4K export alone passes the limit).
+fn prune_engine_cache(dir: &Path, limit_mb: u64, keep: &[PathBuf]) {
     let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| {
         let m = e.metadata().ok()?;
         Some((m.modified().ok()?, m.len(), e.path()))
@@ -1196,6 +1197,9 @@ fn prune_engine_cache(dir: &Path, limit_mb: u64) {
     for (_, len, p) in files {
         if total <= limit_mb << 20 {
             break;
+        }
+        if keep.contains(&p) {
+            continue;
         }
         let _ = std::fs::remove_file(p);
         total -= len;
@@ -1334,9 +1338,10 @@ fn engine_prepass(app: &App, tag: &str, gen: u64, plan: &render::Plan, work: &Pa
             sc.spawn(&worker);
         }
     });
-    prune_engine_cache(&cache_dir, 20 * 1024);
-    let mut p2 = plan.clone();
     let results = results.into_inner();
+    let in_use: Vec<PathBuf> = results.iter().flatten().filter_map(|r| r.as_ref().ok().cloned()).collect();
+    prune_engine_cache(&cache_dir, 20 * 1024, &in_use);
+    let mut p2 = plan.clone();
     for (n, j) in jobs.iter().enumerate() {
         let out = match &results[n] {
             Some(Ok(p)) => p.clone(),
@@ -1680,4 +1685,25 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running reelcut");
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn pruning_the_cache_leaves_what_the_export_still_reads() {
+        let d = std::env::temp_dir().join(format!("reelcut-prune-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        let mb = vec![0u8; 1 << 20];
+        let (a, b, c) = (d.join("a.mkv"), d.join("b.mkv"), d.join("c.mkv"));
+        for p in [&a, &b, &c] {
+            std::fs::write(p, &mb).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        prune_engine_cache(&d, 1, &[a.clone(), c.clone()]);
+        assert!(a.is_file() && c.is_file(), "the export's files stay");
+        assert!(!b.is_file(), "an old one goes");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

@@ -6,7 +6,7 @@
 export const STRIP_W = 512;
 /** Core rows across the band, and margin rows each side for the search. */
 export const STRIP_NR = 12;
-export const STRIP_MR = 6;
+export const STRIP_MR = 3;
 export const STRIP_H = STRIP_NR + 2 * STRIP_MR;
 /** Nodes the shader reads (a 64×1 texture, one RGBA8 texel each). */
 export const SEAM_NODES = 64;
@@ -46,7 +46,12 @@ export class SeamTrack {
   ts = new Float32Array(STRIP_W).fill(0.5);
   gy = new Float32Array(STRIP_W).fill(1);
   started = false;
-  /** This frame: the two lenses' difference on the seam line without and with the alignment, and how much the flow moved. */
+  /** The last measure, which the state eases towards. */
+  private tfx = new Float32Array(STRIP_W);
+  private tfy = new Float32Array(STRIP_W);
+  private tts = new Float32Array(STRIP_W).fill(0.5);
+  private tgy = new Float32Array(STRIP_W).fill(1);
+  /** The last measure: the two lenses' difference on the seam line without and with the alignment. How much the flow moved a frame. */
   last = { plain: 0, aligned: 0, moved: 0 };
   private a = new Float32Array(STRIP_W * STRIP_H);
   private b = new Float32Array(STRIP_W * STRIP_H);
@@ -198,16 +203,9 @@ export class SeamTrack {
       gw[g] = 1;
     }
     const gy = expandCirc(gaussCirc(gv, gw, 1, 1, 0.1), w);
-    // Over time, as the export does.
-    const [af, at, ac] = this.started ? [0.45, 0.5, 0.25] : [1, 1, 1];
-    let moved = 0;
-    for (let c = 0; c < w; c++) {
-      const dx = (lfx[c] - this.fx[c]) * af, dy = (lfy[c] - this.fy[c]) * af;
-      moved += Math.abs(dx) + Math.abs(dy);
-      this.fx[c] += dx;
-      this.fy[c] += dy;
-      this.ts[c] += (ts[c] - this.ts[c]) * at;
-      this.gy[c] += (gy[c] - this.gy[c]) * ac;
+    this.tfx.set(lfx); this.tfy.set(lfy); this.tts.set(ts); this.tgy.set(gy);
+    if (!this.started) {
+      this.fx.set(lfx); this.fy.set(lfy); this.ts.set(ts); this.gy.set(gy);
     }
     let plain = 0, aligned = 0, m = 0;
     for (let c = 0; c < w; c += 2) {
@@ -218,8 +216,22 @@ export class SeamTrack {
       aligned += Math.abs(this.bil(this.a, c - t * this.fx[c], y - t * this.fy[c]) - this.bil(this.b, c + (1 - t) * this.fx[c], y + (1 - t) * this.fy[c]));
       m++;
     }
-    this.last = { plain: plain / Math.max(1, m), aligned: aligned / Math.max(1, m), moved: moved / w };
+    this.last = { plain: plain / Math.max(1, m), aligned: aligned / Math.max(1, m), moved: this.last.moved };
     this.started = true;
+  }
+
+  /** One frame nearer the last measure, as the export does (pano.rs `ease_seam`). */
+  ease() {
+    let moved = 0;
+    for (let c = 0; c < STRIP_W; c++) {
+      const dx = (this.tfx[c] - this.fx[c]) * 0.3, dy = (this.tfy[c] - this.fy[c]) * 0.3;
+      moved += Math.abs(dx) + Math.abs(dy);
+      this.fx[c] += dx;
+      this.fy[c] += dy;
+      this.ts[c] += (this.tts[c] - this.ts[c]) * 0.3;
+      this.gy[c] += (this.tgy[c] - this.gy[c]) * 0.12;
+    }
+    this.last.moved = moved / STRIP_W;
   }
 
   /**
