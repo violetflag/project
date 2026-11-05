@@ -56,7 +56,8 @@ export function QuickBar() {
   const all = actionList();
   const basic = all.filter((a) => a.group === "기본");
   const v360 = has360(d) ? all.filter((a) => a.group === "360") : [];
-  const labels = w >= 1400;
+  // Names next to the icons while they fit (measured: the 360 names need a 1600 px window).
+  const labelsBasic = w >= 1250, labels360 = w >= 1600;
   const fold = w < 1100;
 
   const run = async (a: ActionDef, shift: boolean, params: Record<string, unknown> = {}) => {
@@ -73,7 +74,7 @@ export function QuickBar() {
   const tip = (a: ActionDef) => `${a.label}${a.key ? ` (${keyLabel(a.key)})` : ""}\n${a.tooltip ?? ""}\n적용: ${scopeText} · Shift+클릭: 편집본 전체`;
   const off = (a: ActionDef) => !!busy || (a.enabled ? !a.enabled(d, { kind: "draft" }) : false);
 
-  const btn = (a: ActionDef, withLabel = labels) => {
+  const btn = (a: ActionDef, withLabel: boolean) => {
     const I = ICONS[a.icon ?? ""] ?? Focus;
     return (
       <button class={withLabel ? "qb-btn" : "icon-btn"} disabled={off(a)} title={tip(a)} aria-label={a.label} onClick={(e) => run(a, e.shiftKey)}>
@@ -86,9 +87,9 @@ export function QuickBar() {
   const stab = basic.find((a) => a.id === "stab");
   return (
     <div class="quickbar" role="group" aria-label="빠른 작업">
-      {basic.map((a) => a.id !== "stab" ? btn(a) : (
+      {basic.map((a) => a.id !== "stab" ? btn(a, labelsBasic) : (
         <div class="qb-split" ref={stabRef}>
-          {btn(a)}
+          {btn(a, labelsBasic)}
           <button class="icon-btn qb-arrow" disabled={off(a)} aria-label="흔들림 줄이기 세기" aria-haspopup="menu" aria-expanded={menu === "stab"} title="세기 고르기: 약·보통·강·방향 고정·끄기" onClick={() => setMenu(menu === "stab" ? "" : "stab")}>
             <ChevronDown size={12} aria-hidden="true" />
           </button>
@@ -103,7 +104,7 @@ export function QuickBar() {
         </div>
       ))}
       {v360.length > 0 && <span class="sep" />}
-      {v360.length > 0 && !fold && v360.map((a) => btn(a))}
+      {v360.length > 0 && !fold && v360.map((a) => btn(a, labels360))}
       {v360.length > 0 && fold && (
         <div class="qb-split" ref={moreRef}>
           <button class="icon-btn" aria-label="360 버튼 더보기" aria-haspopup="menu" aria-expanded={menu === "more"} title="360 화각·왜곡 보정·시점 버튼" onClick={() => setMenu(menu === "more" ? "" : "more")}><Ellipsis size={16} aria-hidden="true" /></button>
