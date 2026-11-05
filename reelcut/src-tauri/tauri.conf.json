@@ -40,7 +40,8 @@
     },
     "fileAssociations": [
       { "ext": ["osv", "lrf"], "name": "DJI Osmo 360 Video", "description": "DJI Osmo 360 Video", "role": "Viewer" },
-      { "ext": ["reelcut"], "name": "Reelcut 프로젝트", "description": "Reelcut 프로젝트", "role": "Editor" }
+      { "ext": ["reelcut"], "name": "Reelcut 프로젝트", "description": "Reelcut 프로젝트", "role": "Editor" },
+      { "ext": ["reelcutpack"], "name": "Reelcut 프로젝트 묶음", "description": "Reelcut 프로젝트 묶음", "role": "Editor" }
     ],
     "windows": {
       "nsis": {

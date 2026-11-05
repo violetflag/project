@@ -197,14 +197,11 @@ fn bil_strip(p: &[f32], w: usize, h: usize, x: f32, y: f32) -> f32 {
 
 /// Runs `f(row_range, chunk)` over `rows` rows of `buf` (each row `row_len` items) on all cores.
 fn par_rows<V: Send>(buf: &mut [V], row_len: usize, rows: usize, f: impl Fn(usize, &mut [V]) + Sync) {
+    use rayon::prelude::*;
     let threads = crate::hw::threads().max(1) as usize;
-    let per = rows.div_ceil(threads).max(1);
-    std::thread::scope(|sc| {
-        for (k, chunk) in buf[..rows * row_len].chunks_mut(per * row_len).enumerate() {
-            let f = &f;
-            sc.spawn(move || f(k * per, chunk));
-        }
-    });
+    // Twice the threads' number of pieces: a free thread takes the next, across all clips running.
+    let per = rows.div_ceil(threads * 2).max(1);
+    buf[..rows * row_len].par_chunks_mut(per * row_len).enumerate().for_each(|(k, chunk)| f(k * per, chunk));
 }
 
 // ------------------------------------------------------------------ lens geometry
@@ -623,7 +620,7 @@ impl Stitcher {
         let lens_w = (n * 360.0 / geo.fov) as usize;
         let strip = Strip::new(&geo, out_w.clamp(256, lens_w.max(256)));
         let nc = strip.nc;
-        let step = if out_w * out_h > 4_000_000 { 8 } else { 4 };
+        let step = if out_w * out_h > 600_000 { 8 } else { 4 };
         let blend = crate::stitch::blend_width(geo.fov).to_radians() as f32;
         Stitcher { geo, strip, flow, blend, gains: [s.gain_a, s.gain_b], state: SeamState::new(nc), out_w, out_h, step, rs, mesh_key: None, mesh: vec![], gw: 0, gh: 0 }
     }
@@ -902,6 +899,57 @@ impl Stitcher {
             let (fw, fh) = src.dims(pl);
             let plane = &src.p[pl];
             let bandp = &band[pl];
+            if !flow {
+                // The live preview's blend: front lens weight by the angle past the boundary.
+                par_rows(&mut out.p[pl], ow, oh, |r0, chunk| {
+                    let (dx, x0) = if ci == 0 { (1.0f32, 0.0f32) } else { (2.0, 0.5) };
+                    let half = if ci == 0 { 0.0 } else { 1.0 };
+                    for (ri, row) in chunk.chunks_exact_mut(ow).enumerate() {
+                        let fy = ((r0 + ri) as f32 * dx + x0) / step;
+                        let gy0 = (fy as usize).min(gh - 2);
+                        let ty = fy - gy0 as f32;
+                        let (top, bot) = (&mesh[gy0 * gw..(gy0 + 1) * gw], &mesh[(gy0 + 1) * gw..(gy0 + 2) * gw]);
+                        let mut x = 0usize;
+                        while x < ow {
+                            let at = (x as f32 * dx + x0) / step;
+                            let gx0 = (at as usize).min(gw - 2);
+                            let end = if gx0 == gw - 2 { ow } else { ((((gx0 + 1) as f32 * step - x0) / dx).ceil() as usize).clamp(x + 1, ow) };
+                            let tx = at - gx0 as f32;
+                            let (dt, mut cur, mut inc) = (dx / step, [0f32; 5], [0f32; 5]);
+                            for (j, k) in [0usize, 1, 2, 3, 5].into_iter().enumerate() {
+                                let l = top[gx0][k] + (bot[gx0][k] - top[gx0][k]) * ty;
+                                let r = top[gx0 + 1][k] + (bot[gx0 + 1][k] - top[gx0 + 1][k]) * ty;
+                                cur[j] = l + (r - l) * tx;
+                                inc[j] = (r - l) * dt;
+                            }
+                            for o in &mut row[x..end] {
+                                let w = ((cur[4] + bw / 2.0) / bw).clamp(0.0, 1.0);
+                                let sample = |lens: usize| {
+                                    let (mut px, mut py) = (cur[lens * 2], cur[lens * 2 + 1]);
+                                    if half > 0.0 {
+                                        px = (px + 0.5) * 0.5 - 0.5;
+                                        py = (py + 0.5) * 0.5 - 0.5;
+                                    }
+                                    ga[lens].apply(pl, bil(plane, fw, lens * ln, ln, fh, px, py))
+                                };
+                                let val = if w <= 0.0 {
+                                    sample(0)
+                                } else if w >= 1.0 {
+                                    sample(1)
+                                } else {
+                                    w * sample(1) + (1.0 - w) * sample(0)
+                                };
+                                *o = T::put(val);
+                                for j in 0..5 {
+                                    cur[j] += inc[j];
+                                }
+                            }
+                            x = end;
+                        }
+                    }
+                });
+                continue;
+            }
             par_rows(&mut out.p[pl], ow, oh, |r0, chunk| {
                 for (i, o) in chunk.iter_mut().enumerate() {
                     let (y, x) = (r0 + i / ow, i % ow);
@@ -920,25 +968,7 @@ impl Stitcher {
                         a + (bb - a) * ty
                     };
                     let s = lerp(5);
-                    let val = if !flow {
-                        // The live preview's blend: front lens weight by the angle past the boundary.
-                        let w = crate::stitch::front_weight(s as f64, bw as f64) as f32;
-                        let sample = |lens: usize| {
-                            let (mut px, mut py) = (lerp(lens * 2), lerp(lens * 2 + 1));
-                            if ci == 1 {
-                                px = (px + 0.5) * 0.5 - 0.5;
-                                py = (py + 0.5) * 0.5 - 0.5;
-                            }
-                            ga[lens].apply(pl, bil(plane, fw, lens * ln, ln, fh, px, py))
-                        };
-                        if w <= 0.0 {
-                            sample(0)
-                        } else if w >= 1.0 {
-                            sample(1)
-                        } else {
-                            w * sample(1) + (1.0 - w) * sample(0)
-                        }
-                    } else if s <= -b || s >= b {
+                    let val = if s <= -b || s >= b {
                         let lens = if s >= b { 1 } else { 0 };
                         let (mut px, mut py) = (lerp(lens * 2), lerp(lens * 2 + 1));
                         if ci == 1 {
@@ -1201,6 +1231,40 @@ pub fn run<T: Px>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How long a moving 1080p view takes (REELCUT_BENCH=1 cargo test --release --lib bench_frame -- --nocapture).
+    #[test]
+    fn bench_frame() {
+        if std::env::var_os("REELCUT_BENCH").is_none() {
+            return;
+        }
+        let st = Stitch { fov: 193.4, gain_a: [0.976, 0.4, -0.3], gain_b: [1.025, -0.4, 0.3], ..Default::default() };
+        let n: usize = std::env::var("REELCUT_BENCH").ok().and_then(|v| v.parse().ok()).unwrap_or(3564) & !1;
+        let mut src = Frame::<u8>::new(2 * n, n);
+        for pl in 0..3 {
+            let (w, _) = src.dims(pl);
+            for (i, v) in src.p[pl].iter_mut().enumerate() {
+                *v = ((i % w) * 7 + (i / w) * 13) as u8;
+            }
+        }
+        for workers in [1usize, 3] {
+            let t = std::time::Instant::now();
+            let frames = 60usize;
+            std::thread::scope(|sc| {
+                for w in 0..workers {
+                    let (st, src) = (&st, &src);
+                    sc.spawn(move || {
+                        let mut s = Stitcher::new(st, n as f64, 1920, 1080, false, None);
+                        for k in 0..frames {
+                            let rot = crate::stitch::matrix(crate::stitch::ypr(w as f64 * 40.0 + k as f64 * 0.5, -15.0, 0.0));
+                            std::hint::black_box(s.frame(src, &FrameSetup { rot, hfov: Some((91.0, 0.3)), omega: None }));
+                        }
+                    });
+                }
+            });
+            println!("BENCH {workers} worker(s): {:.1} ms per frame per worker, {:.0} fps overall", t.elapsed().as_secs_f64() * 1000.0 / frames as f64, (workers * frames) as f64 / t.elapsed().as_secs_f64());
+        }
+    }
 
     /// A synthetic scene: a function of direction (front frame) → luma.
     fn scene(d: [f64; 3]) -> f32 {

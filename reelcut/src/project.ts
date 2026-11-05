@@ -3,7 +3,7 @@
 // records and dated backups (src-tauri/src/project.rs writes it on every save). This module opens
 // such files (double-click, 파일 > 열기, a drop, a second start), saves a copy under another name,
 // restores a backup, and keeps the hourly backup.
-import { api, pickProject, type FoundChat } from "./api";
+import { api, pickProject, pickSave, type FoundChat } from "./api";
 import { flush, logAction } from "./actionlog";
 import { copyChat } from "./chats";
 import { newDraft, uid } from "./edit";
@@ -13,6 +13,7 @@ import {
 import type { Project } from "./types";
 
 export const isProjectFile = (p: string) => /\.reelcut$/i.test(p);
+const isPack = (p: string) => /\.reelcutpack$/i.test(p);
 const msg = (e: unknown) => String((e as Error)?.message ?? e);
 
 /**
@@ -23,6 +24,7 @@ const msg = (e: unknown) => String((e as Error)?.message ?? e);
 export async function openProjectFile(path: string): Promise<boolean> {
   let r: Awaited<ReturnType<typeof api.projectOpen>>;
   try {
+    if (isPack(path)) path = (await api.projectUnpack(path)).file;
     r = await api.projectOpen(path, localStamp());
   } catch (e) {
     toast(`프로젝트를 열 수 없습니다: ${msg(e)}`);
@@ -62,7 +64,7 @@ export async function openProjectDialog() {
 /** Files from Explorer, a drop or a second start: a project (file or folder) opens, media is imported. */
 export async function openPaths(paths: string[]) {
   if (!paths.length) return;
-  const proj = paths.find(isProjectFile) ?? (await api.projectFileIn(paths).catch(() => null));
+  const proj = paths.find((p) => isProjectFile(p) || isPack(p)) ?? (await api.projectFileIn(paths).catch(() => null));
   if (proj) {
     await openProjectFile(proj);
     return;
@@ -118,6 +120,36 @@ export async function saveProjectAs(name: string): Promise<boolean> {
     toast(`다른 이름으로 저장하지 못했습니다: ${msg(e)}`);
     return false;
   }
+}
+
+const sizeText = (b: number) => (b >= 1 << 20 ? `${(b / (1 << 20)).toFixed(1)}MB` : `${Math.max(1, Math.round(b / 1024))}KB`);
+
+/**
+ * 파일 > 프로젝트 묶어 내보내기: edits, conversations and logs in one file to move to another PC.
+ * The footage stays where it is (it is found again by name and size there), and the pictures in
+ * `대화\비공개` stay out, so the file can be handed on.
+ */
+export async function packProject() {
+  const p = st.project;
+  if (!p) return;
+  await saveNow();
+  flush();
+  const dest = await pickSave(`${p.name}.reelcutpack`, "Reelcut 프로젝트 묶음", "reelcutpack");
+  if (!dest) return;
+  try {
+    const r = await api.projectPack(p.id, dest, false);
+    toast(`묶었습니다: 파일 ${r.files}개, ${sizeText(r.bytes)}. 영상 파일과 비공개 사진은 들어가지 않습니다`);
+  } catch (e) { toast(`묶지 못했습니다: ${msg(e)}`); }
+}
+
+/** 도움말 > 진단 파일 만들기: logs only, no pictures or conversations. */
+export async function makeDiagBundle() {
+  const dest = await pickSave("reelcut-진단.zip", "ZIP", "zip");
+  if (!dest) return;
+  try {
+    const r = await api.diagBundle(dest);
+    toast(`진단 파일을 만들었습니다: 로그 ${r.files}개, ${sizeText(r.bytes)}. 사진과 AI 대화는 들어가지 않습니다`);
+  } catch (e) { toast(`만들지 못했습니다: ${msg(e)}`); }
 }
 
 /** 파일 > 백업 만들기. */

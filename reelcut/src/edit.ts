@@ -275,6 +275,12 @@ export function defaultLens(a: Asset): Lens {
 /** Stabilisation a clip uses: its own (toolbar 흔들림 줄이기 / 수평 맞추기), else its media's (null = the default, horizon). */
 export const stabFor = (c: Pick<Clip, "stab">, a: Asset | undefined): Stab | null => c.stab ?? a?.lens?.stab ?? null;
 /** The lens a clip renders with: the media's, with the clip's own stabilisation when it has one. */
+/** The width the user picked with a view button, if any. */
+export function userWidth(c: Clip): { hfov: number; dist: number } | null {
+  const v = c.viewKeys?.[0]?.view ?? c.view;
+  return c.userSet?.width && v ? { hfov: v.hfov, dist: v.dist ?? 0 } : null;
+}
+
 export const lensFor = (c: Pick<Clip, "stab">, a: Asset): Lens => (c.stab ? { ...defaultLens(a), stab: c.stab } : defaultLens(a));
 export const DEFAULT_VIEW: View = { yaw: 0, pitch: 0, roll: 0, hfov: 91, dist: 0.3 };
 

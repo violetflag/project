@@ -37,7 +37,7 @@ pub const FORMAT: u64 = 1;
 const TRASH: &str = "_휴지통";
 const CHATS: &str = "대화";
 const RAW: &str = "원본";
-const PRIVATE: &str = "비공개";
+pub const PRIVATE: &str = "비공개";
 const LOGS: &str = "기록";
 const BACKUPS: &str = "백업";
 const ACTIONS_FILE: &str = "작업.jsonl";
@@ -1372,6 +1372,45 @@ pub async fn project_info(app: super::St<'_>, handle: tauri::AppHandle, id: Stri
         let Some(dir) = located(&app.data_dir, docs.as_deref(), &home, &id).0 else { return Ok(None) };
         let file = project_files(&dir).into_iter().next();
         Ok(Some(json!({ "folder": dir.to_string_lossy(), "file": file.map(|f| f.to_string_lossy().into_owned()) })))
+    })
+    .await
+}
+
+/// 파일 > 프로젝트 묶어 내보내기: the project folder as one file, without `비공개` unless asked.
+#[tauri::command]
+pub async fn project_pack(app: super::St<'_>, handle: tauri::AppHandle, id: String, dest: String, private: bool) -> Result<Value, String> {
+    let app = app.inner().clone();
+    super::blocking(move || {
+        let (docs, home) = places(&handle);
+        let _one = SAVING.lock();
+        let Some(dir) = located(&app.data_dir, docs.as_deref(), &home, &id).0 else { return Err("프로젝트 폴더를 찾지 못했습니다".into()) };
+        let files = crate::pack::pack_files(&dir, private);
+        let bytes = crate::pack::write_zip(Path::new(&dest), &files)?;
+        Ok(json!({ "files": files.len(), "bytes": bytes }))
+    })
+    .await
+}
+
+/// A `.reelcutpack` becomes a new folder beside the other projects. Returns its project file.
+#[tauri::command]
+pub async fn project_unpack(app: super::St<'_>, handle: tauri::AppHandle, path: String) -> Result<Value, String> {
+    let app = app.inner().clone();
+    super::blocking(move || {
+        let (docs, home) = places(&handle);
+        let root = with_reg(&app.data_dir, |r| r.root(docs.as_deref(), &home));
+        crate::pack::unpack(Path::new(&path), &root)
+    })
+    .await
+}
+
+/// 도움말 > 진단 파일 만들기: the logs only, no pictures or conversations.
+#[tauri::command]
+pub async fn diag_bundle(app: super::St<'_>, dest: String) -> Result<Value, String> {
+    let app = app.inner().clone();
+    super::blocking(move || {
+        let files = crate::pack::diag_files(&app.data_dir);
+        let bytes = crate::pack::write_zip(Path::new(&dest), &files)?;
+        Ok(json!({ "files": files.len(), "bytes": bytes }))
     })
     .await
 }

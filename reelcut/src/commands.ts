@@ -9,7 +9,7 @@ import type { Clip } from "./types";
 import { player } from "./ui/Viewer";
 import { applyWorkspace, togglePanel } from "./ui/layout";
 import { actionList, runAction } from "./actions";
-import { backupNow, openProjectDialog, revealProjectFolder } from "./project";
+import { backupNow, makeDiagBundle, openProjectDialog, packProject, revealProjectFolder } from "./project";
 import "./quick";
 import "./quick360";
 
@@ -149,6 +149,7 @@ export const COMMANDS: Cmd[] = [
   } },
   { id: "saveAs", label: "다른 이름으로 저장…", menu: "파일", keys: "Ctrl+Shift+S", term: "Save As", enabled: inProject, run: () => set({ dialog: "saveAs" }) },
   { id: "revealProject", label: "프로젝트 폴더 열기", menu: "파일", term: "Show in Explorer", enabled: inProject, run: () => revealProjectFolder() },
+  { id: "pack", label: "프로젝트 묶어 내보내기…", menu: "파일", term: "Project Manager / Archive", enabled: inProject, run: packProject },
   { id: "backupNow", label: "백업 만들기", menu: "파일", enabled: inProject, run: backupNow },
   { id: "restoreBackup", label: "백업에서 되살리기…", menu: "파일", term: "Revert to Backup", enabled: inProject, run: () => set({ dialog: "backups" }) },
   { id: "export", label: "내보내기…", menu: "파일", keys: "Ctrl+E", sep: true, term: "Export / Render", enabled: hasClips, run: () => set({ dialog: "export" }) },
@@ -221,6 +222,7 @@ export const COMMANDS: Cmd[] = [
 
   // 도움말
   { id: "shortcuts", label: "단축키 목록", menu: "도움말", keys: "Ctrl+/", global: true, run: () => set({ dialog: "shortcuts" }) },
+  { id: "diagBundle", label: "진단 파일 만들기…", menu: "도움말", global: true, run: makeDiagBundle },
 ];
 
 // ---------------------------------------------------------------- key matching

@@ -50,11 +50,11 @@ export function reviewDraft(d: Draft, assets: Map<string, Asset>, o = REVIEW): F
     if (!is360(assets.get(c.asset)) || c.viewPreset === "planet") return;
     const ss = samples(c, o.step);
     for (const r of runs(ss, (v) => (Math.abs(v.pitch) > o.pitch ? v.pitch : null)))
-      out.push({ kind: "pitch", clip: c.id, at: at(r.from), to: at(r.to), text: `클립 ${i + 1}(${c.id}) ${fmt(at(r.from))}–${fmt(at(r.to))}: pitch ${r0(r.worst)}° (${r.worst < 0 ? "아래를 너무 내려다봄" : "위를 너무 올려다봄"}, ±${o.pitch} 안으로)` });
+      out.push({ kind: "pitch", clip: c.id, at: at(r.from), to: at(r.to), text: `클립 ${i + 1}(${c.id}) ${fmt(at(r.from))}–${fmt(at(r.to))}: pitch ${r0(r.worst)}° (${r.worst < 0 ? "아래를 너무 내려다봄" : "위를 너무 올려다봄"}, quick_action level로 ±${o.pitch} 안으로. 스크립트로 시점 키를 직접 고치지 마세요)` });
     for (const r of runs(ss, (v) => { const s = cornerStretch(v.hfov, clampDist(v.dist), hw); return s > o.stretch ? s : null; }))
       out.push({ kind: "stretch", clip: c.id, at: at(r.from), to: at(r.to), text: `클립 ${i + 1}(${c.id}) ${fmt(at(r.from))}–${fmt(at(r.to))}: 모서리가 ${r.worst.toFixed(2)}배 늘어남 (quick_action undistort나 view.wide로)` });
     for (const r of runs(ss, (v) => (Math.abs(v.pitch) > vfovOf(v.hfov, clampDist(v.dist), hw) / 2 - 2 ? v.pitch : null)))
-      out.push({ kind: "horizon", clip: c.id, at: at(r.from), to: at(r.to), text: `클립 ${i + 1}(${c.id}) ${fmt(at(r.from))}–${fmt(at(r.to))}: 수평선이 화면 밖 (pitch ${r0(r.worst)}°)` });
+      out.push({ kind: "horizon", clip: c.id, at: at(r.from), to: at(r.to), text: `클립 ${i + 1}(${c.id}) ${fmt(at(r.from))}–${fmt(at(r.to))}: 수평선이 화면 밖 (pitch ${r0(r.worst)}°, quick_action level로)` });
   });
   for (const j of cutJumps(d, assets)) {
     if (j.turn <= o.turn) continue;

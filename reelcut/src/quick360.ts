@@ -3,7 +3,7 @@
 // sudden turns at cuts within one recording). Registered in group "360", so the toolbar shows them
 // only when the draft has 360 clips.
 import { registerAction, type ActionDef, type ActionOut } from "./actions";
-import { is360, isGap, r3, updateClip, viewAt } from "./edit";
+import { is360, isGap, r3, updateClip, userWidth, viewAt } from "./edit";
 import { frameGroup, wrap180 } from "./framing";
 import { aspectHW, fovMax, presetView, PRESET_LABEL, undistort } from "./proj";
 import { levelLimit } from "./quick";
@@ -84,24 +84,27 @@ const KEY: Partial<Record<ViewPreset, string>> = { best: "Alt+Shift+1", zoom: "A
 
 const actions: ActionDef[] = [
   ...presets.map((p): ActionDef => ({
-    id: `view.${p}`, group: "360", label: PRESET_LABEL[p], icon: ICON[p], tooltip: TIP[p], key: KEY[p],
+    id: `view.${p}`, group: "360", label: PRESET_LABEL[p], icon: ICON[p], tooltip: TIP[p], key: KEY[p], marks: "width",
     enabled: any360,
-    run: ({ draft, clips }): ActionOut => {
+    run: ({ draft, clips, params, by }): ActionOut => {
       const am = assetMap();
       let d = draft, n = 0;
+      const skipped: string[] = [];
       for (const c of clips) {
         if (!is360Clip(c, am)) continue;
+        // The width the user picked stays unless they ask the AI to change it.
+        if (by === "ai" && c.userSet?.width && !params.override_user) { skipped.push(c.id); continue; }
         const nc = presetClip(c, p, draft.aspect);
         if (nc === c) continue;
         n++;
         d = updateClip(d, c.id, { view: nc.view, viewKeys: nc.viewKeys, viewPreset: p });
       }
       const x = presetView(draft.aspect, p);
-      return { draft: d, changed: n, detail: `${PRESET_LABEL[p]}: 화각 ${x.hfov}°, 왜곡 보정 ${x.dist} (${n}개 클립)` };
+      return { draft: d, changed: n, skipped, detail: `${PRESET_LABEL[p]}: 화각 ${x.hfov}°, 왜곡 보정 ${x.dist} (${n}개 클립${skipped.length ? `, 사용자가 고른 화각 ${skipped.length}개 건너뜀` : ""})` };
     },
   })),
   {
-    id: "undistort", group: "360", label: "왜곡 보정", icon: "LensConvex", key: "Alt+Shift+D",
+    id: "undistort", group: "360", label: "왜곡 보정", icon: "LensConvex", key: "Alt+Shift+D", marks: "width",
     tooltip: "넓은 화각에서 모서리가 늘어나는 것을 한 번에 바로잡습니다 (짧은 변의 화각은 그대로)",
     enabled: any360,
     run: ({ draft, clips }): ActionOut => {
@@ -134,9 +137,10 @@ const actions: ActionDef[] = [
       for (const c of clips) {
         if (!is360Clip(c, am) || !c.subjects?.length) continue;
         if (c.userSet?.view && !force) { skipped.push(c.id); continue; }
-        const { keys } = frameGroup(c.subjects, c.start, c.end, { aspect });
+        const w = userWidth(c);
+        const { keys } = frameGroup(c.subjects, c.start, c.end, { aspect, hfov: w?.hfov });
         if (!keys.length) { skipped.push(c.id); continue; }
-        const viewKeys = sortKeys(keys.map((k) => ({ t: k.t, view: c.view?.dist ? { ...k.view, dist: c.view.dist } : k.view })));
+        const viewKeys = sortKeys(keys.map((k) => ({ t: k.t, view: w ? { ...k.view, ...w } : c.view?.dist ? { ...k.view, dist: c.view.dist } : k.view })));
         if (JSON.stringify(viewKeys) === JSON.stringify(c.viewKeys)) continue;
         n++;
         d = updateClip(d, c.id, { viewKeys, viewPreset: undefined });

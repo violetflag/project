@@ -12,6 +12,7 @@ import {
   gazeSpans,
   pasteAttrs,
   type Pacing, mergeScenes, searchScenes,
+  userWidth,
 } from "./edit";
 import { aiExportSound, exportAndWait } from "./exporter";
 import { CAPTION_PRESETS, TEXT_KINDS } from "./graphics";
@@ -67,7 +68,7 @@ const SYSTEM = `당신은 Reelcut의 영상 편집 에이전트입니다. Reelcu
 - 끝나면 무엇을 했는지 2~4문장으로 알려 주세요. 편집본 길이, 잘라 낸 양처럼 확인한 숫자를 말하세요.
 
 ## 사용자가 직접 한 작업
-사용자가 상단 버튼이나 직접 편집으로 한 작업은 <user-actions>와 '켜져 있는 것' 줄에 나옵니다. 그 결과를 유지한 채 이어서 작업하세요. '사용자 지정' 표시가 있는 클립의 시점·흔들림·소리는 사용자가 분명히 요청하지 않으면 바꾸지 마세요. 꼭 바꿔야 하면 override_user: true와 이유를 함께 보내세요. 360 시점은 pitch를 -30~+30 안에서 고르고 수평선이 화면에 보이게 하세요. 더 넓게 보여야 하면 hfov를 직접 키우지 말고 quick_action의 view.wide나 view.ultra를 쓰세요. 컷이 바뀔 때 같은 녹화의 방향을 45도 넘게 갑자기 바꾸지 마세요. 버튼과 같은 작업은 quick_action으로 하세요. 사용자가 전에 무엇을 했는지 물으면 get_activity_log를 보세요.`;
+사용자가 상단 버튼이나 직접 편집으로 한 작업은 <user-actions>와 '켜져 있는 것' 줄에 나옵니다. 그 결과를 유지한 채 이어서 작업하세요. '사용자 지정' 표시가 있는 클립의 시점·화각·흔들림·소리는 사용자가 분명히 요청하지 않으면 바꾸지 마세요. '시점'이 사용자 지정이면 그 클립은 시점 작업에서 빼고, '화각'만 사용자 지정이면 방향은 맞춰도 되고 화각은 자동으로 유지됩니다. 꼭 바꿔야 하면 override_user: true와 이유를 함께 보내세요. 360 시점은 pitch를 -30~+30 안에서 고르고 수평선이 화면에 보이게 하세요. 더 넓게 보여야 하면 hfov를 직접 키우지 말고 quick_action의 view.wide나 view.ultra를 쓰세요. 컷이 바뀔 때 같은 녹화의 방향을 45도 넘게 갑자기 바꾸지 마세요. 버튼과 같은 작업은 quick_action으로 하세요. 사용자가 전에 무엇을 했는지 물으면 get_activity_log를 보세요.`;
 
 const num = { type: "number" };
 const str = { type: "string" };
@@ -254,8 +255,8 @@ export const TOOLS = [
           items: { type: "object", properties: { name: str, marks: { type: "array", items: { type: "array", items: num } } }, required: ["marks"] },
         },
         track: { type: "boolean", description: "표시를 시작점으로 얼굴·머리를 자동 추적해 0.2초 단위로 다듬습니다(기본 켬, 구간 3분 이하). 표시가 몇 개뿐이어도 따라갑니다." },
-        allow_steep,
-        hfov: { ...num, description: "화각. 보통 비워 둡니다(16:9는 91, 9:16은 56)" }, headroom: { ...num, description: "머리 위 여백 비율(기본 0.33)" },
+        allow_steep, override_user: { type: "boolean", description: "사용자가 직접 맞춘 시점·고른 화각을 바꿔 달라고 분명히 요청했을 때만 true" },
+        hfov: { ...num, description: "화각. 보통 비워 둡니다(16:9는 91, 9:16은 56). 사용자가 버튼으로 고른 화각은 자동으로 유지됩니다" }, headroom: { ...num, description: "머리 위 여백 비율(기본 0.33)" },
         step: { ...num, description: "키 간격 초(기본 0.1)" }, smooth: { ...num, description: "부드럽게 하는 정도 초(기본 0.4, 0이면 끔)" },
         from: num, to: num,
       },
@@ -431,7 +432,9 @@ function speechRuns(words: Asset["words"], wave: ArrayLike<number> | undefined, 
   return wave ? speechFromWave(wave, s0, s1) : null;
 }
 
-const USER_FIELD = { view: "시점", stab: "흔들림", volume: "소리" } as const;
+const USER_FIELD = { view: "시점", width: "화각", stab: "흔들림", volume: "소리" } as const;
+/** The width the user picked with a button: the AI's views keep it, wherever they look. */
+const keepWidth = (c: Clip, v: View, o: any): View => { const w = o.override_user ? null : userWidth(c); return w ? { ...v, ...w } : v; };
 /** "사용자 지정: 시점, 소리" for fields the user set by hand. */
 function userSetNote(c: Clip): string {
   const f = (Object.keys(USER_FIELD) as (keyof typeof USER_FIELD)[]).filter((k) => c.userSet?.[k]);
@@ -476,7 +479,7 @@ export function applyOps(d: Draft, ops: any[]): Draft {
         d = updateClip(d, c.id, {
           ...(o.speed != null ? { speed: Math.min(16, Math.max(0.1, Number(o.speed))) } : {}),
           ...(o.volume != null ? { volume: Math.min(4, Math.max(0, Number(o.volume))) } : {}),
-          ...(o.view ? { view: normView(o.view, c.view) } : {}),
+          ...(o.view ? { view: keepWidth(c, normView(o.view, c.view), o) } : {}),
           ...(o.fit ? { fit: o.fit } : {}),
           ...(o.fade_in != null ? { fadeIn: Number(o.fade_in) } : {}),
           ...(o.fade_out != null ? { fadeOut: Number(o.fade_out) } : {}),
@@ -491,7 +494,7 @@ export function applyOps(d: Draft, ops: any[]): Draft {
         if (!c) throw new Error(`클립 없음: ${o.clip_id}`);
         if (!is360(getAsset(c.asset))) throw new Error("360 영상 클립이 아닙니다");
         guardUser(c, "view", o);
-        const ks = parseKeys(o.keys, c.view);
+        const ks = parseKeys(o.keys, c.view).map((k) => ({ ...k, view: keepWidth(c, k.view, o) }));
         d = updateClip(d, c.id, { viewKeys: cleanKeys(o.merge ? [...(c.viewKeys ?? []).filter((k) => !ks.some((n) => Math.abs(n.t - k.t) < 0.001)), ...ks] : ks) });
         break;
       }
@@ -811,13 +814,15 @@ async function runTool(name: string, inp: any): Promise<Out> {
       const c = d0.clips.find((x) => x.id === inp.clip_id);
       if (!c) throw new Error(`클립 없음: ${inp.clip_id}`);
       if (!is360(getAsset(c.asset))) throw new Error("360 영상 클립이 아닙니다");
+      guardUser(c, "view", inp);
       const toMark = (m: any): Mark => (Array.isArray(m) ? { t: m[0], x: m[1], y: m[2], hfov: m[3] } : m);
       const subjects: Subject[] = (inp.subjects ?? []).map((s: any, i: number) => ({ name: String(s?.name ?? `사람${i + 1}`), marks: (s?.marks ?? []).map(toMark) })).filter((s: Subject) => s.marks.length);
       const marks: Mark[] = (inp.marks ?? []).map(toMark);
       if (!marks.length && !subjects.length) throw new Error("marks나 subjects가 비었습니다");
       const [aw, ah] = d0.aspect.split(":").map(Number);
       const from = Math.max(c.start, inp.from ?? c.start), to = Math.min(c.end, inp.to ?? c.end);
-      const opts = { aspect: aw / ah || 16 / 9, hfov: inp.hfov, headroom: inp.headroom, step: inp.step, sigma: inp.smooth, free: !!inp.allow_steep };
+      const kept = inp.override_user ? null : userWidth(c);
+      const opts = { aspect: aw / ah || 16 / 9, hfov: kept?.hfov ?? inp.hfov, headroom: inp.headroom, step: inp.step, sigma: inp.smooth, free: !!inp.allow_steep };
       let note = "";
       let keys;
       let people: Subject[] = subjects.length ? subjects : [{ name: "사람", marks }];
@@ -852,6 +857,7 @@ async function runTool(name: string, inp: any): Promise<Out> {
       // A cut jumps less when this clip tilts about as the one before it ended.
       const before = d0.clips[d0.clips.indexOf(c) - 1]?.viewKeys;
       if (before?.length && !opts.free) keys = easePitch(keys, before[before.length - 1].view.pitch, people, opts.aspect);
+      if (kept) keys = keys.map((k) => ({ ...k, view: { ...k.view, ...kept } }));
       // Remembered so check_framing can tell who is in frame.
       const d = updateClip(d0, c.id, { viewKeys: keys, ...(subjects.length ? { subjects: people.map((p) => ({ name: p.name, marks: thinMarks(p.marks) })) } : {}) });
       editDraft("AI: 사람 따라가기", () => d, d0.id);

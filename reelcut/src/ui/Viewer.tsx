@@ -4,7 +4,7 @@
 // preview: ffmpeg streams them from the asked time (an .osv's lenses stitched into a sphere), and
 // while paused a single decoded frame stands in. 360 media is drawn as a flat view with WebGL.
 import { fovMax } from "../proj";
-import { Grid3x3, Layers, Maximize, Pause, Play, Rewind, FastForward, SkipBack, SkipForward } from "lucide-preact";
+import { Grid3x3, Layers, Maximize, Pause, Play, Rewind, FastForward, SkipBack, SkipForward, SplitSquareHorizontal } from "lucide-preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api, fileSrc } from "../api";
 import { draftCaptions } from "../captions";
@@ -12,6 +12,7 @@ import { CaptionView } from "./CaptionView";
 import {
   animAt, audioTrack, clipAt, clipDur, DEFAULT_TRANSFORM, DEFAULT_VIEW, draftDuration, draftWords, fmtTCF, insertClips, is360, isDefaultColor, isGap, newClip, newOverlay, overlays,
   parseTC, stabFor, transitionLook, xinOf, playableInWebView, previewSource, setViewKey, starts, timedDur, trackState, updateClip, viewAt, volAt,
+  lensFor,
 } from "../edit";
 import { Flat360, type Proj } from "../gl360";
 import { STICKERS, stickerSvgPath, textLook } from "../graphics";
@@ -630,6 +631,9 @@ export function Viewer() {
   const o2v = useRef<HTMLVideoElement>(null), o2i = useRef<HTMLImageElement>(null), o3v = useRef<HTMLVideoElement>(null), o3i = useRef<HTMLImageElement>(null);
   const dragRef = useRef<{ x: number; y: number; v: View } | null>(null);
   const [, bump] = useState(0);
+  // 내보내기 미리 확인: this moment as the export draws it, over the preview, with a boundary to drag.
+  const [cmp, setCmp] = useState<{ url: string; pct: number; at: number } | null>(null);
+  const [cmpBusy, setCmpBusy] = useState(false);
 
   useEffect(() => {
     player.xfCanvas = xref.current;
@@ -687,6 +691,24 @@ export function Viewer() {
   const look = !src && hitClip ? cssLook(moving ? { ...(hitClip.transform ?? DEFAULT_TRANSFORM), ...moving } : r360 ? null : hitClip.transform, hitClip.color) : null;
   const lut = !src && hitClip?.color?.lut;
   const fps = src ? src.info.fps || 30 : d?.fps || 30;
+  useEffect(() => {
+    if (cmp && (player.playing || src || Math.abs(s.playhead - cmp.at) > 1e-3)) setCmp(null);
+  }, [s.playhead, s.draftId, s.sourceId, d?.updated, player.playing]);
+  const compare = async () => {
+    if (cmp) return setCmp(null);
+    if (!hit || !hitClip || !shown) return;
+    player.pause();
+    setCmpBusy(true);
+    try {
+      const [w, h] = (d?.aspect ?? "16:9").split(":").map(Number);
+      const [b64] = await api.frames(shown.info.path, [hit.src], 1280, player.currentView(), lensFor(hitClip, shown), w / h || 16 / 9);
+      if (b64) setCmp({ url: `data:image/jpeg;base64,${b64}`, pct: 50, at: st.playhead });
+    } catch (e) {
+      toast(`내보낼 화면을 만들지 못했습니다: ${String((e as Error)?.message ?? e)}`);
+    } finally {
+      setCmpBusy(false);
+    }
+  };
   const ov360 = !src && d ? overlays(d).some((o) => s.playhead >= o.at && s.playhead < o.at + timedDur(o) && is360(asset(o.asset) ?? undefined)) : false;
 
   const onDown = (e: PointerEvent) => {
@@ -792,6 +814,17 @@ export function Viewer() {
           {xfLook?.veil && <div class="xf-veil" style={{ background: xfLook.veil.color, opacity: xfLook.veil.opacity }} />}
           {!player.playing && hit && hitClip?.xin && s.playhead - hit.at < (hitClip.xin ?? 0) && <div class="hint-r info">전환 구간: 재생하면 보입니다</div>}
           {safe}
+          {cmp && (
+            <>
+              <img class="cmp-shot" src={cmp.url} alt="내보낼 화면" style={{ clipPath: `inset(0 0 0 ${cmp.pct}%)` }} />
+              <div class="cmp-line" style={{ left: `${cmp.pct}%` }} />
+              <span class="cmp-tag l">미리보기</span>
+              <span class="cmp-tag r">내보내기</span>
+              <input class="cmp-range" type="range" min={0} max={100} value={cmp.pct} aria-label="미리보기와 내보내기의 경계"
+                onPointerDown={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}
+                onInput={(e) => setCmp({ ...cmp, pct: Number((e.target as HTMLInputElement).value) })} />
+            </>
+          )}
         </div>
       </div>
       <Scrub total={total} now={now} onSeek={(t) => player.seek(t)}
@@ -807,6 +840,11 @@ export function Viewer() {
         {player.playing && player.rate !== 1 && <span class="rate">{player.rate > 0 ? `${player.rate}×` : `◀ ${-player.rate}×`}</span>}
         <span class="time"><TC value={now} fps={fps} onJump={(t) => player.seek(t)} /> <span class="muted">/ {fmtTCF(total, fps)}</span></span>
         <span class="spacer" />
+        {!src && r360 && (
+          <button class={`icon-btn ${cmp ? "on" : ""}`} disabled={cmpBusy || !hitClip} aria-pressed={!!cmp} onClick={compare} title="내보내기 미리 확인: 이 장면을 내보낼 화면으로 그려 미리보기와 밀어 가며 비교합니다" aria-label="내보내기 미리 확인">
+            <SplitSquareHorizontal size={16} class={cmpBusy ? "spin-i" : undefined} aria-hidden="true" />
+          </button>
+        )}
         <button class={`icon-btn ${s.showSafe ? "on" : ""}`} onClick={() => set({ showSafe: !s.showSafe })} title="안전 영역·3분할 격자 · Safe Margins" aria-label="안전 영역" aria-pressed={s.showSafe}><Grid3x3 size={16} /></button>
         <button class="icon-btn" onClick={() => window.dispatchEvent(new Event("reelcut:fullscreen"))} title="전체 화면 (F)" aria-label="전체 화면"><Maximize size={16} /></button>
       </div>

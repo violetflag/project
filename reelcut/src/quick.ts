@@ -92,7 +92,7 @@ const quick: ActionDef[] = [
     },
   },
   {
-    id: "stab", group: "기본", label: "흔들림 줄이기", icon: "Vibrate", key: "Alt+Shift+J",
+    id: "stab", group: "기본", label: "흔들림 줄이기", icon: "Vibrate", key: "Alt+Shift+J", marks: "stab",
     tooltip: "흔들림을 줄입니다. 화살표: 약·보통·강·방향 고정·끄기",
     enabled: (d) => has360(d.clips),
     run: ({ draft, clips, params }): ActionOut => {
@@ -112,7 +112,7 @@ const quick: ActionDef[] = [
     },
   },
   {
-    id: "loud", group: "기본", label: "소리 고르게", icon: "Gauge", key: "Alt+Shift+L",
+    id: "loud", group: "기본", label: "소리 고르게", icon: "Gauge", key: "Alt+Shift+L", marks: "volume",
     tooltip: `클립마다 소리 크기를 ${TARGET_LUFS} LUFS로 맞추고, 내보낼 때 전체 음량을 고르게 합니다`,
     enabled: (d) => d.clips.some((c) => !isGap(c)) || draftDuration(d) > 0,
     run: async ({ clips }): Promise<ActionOut> => {

@@ -58,6 +58,9 @@ export const api = {
   jsonlAppend: (kind: "actions" | "chats", name: string, lines: string[]) => invoke<void>("jsonl_append", { kind, name, lines }),
   jsonlTail: (kind: "actions" | "chats", name: string, max: number) => invoke<string[]>("jsonl_tail", { kind, name, max }),
   // Project folders (2.18): Documents\Reelcut\<이름>\<이름>.reelcut with chats, logs and backups.
+  projectPack: (id: string, dest: string, priv: boolean) => invoke<{ files: number; bytes: number }>("project_pack", { id, dest, private: priv }),
+  projectUnpack: (path: string) => invoke<{ folder: string; file: string }>("project_unpack", { path }),
+  diagBundle: (dest: string) => invoke<{ files: number; bytes: number }>("diag_bundle", { dest }),
   projectSave: (id: string, json: string, savedAt: string) => invoke<{ file?: string; folder?: string; error?: string }>("project_save", { id, json, savedAt }),
   projectOpen: (path: string, time: string) => invoke<{ project: any; folder: string; from: string; warnings: string[]; conflict: boolean; backup?: string | null; backupProject?: any }>("project_open", { path, time }),
   projectInfo: (id: string) => invoke<{ folder: string; file?: string } | null>("project_info", { id }),
@@ -145,8 +148,15 @@ export async function pickFiles(folder = false): Promise<string[]> {
 export async function pickProject(): Promise<string | null> {
   if (!inTauri) return (window as any).__mockPickProject?.() ?? null;
   const d = await import("@tauri-apps/plugin-dialog");
-  const r = await d.open({ multiple: false, filters: [{ name: "Reelcut 프로젝트", extensions: ["reelcut"] }] });
+  const r = await d.open({ multiple: false, filters: [{ name: "Reelcut 프로젝트", extensions: ["reelcut", "reelcutpack"] }] });
   return typeof r === "string" ? r : null;
+}
+
+/** Where to save a file of this kind. */
+export async function pickSave(name: string, label: string, ext: string): Promise<string | null> {
+  if (!inTauri) return (window as any).__mockPickSave?.() ?? null;
+  const d = await import("@tauri-apps/plugin-dialog");
+  return await d.save({ defaultPath: name, filters: [{ name: label, extensions: [ext] }] });
 }
 
 /** A later start of the app handed over files (a .reelcut or video opened from Explorer); take them with `takeOpenFiles`. */

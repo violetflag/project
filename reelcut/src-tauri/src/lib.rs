@@ -13,6 +13,7 @@ mod media;
 mod probe;
 mod proj;
 mod project;
+mod pack;
 mod recover;
 mod qwen;
 mod render;
@@ -1629,6 +1630,9 @@ pub fn run() {
             project::project_open,
             project::project_info,
             project::project_root,
+            project::project_pack,
+            project::project_unpack,
+            project::diag_bundle,
             project::project_set_root,
             project::project_backup,
             project::project_backups,

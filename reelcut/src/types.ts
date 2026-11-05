@@ -358,7 +358,8 @@ export type JobEvent = { id: string; kind: string; pct: number; state: JobState;
 // ---------------------------------------------------------------- 2.18: action log (what was done, by whom)
 
 export type ViewPreset = "best" | "zoom" | "wide" | "ultra" | "planet";
-export type UserSet = { view?: number; stab?: number; volume?: number };
+/** When the user set these by hand or with a button. `width`: a view button (광각...), the AI's views keep that width. */
+export type UserSet = { view?: number; stab?: number; volume?: number; width?: number };
 export type DraftFx = { loudnorm?: boolean; lufs?: number };
 export type ActionWho = "user" | "ai" | "system";
 export type ActionKind = "quick" | "edit" | "ai" | "export" | "open" | "save" | "backup" | "trash" | "restore" | "undo" | "redo";

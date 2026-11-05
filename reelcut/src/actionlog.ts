@@ -272,6 +272,19 @@ export function markUserSet(a: Draft, b: Draft, now = Date.now()): Draft {
   return changed ? { ...b, clips } : b;
 }
 
+/** A toolbar button pressed by hand: the clips it changed keep that for the AI (`ActionDef.marks`). */
+export function markButton(a: Draft, b: Draft, field: keyof UserSet, now = Date.now()): Draft {
+  const old = new Map(a.clips.map((c) => [c.id, c]));
+  let changed = false;
+  const clips = b.clips.map((c) => {
+    const o = old.get(c.id);
+    if (!o || o === c || same(o, c)) return c;
+    changed = true;
+    return { ...c, userSet: { ...c.userSet, [field]: now } };
+  });
+  return changed ? { ...b, clips } : b;
+}
+
 const drafts = (ds: Draft[]) => new Map(ds.map((d) => [d.id, d]));
 
 /**

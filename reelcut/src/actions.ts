@@ -1,9 +1,9 @@
 // Toolbar actions (2.18): one registry for the top toolbar's buttons, their shortcuts and the AI's
 // quick_action tool, so a click and an AI request do exactly the same thing. Every run is one undo
 // step and one action-log line; running it again when nothing is left to do says "이미 적용됨".
-import { logAction, quickBegin, quickEnd } from "./actionlog";
+import { logAction, markButton, quickBegin, quickEnd } from "./actionlog";
 import { backupProject, beginUndoGroup, editDraft, st, toast } from "./store";
-import type { Clip, Draft } from "./types";
+import type { Clip, Draft, UserSet } from "./types";
 
 export type Scope = { kind: "clips"; ids: string[] } | { kind: "draft" };
 export type ActionResult = { changed: number; detail: string; skipped: string[] };
@@ -23,6 +23,8 @@ export type ActionDef = {
   /** Shortcut, e.g. "Alt+Shift+H". */
   key?: string;
   enabled?: (d: Draft, scope: Scope) => boolean;
+  /** What pressing it by hand decides for the clips it changes: the AI keeps that afterwards. */
+  marks?: keyof UserSet;
   run: (ctx: ActionCtx) => ActionOut | Promise<ActionOut>;
 };
 
@@ -79,8 +81,9 @@ export async function runAction(id: string, o: RunOpts = {}): Promise<ActionResu
   let moved = false;
   try {
     out = await def.run({ draft: d, scope, clips: scopeClips(d, scope), params: o.params ?? {}, by });
-    if (out.edit) editDraft(label, out.edit, d.id);
-    else if (out.draft && out.draft !== d) editDraft(label, () => out.draft!, d.id);
+    const mark = (x: Draft, next: Draft) => (by === "user" && def.marks ? markButton(x, next, def.marks) : next);
+    if (out.edit) { const edit = out.edit; editDraft(label, (x) => mark(x, edit(x)), d.id); }
+    else if (out.draft && out.draft !== d) editDraft(label, (x) => mark(x, out.draft!), d.id);
     moved = g.commit();
   } catch (e) {
     g.rollback();

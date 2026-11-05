@@ -9,6 +9,8 @@ import { gainFor, levelLimit } from "../src/quick";
 import { cutJumps } from "../src/quick360";
 import { assetMap, set, st, undo } from "../src/store";
 import type { Asset, Clip, Draft, Project } from "../src/types";
+import { markButton } from "../src/actionlog";
+import { userWidth } from "../src/edit";
 
 const osv = (id: string, extra: Partial<Asset> = {}): Asset => ({
   id, folder: "", tState: "idle", added: 0,
@@ -181,5 +183,30 @@ describe("clips keep their own settings", () => {
     expect(to.stab).toEqual(from.stab);
     expect(to.viewPreset).toBe("wide");
     expect(updateClip).toBeTypeOf("function");
+  });
+});
+
+describe("누른 버튼은 AI가 지킨다", () => {
+  const cl = (id: string, hfov: number): any => ({ id, asset: "a", start: 0, end: 5, speed: 1, volume: 1, view: { yaw: 0, pitch: 0, roll: 0, hfov, dist: 0.3 } });
+  const dr = (clips: any[]): any => ({ id: "d", name: "d", aspect: "16:9", clips });
+
+  it("marks only the clips a button really changed", () => {
+    const a = cl("a", 91), b = cl("b", 91);
+    const after = markButton(dr([a, b]), dr([{ ...a, view: { ...a.view, hfov: 118 } }, { ...b }]), "width", 5);
+    expect(after.clips[0].userSet).toEqual({ width: 5 });
+    expect(after.clips[1].userSet).toBeUndefined();
+  });
+
+  it("gives back the same draft when nothing changed", () => {
+    const d = dr([cl("a", 91)]);
+    const next = dr([{ ...d.clips[0] }]);
+    expect(markButton(d, next, "width")).toBe(next);
+  });
+
+  it("reads the width the user picked, from the keys first", () => {
+    expect(userWidth(cl("a", 91))).toBeNull();
+    const c = { ...cl("a", 91), userSet: { width: 1 } };
+    expect(userWidth(c)).toEqual({ hfov: 91, dist: 0.3 });
+    expect(userWidth({ ...c, viewKeys: [{ t: 0, view: { yaw: 9, pitch: 0, roll: 0, hfov: 118, dist: 0.6 } }] })).toEqual({ hfov: 118, dist: 0.6 });
   });
 });
