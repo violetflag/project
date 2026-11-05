@@ -193,7 +193,7 @@ describe("what the AI may change", () => {
       ...draftWith([clip("c1", { viewPreset: "best" }), clip("c2", { viewPreset: "wide", stab: { mode: "smooth", strength: 2, rs: false } }), clip("c3", { userSet: { view: 5 } })]),
       fx: { loudnorm: true, lufs: -16 },
     };
-    expect(stateLine(d, new Map([[a.id, a]]))).toBe("켜져 있는 것: 소리 고르게(초안 전체, -16 LUFS) · 흔들림 보통 360 클립 3/3 · 수평 맞추기 2/3 · 시점 최적 1, 광각 1, 사용자 지정 1 · 사용자 지정 클립 1개");
+    expect(stateLine(d, new Map([[a.id, a]]))).toBe("켜져 있는 것: 소리 고르게(초안 전체, -16 LUFS) · 흔들림 강 360 클립 1/3 · 수평 맞추기 2/3 · 시점 최적 1, 광각 1, 사용자 지정 1 · 사용자 지정 클립 1개");
     expect(stateLine(draftWith([]), new Map())).toBe("");
   });
 

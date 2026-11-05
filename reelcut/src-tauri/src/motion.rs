@@ -21,11 +21,11 @@ use std::path::Path;
 /// Stabilisation settings, stored on the asset's lens.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Stab {
-    /// off | horizon (level horizon, follow the heading slowly) | lock (level, always look the
-    /// same way) | smooth (only take the shake out)
+    /// off | horizon (level only, the camera's movement stays) | smooth (only take the shake out) |
+    /// eis (level and take the shake out) | lock (level, always look the same way)
     #[serde(default = "horizon")]
     pub mode: String,
-    /// How slowly the picture follows the camera's turns, seconds.
+    /// With the shake taken out: how slowly the picture follows the camera's turns, seconds.
     #[serde(default = "one")]
     pub strength: f64,
     /// Rolling-shutter correction (needs the readout time from the gyro data).
@@ -525,6 +525,8 @@ fn quat(b: &[u8]) -> Option<Qt> {
 #[derive(Default, Debug)]
 struct Meta {
     pts: f64,
+    /// The attitude's own clock, microseconds.
+    stamp: Option<u64>,
     quats: Vec<Qt>,
     offset: f64,
     readout_ns: Option<u64>,
@@ -546,6 +548,7 @@ fn parse_meta(b: &[u8], pts: f64) -> Meta {
     if let Some(att) = sub(b, &[3, 3, 2, 1]) {
         m.quats = all(att, 3).into_iter().filter_map(|f| if let Field::Bytes(q) = f { quat(q) } else { None }).collect();
         m.offset = first_f32(att, 4).unwrap_or(0.0) as f64;
+        m.stamp = first_varint(att, 1);
     }
     // Osmo 360 originals: one fused attitude per frame, FrameMeta(3).camera(2).attitude(22) =
     // w, x, y, z as floats (gravity follows in 23).
@@ -575,6 +578,7 @@ fn read_gyro(ffprobe: &Path, info: &MediaInfo) -> Result<(Vec<(f64, Qt)>, f64, O
     let mut samples: Vec<(f64, Qt)> = Vec::new();
     let (mut readout, mut dir, mut product) = (None, None, String::new());
     let fps = info.fps.max(1.0);
+    let mut clock = Clock::default();
     for line in out.lines() {
         let field = |k: &str| line.split('|').find_map(|kv| kv.strip_prefix(k).and_then(|v| v.strip_prefix('=')));
         let (Some(Ok(pts)), Some(Ok(pos)), Some(Ok(size))) = (field("pts_time").map(str::parse::<f64>), field("pos").map(str::parse::<u64>), field("size").map(str::parse::<usize>)) else { continue };
@@ -586,6 +590,10 @@ fn read_gyro(ffprobe: &Path, info: &MediaInfo) -> Result<(Vec<(f64, Qt)>, f64, O
             continue;
         }
         let m = parse_meta(&buf, pts);
+        // Now and then a packet carries an attitude from many seconds earlier: not this frame's.
+        if !clock.fits(m.stamp) {
+            continue;
+        }
         readout = readout.or(m.readout_ns);
         dir = dir.or(m.read_dir);
         if let Some(p) = m.product {
@@ -607,6 +615,29 @@ fn read_gyro(ffprobe: &Path, info: &MediaInfo) -> Result<(Vec<(f64, Qt)>, f64, O
     // TOP_LEFT=0, TOP_RIGHT=1 read from the top; BOTTOM_* from the bottom.
     let top = dir.map(|d| d <= 1 || d == 4 || d == 5);
     Ok((samples, ro, top, product))
+}
+
+/// Follows the attitude's clock through the packets. A sample that jumps back or far ahead is not
+/// the frame's; if every later one disagrees too, the clock itself has moved and is followed.
+#[derive(Default)]
+struct Clock {
+    last: Option<u64>,
+    refused: u32,
+}
+
+impl Clock {
+    fn fits(&mut self, stamp: Option<u64>) -> bool {
+        let Some(s) = stamp else { return true };
+        let ok = self.last.is_none_or(|l| s > l && s - l < 1_000_000);
+        if ok || self.refused >= 30 {
+            self.last = Some(s);
+            self.refused = 0;
+            true
+        } else {
+            self.refused += 1;
+            false
+        }
+    }
 }
 
 fn slerp(a: Qt, b: Qt, f: f64) -> Qt {
@@ -664,6 +695,22 @@ fn match_axes(samples: &[(f64, Qt)], vis_turns: &[(f64, M3, f64)]) -> Option<(M3
         }
     }
     let total: f64 = vis_turns.iter().map(|(_, dv, _)| logmap(dv).iter().map(|x| x * x).sum::<f64>().sqrt()).sum();
+    // The clock's offset to a millisecond, for the axes found.
+    let best = best.map(|(c, mut err, dt0)| {
+        let mut dt = dt0;
+        for ms in -9..=9 {
+            let t = dt0 + ms as f64 / 1000.0;
+            let e: f64 = vis_turns.iter().map(|(t0, dv, span)| {
+                let dg = mmul(&mmul(&c, &mmul(&mt(&gyro_at(samples, t0 + span + t)), &gyro_at(samples, t0 + t))), &mt(&c));
+                angle_between(dv, &dg)
+            }).sum();
+            if e < err {
+                err = e;
+                dt = t;
+            }
+        }
+        (c, err, dt)
+    });
     best.and_then(|(c, err, dt)| (total > 0.15 && err < 0.35 * total).then_some((c, dt, err / total)))
 }
 
@@ -818,53 +865,91 @@ fn level(down: [f64; 3], fwd: [f64; 3]) -> Option<M3> {
     Some([[x[0], y[0], z[0]], [x[1], y[1], z[1]], [x[2], y[2], z[2]]])
 }
 
-/// Per source frame, the stabilised orientation (virtual camera → world).
+/// How gently the horizon correction changes, seconds (sigma of the smoothing). Far slower than a
+/// hand or a step, so it cannot put any shake into the picture, whatever the attitude's timing.
+const LEVEL_SIGMA: f64 = 0.6;
+
+/// The shortest turn that takes `a` to `b` (unit vectors).
+fn from_to(a: [f64; 3], b: [f64; 3]) -> M3 {
+    let c = dot(a, b);
+    if c < -0.9999 {
+        let side = if a[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 0.0, 1.0] };
+        let v = unit(cross(a, side));
+        return mat_of([0.0, v[0], v[1], v[2]]);
+    }
+    let v = cross(a, b);
+    mat_of([1.0 + c, v[0], v[1], v[2]])
+}
+
+/// Horizon levelling, per source frame: the gentle turn (in the camera's own axes) that brings the
+/// picture's down to the world's down. Measured from the frame's attitude, a few odd samples are
+/// dropped by a median, then smoothed the same way forward and backward, so it does not lag behind
+/// the picture. What the camera did in between stays as it was filmed, and turning does not change
+/// it: a tilted camera that spins keeps the same down in its own axes.
+fn level_turns(rot: &[M3], down: [f64; 3], fps: f64) -> Vec<M3> {
+    let n = rot.len();
+    let raw: Vec<[f64; 3]> = rot.iter().map(|r| mv(&mt(r), down)).collect();
+    let m = ((fps * 0.1).round() as isize).max(1);
+    let med: Vec<[f64; 3]> = (0..n as isize)
+        .map(|k| {
+            let mut out = [0.0; 3];
+            for (i, o) in out.iter_mut().enumerate() {
+                let mut w: Vec<f64> = (-m..=m).map(|d| raw[(k + d).clamp(0, n as isize - 1) as usize][i]).collect();
+                w.sort_by(f64::total_cmp);
+                *o = w[w.len() / 2];
+            }
+            out
+        })
+        .collect();
+    let sig = LEVEL_SIGMA * fps.max(1.0);
+    let rad = (sig * 3.0).ceil() as isize;
+    let weights: Vec<f64> = (-rad..=rad).map(|d| (-(d * d) as f64 / (2.0 * sig * sig)).exp()).collect();
+    (0..n as isize)
+        .map(|k| {
+            let mut a = [0.0; 3];
+            for (d, g) in (-rad..=rad).zip(&weights) {
+                let v = med[(k + d).clamp(0, n as isize - 1) as usize];
+                for i in 0..3 {
+                    a[i] += g * v[i];
+                }
+            }
+            from_to([0.0, 1.0, 0.0], unit(a))
+        })
+        .collect()
+}
+
+/// Per source frame, the stabilised orientation (virtual camera → world). The one place that decides
+/// it: the export and the preview both use it.
 pub fn targets(m: &Motion, s: &Stab) -> Vec<M3> {
     let rot: Vec<M3> = m.rot.iter().map(from9).collect();
     if rot.is_empty() || s.mode == "off" {
         return rot;
     }
-    let sig = (s.strength.clamp(0.1, 10.0) * m.fps.max(1.0)) / 2.0;
+    let fps = m.fps.max(1.0);
+    let sig = (s.strength.clamp(0.1, 10.0) * fps) / 2.0;
     let down = unit(m.down);
+    let then = |path: Vec<M3>| -> Vec<M3> {
+        let turns = level_turns(&path, down, fps);
+        path.iter().zip(&turns).map(|(r, t)| mmul(r, t)).collect()
+    };
     match s.mode.as_str() {
+        // Level only: the camera's own movement is left alone.
+        "horizon" => then(rot),
+        // The shake out of the attitude (DJI's EIS), with or without levelling (EisAndHorizontal).
         "smooth" => (0..rot.len()).map(|k| gauss_avg(&rot, k, sig)).collect(),
-        "lock" | "horizon" => {
-            // Heading: the camera's forward, flattened and smoothed (or held for "lock").
-            let fwd: Vec<[f64; 3]> = rot.iter().map(|r| mv(r, [0.0, 0.0, 1.0])).collect();
-            let n = rot.len();
-            let rad = (sig * 3.0).ceil() as isize;
-            let first: [f64; 3] = {
-                let k = ((m.fps * 1.0) as usize).min(n);
-                let mut a = [0.0; 3];
-                for f in &fwd[..k.max(1)] {
-                    for i in 0..3 {
-                        a[i] += f[i];
-                    }
+        "eis" => then((0..rot.len()).map(|k| gauss_avg(&rot, k, sig)).collect()),
+        "lock" => {
+            // Level, always looking the way the camera looked in the first second.
+            let k = (fps as usize).clamp(1, rot.len());
+            let mut first = [0.0; 3];
+            for r in &rot[..k] {
+                let f = mv(r, [0.0, 0.0, 1.0]);
+                for i in 0..3 {
+                    first[i] += f[i];
                 }
-                a
-            };
-            let mut last = level(down, first).or_else(|| level(down, mv(&rot[0], [1.0, 0.0, 0.0]))).unwrap_or(I3);
-            (0..n)
-                .map(|k| {
-                    let h = if s.mode == "lock" {
-                        first
-                    } else {
-                        let mut a = [0.0; 3];
-                        for d in -rad..=rad {
-                            let j = (k as isize + d).clamp(0, n as isize - 1) as usize;
-                            let g = (-(d * d) as f64 / (2.0 * sig * sig)).exp();
-                            for i in 0..3 {
-                                a[i] += g * fwd[j][i];
-                            }
-                        }
-                        a
-                    };
-                    if let Some(l) = level(down, h) {
-                        last = l;
-                    }
-                    last
-                })
-                .collect()
+            }
+            let l = level(down, first).or_else(|| level(down, mv(&rot[0], [1.0, 0.0, 0.0]))).unwrap_or(I3);
+            vec![l; rot.len()]
         }
         _ => rot,
     }
@@ -933,6 +1018,9 @@ pub fn usable(m: &Motion, info: &MediaInfo) -> bool {
     (m.rot.len() as f64) >= frames * 0.97 && !(info.djmd && m.source == "video" && m.note == "자이로 기록 없음")
 }
 
+/// The kept motion track's file ending; a new one when the analysis changes.
+pub const TRACK_FILE: &str = "-m2.json";
+
 /// The motion track, from the cache or worked out now (None when stabilisation is off or the
 /// analysis fails; the picture is then stitched as filmed).
 #[allow(clippy::too_many_arguments)]
@@ -940,7 +1028,7 @@ pub fn motion_for(dir: &Path, ffmpeg: &Path, ffprobe: &Path, jobs: &Jobs, tag: &
     if stab_of(lens).mode == "off" {
         return Ok(None);
     }
-    let file = dir.join(format!("{key}-m1.json"));
+    let file = dir.join(format!("{key}{TRACK_FILE}"));
     if let Ok(t) = std::fs::read_to_string(&file) {
         if let Ok(m) = serde_json::from_str::<Motion>(&t) {
             if usable(&m, info) {
@@ -963,7 +1051,7 @@ pub fn motion_for(dir: &Path, ffmpeg: &Path, ffprobe: &Path, jobs: &Jobs, tag: &
 }
 
 /// Bump when the engine's picture changes, so kept clips are made again.
-pub const ENGINE_VERSION: u32 = 9;
+pub const ENGINE_VERSION: u32 = 10;
 
 /// How `render_flat` works: the lens size to decode at, the GPU, and the intermediate's quality.
 #[derive(Clone, Debug, Default)]
@@ -1261,13 +1349,86 @@ mod tests {
         }).collect();
         let m = Motion { source: "gyro".into(), fps, rot, down: [0.0, 1.0, 0.0], ..Default::default() };
         let tg = targets(&m, &Stab::default());
-        for s in &tg {
-            // The virtual camera's down is the world's down.
-            let d = mv(s, [0.0, 1.0, 0.0]);
-            assert!((d[1] - 1.0).abs() < 1e-9, "{d:?}");
-        }
+        // On average the virtual camera's down is the world's down; the sway stays as filmed.
+        let mean: f64 = tg.iter().map(|s| mv(s, [0.0, 1.0, 0.0])[1]).sum::<f64>() / tg.len() as f64;
+        assert!(mean > 0.97, "{mean}");
         let lock = targets(&m, &Stab { mode: "lock".into(), ..Default::default() });
         assert!(angle_between(&lock[0], &lock[299]) < 1e-9);
+        for s in &lock {
+            assert!((mv(s, [0.0, 1.0, 0.0])[1] - 1.0).abs() < 1e-9);
+        }
+    }
+
+    /// A camera held tilted 30°, spinning, with fast shake and noisy samples.
+    fn shaky(fps: f64, secs: f64) -> Motion {
+        let rot: Vec<[f64; 9]> = (0..(secs * fps) as usize).map(|k| {
+            let t = k as f64 / fps;
+            let shake = 2.0 * (2.0 * std::f64::consts::PI * 2.0 * t).sin() + 0.5 * (2.0 * std::f64::consts::PI * 11.0 * t).cos();
+            to9(&matrix(ypr(25.0 * t, 30.0 + shake, shake)))
+        }).collect();
+        Motion { source: "gyro".into(), fps, rot, down: [0.0, 1.0, 0.0], ..Default::default() }
+    }
+
+    #[test]
+    fn levelling_adds_no_shake_of_its_own() {
+        let m = shaky(30.0, 20.0);
+        let tg = targets(&m, &Stab::default());
+        // The correction hardly changes from frame to frame, though the camera shakes by degrees.
+        let applied: Vec<M3> = (0..tg.len()).map(|i| mmul(&mt(&m.at(i)), &tg[i])).collect();
+        let worst = applied.windows(2).map(|w| angle_between(&w[0], &w[1]).to_degrees()).fold(0.0, f64::max);
+        let cam = (1..m.rot.len()).map(|i| angle_between(&m.at(i - 1), &m.at(i)).to_degrees()).fold(0.0, f64::max);
+        assert!(worst < 0.1 && cam > 1.0, "correction {worst}, camera {cam}");
+        // And it does fix the tilt: 30° on average before, about none after.
+        let tilt = |r: &M3| mv(r, [0.0, 1.0, 0.0])[1].clamp(-1.0, 1.0).acos().to_degrees();
+        let before: f64 = (0..m.rot.len()).map(|i| tilt(&m.at(i))).sum::<f64>() / m.rot.len() as f64;
+        let after: f64 = tg.iter().map(tilt).sum::<f64>() / tg.len() as f64;
+        assert!(before > 25.0 && after < 4.0, "{before} -> {after}");
+    }
+
+    #[test]
+    fn levelling_is_the_same_at_30_and_60_frames() {
+        let (a, b) = (shaky(30.0, 10.0), shaky(60.0, 10.0));
+        let (ta, tb) = (targets(&a, &Stab::default()), targets(&b, &Stab::default()));
+        for k in (30..270).step_by(10) {
+            let d = angle_between(&mmul(&mt(&a.at(k)), &ta[k]), &mmul(&mt(&b.at(k * 2)), &tb[k * 2])).to_degrees();
+            assert!(d < 0.2, "frame {k}: {d}");
+        }
+    }
+
+    #[test]
+    fn a_stray_attitude_does_not_move_the_correction() {
+        let mut m = shaky(30.0, 10.0);
+        let clean: Vec<M3> = targets(&m, &Stab::default()).iter().enumerate().map(|(i, t)| mmul(&mt(&m.at(i)), t)).collect();
+        m.rot[150] = to9(&matrix(ypr(10.0, -60.0, 40.0)));
+        let tg = targets(&m, &Stab::default());
+        let got = mmul(&mt(&m.at(151)), &tg[151]);
+        assert!(angle_between(&got, &clean[151]).to_degrees() < 0.2);
+    }
+
+    #[test]
+    fn taking_the_shake_out_is_level_and_smooth() {
+        let m = shaky(30.0, 20.0);
+        let tg = targets(&m, &Stab { mode: "eis".into(), ..Default::default() });
+        let mid = &tg[60..540];
+        let out = mid.windows(2).map(|w| angle_between(&w[0], &w[1]).to_degrees()).fold(0.0, f64::max);
+        // Only the slow spin is left (25°/s is 0.83° a frame).
+        assert!(out < 1.2, "{out}");
+        let tilt = mid.iter().map(|r| mv(r, [0.0, 1.0, 0.0])[1].clamp(-1.0, 1.0).acos().to_degrees()).fold(0.0, f64::max);
+        assert!(tilt < 6.0, "{tilt}");
+    }
+
+    #[test]
+    fn an_out_of_place_attitude_clock_is_skipped() {
+        let mut c = Clock::default();
+        assert!(c.fits(Some(1_000_000)) && c.fits(Some(1_033_000)));
+        // Far back: dropped; the next one fits again.
+        assert!(!c.fits(Some(400_000)));
+        assert!(c.fits(Some(1_066_000)));
+        assert!(c.fits(None));
+        // A clock that really moved is followed after a while.
+        let mut last = true;
+        for i in 0..32 { last = c.fits(Some(100_000 + i * 33_000)); }
+        assert!(last);
     }
 
     #[test]
@@ -1326,13 +1487,13 @@ mod tests {
         let info = crate::media::inspect(&bin("ffprobe"), &path).unwrap();
         let st: crate::stitch::Stitch = serde_json::from_value(serde_json::json!({ "on": true, "fov": 193.4, "yaw": 0.85, "pitch": 0.15, "roll": -0.45, "calibrated": true, "flow": false })).unwrap();
         let key = std::env::var("REELCUT_MOTION_KEY").unwrap();
-        let t = std::fs::read_to_string(std::path::Path::new(&md).join(format!("{key}-m1.json"))).unwrap();
+        let t = std::fs::read_to_string(std::path::Path::new(&md).join(format!("{key}{TRACK_FILE}"))).unwrap();
         let m: Motion = serde_json::from_str(&t).unwrap();
         println!("STAB motion source {} note {} fps {} frames {} readout {} down {:?}", m.source, m.note, m.fps, m.rot.len(), m.readout, m.down);
         std::fs::create_dir_all(&dir).unwrap();
         let (w, h) = (640u32, 360u32);
-        for (start, tag) in [(30.0, "s030"), (274.0, "a"), (420.0, "b"), (700.0, "s700"), (1000.0, "s1000"), (1300.0, "s1300")] {
-            for mode in ["off", "horizon", "smooth", "lock"] {
+        for (start, tag) in [(30.0, "s030"), (295.0, "f295"), (420.0, "b"), (700.0, "s700"), (1000.0, "s1000")] {
+            for mode in ["off", "horizon", "smooth", "eis"] {
                 let lens = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: Some(st.clone()), stab: Some(Stab { mode: mode.into(), strength: 1.0, rs: false }) };
                 let s = crate::stitch::params(&lens);
                 let stab = stab_of(&lens);

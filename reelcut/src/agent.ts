@@ -334,7 +334,7 @@ export const TOOLS = [
   },
   {
     name: "quick_action", description: `상단 버튼과 똑같은 작업을 합니다. 사용자가 누른 것처럼 작업 기록에 남고 Ctrl+Z 한 번으로 되돌아갑니다. 이미 된 것이면 '이미 적용됨'을 돌려줍니다.
-action: level(수평 맞추기), stab(흔들림 줄이기, params.strength 0.5/1/2 또는 params.mode "lock"/"off"), loud(소리 고르게), view.best(최적 화각), view.zoom(확대), view.wide(광각), view.ultra(초광각), view.planet(작은 행성), undistort(왜곡 보정), reframe(시점 다시 맞추기), smooth.dir(컷 사이 방향 이어 붙이기). 없는 버튼이면 쓸 수 있는 목록을 오류로 알려 줍니다.`,
+action: level(수평 맞추기), stab(손떨림 보정, params.strength 0.5/1/2 또는 params.mode "lock"/"off"(손떨림만 끔)/"none"(수평까지 끔)), loud(소리 고르게), view.best(최적 화각), view.zoom(확대), view.wide(광각), view.ultra(초광각), view.planet(작은 행성), undistort(왜곡 보정), reframe(시점 다시 맞추기), smooth.dir(컷 사이 방향 이어 붙이기). 없는 버튼이면 쓸 수 있는 목록을 오류로 알려 줍니다.`,
     input_schema: {
       type: "object",
       properties: {

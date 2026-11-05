@@ -62,12 +62,15 @@ describe("흔들림 줄이기", () => {
   it("sets the strength, turns off into smooth, and has lock and off", async () => {
     open([clip("c1"), clip("c2", "a1", { stab: { mode: "off", strength: 1, rs: true } })]);
     await runAction("stab", { scope: "draft", params: { strength: 2 } });
-    expect(cur().clips.map((c) => c.stab)).toEqual([{ mode: "horizon", strength: 2, rs: true }, { mode: "smooth", strength: 2, rs: true }]);
+    expect(cur().clips.map((c) => c.stab)).toEqual([{ mode: "eis", strength: 2, rs: true }, { mode: "smooth", strength: 2, rs: true }]);
     set({ selClip: "c1" });
     await runAction("stab", { params: { mode: "lock" } });
     expect(cur().clips[0].stab!.mode).toBe("lock");
     expect(cur().clips[1].stab!.mode).toBe("smooth");
     await runAction("stab", { scope: "draft", params: { mode: "off" } });
+    // The shake only: levelling stays where it was on.
+    expect(cur().clips.map((c) => c.stab!.mode)).toEqual(["horizon", "off"]);
+    await runAction("stab", { scope: "draft", params: { mode: "none" } });
     expect(cur().clips.every((c) => c.stab!.mode === "off")).toBe(true);
     // The export renders each clip with its own setting.
     const segs = toSegs(cur(), assetMap());

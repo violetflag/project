@@ -27,7 +27,7 @@ function levelView(v: View, hw: number, keepPitch = false): View {
   return { ...v, roll: 0, pitch: keepPitch ? v.pitch : r3(Math.max(-lim, Math.min(lim, v.pitch))) };
 }
 
-/** 수평 맞추기 on one clip: horizon lock on, no tilt, pitch where the horizon stays in the picture. */
+/** 수평 맞추기 on one clip: levelling on, no tilt, pitch where the horizon stays in the picture. */
 export function levelClip(c: Clip, a: Asset | undefined, hw: number): { clip: Clip; stab: boolean; roll: boolean; pitch: [number, number] | null } {
   const eff = stabFor(c, a) ?? DEFAULT_STAB;
   const stab = eff.mode === "off" || eff.mode === "smooth";
@@ -42,15 +42,20 @@ export function levelClip(c: Clip, a: Asset | undefined, hw: number): { clip: Cl
   const worst = (vs: View[]) => vs.reduce((m, v) => (Math.abs(v.pitch) > Math.abs(m) ? v.pitch : m), 0);
   const pitch: [number, number] | null = pitches.some((v, i) => v.pitch !== after[i].pitch) ? [Math.round(worst(pitches)), Math.round(worst(after))] : null;
   if (!stab && !rolled && !pitch) return { clip: c, stab: false, roll: false, pitch: null };
-  return { clip: { ...c, ...(stab ? { stab: { ...eff, mode: "horizon" } } : {}), view, viewKeys: keys }, stab, roll: rolled, pitch };
+  return { clip: { ...c, ...(stab ? { stab: { ...eff, mode: eff.mode === "smooth" ? "eis" : "horizon" } } : {}), view, viewKeys: keys }, stab, roll: rolled, pitch };
 }
 
-/** 흔들림 줄이기 on one clip: a strength (off becomes smooth, horizon and lock stay) or a mode. */
-export function stabClip(c: Clip, a: Asset | undefined, p: { strength?: number; mode?: "lock" | "off" }): Clip {
+/** Whether the shake is taken out, with levelling kept as it is. */
+const SHAKE_ON: Record<Stab["mode"], Stab["mode"]> = { off: "smooth", smooth: "smooth", horizon: "eis", eis: "eis", lock: "lock" };
+const SHAKE_OFF: Record<Stab["mode"], Stab["mode"]> = { off: "off", smooth: "off", horizon: "horizon", eis: "horizon", lock: "horizon" };
+
+/** 흔들림 줄이기 on one clip: a strength, or a mode: lock, off (the shake only), none (as filmed). */
+export function stabClip(c: Clip, a: Asset | undefined, p: { strength?: number; mode?: "lock" | "off" | "none" }): Clip {
   const eff = stabFor(c, a) ?? DEFAULT_STAB;
-  const next: Stab = p.mode === "off" ? { ...eff, mode: "off" }
+  const next: Stab = p.mode === "none" ? { ...eff, mode: "off" }
+    : p.mode === "off" ? { ...eff, mode: SHAKE_OFF[eff.mode] }
     : p.mode === "lock" ? { ...eff, mode: "lock" }
-    : { ...eff, mode: eff.mode === "off" ? "smooth" : eff.mode, strength: p.strength ?? 1 };
+    : { ...eff, mode: SHAKE_ON[eff.mode], strength: p.strength ?? 1 };
   return JSON.stringify(next) === JSON.stringify(eff) ? c : { ...c, stab: next };
 }
 
@@ -72,7 +77,7 @@ export async function measure(path: string, start: number, dur: number): Promise
 const quick: ActionDef[] = [
   {
     id: "level", group: "기본", label: "수평 맞추기", icon: "Ruler", key: "Alt+Shift+H",
-    tooltip: "수평선을 똑바로: 기울기 보정을 켜고, 수평선이 화면에 보이도록 위아래 각도를 맞춥니다",
+    tooltip: "수평선을 천천히 맞춥니다. 카메라 움직임은 찍힌 그대로 두고, 수평선이 화면에 보이도록 위아래 각도를 맞춥니다",
     enabled: (d) => has360(d.clips),
     run: ({ draft, clips }): ActionOut => {
       const am = assetMap(), hw = aspectHW(draft.aspect);
@@ -93,11 +98,11 @@ const quick: ActionDef[] = [
   },
   {
     id: "stab", group: "기본", label: "흔들림 줄이기", icon: "Vibrate", key: "Alt+Shift+J", marks: "stab",
-    tooltip: "흔들림을 줄입니다. 화살표: 약·보통·강·방향 고정·끄기",
+    tooltip: "손떨림을 없앱니다 (수평 맞추기와 함께 쓸 수 있습니다). 화살표: 약·보통·강·방향 고정·끄기",
     enabled: (d) => has360(d.clips),
     run: ({ draft, clips, params }): ActionOut => {
       const am = assetMap();
-      const mode = params.mode === "lock" || params.mode === "off" ? params.mode : undefined;
+      const mode = params.mode === "lock" || params.mode === "off" || params.mode === "none" ? params.mode : undefined;
       const strength = Number(params.strength ?? 1) || 1;
       let d = draft, n = 0;
       for (const c of clips) {
@@ -107,7 +112,7 @@ const quick: ActionDef[] = [
         n++;
         d = updateClip(d, c.id, { stab: nc.stab });
       }
-      const what = mode === "off" ? "끔" : mode === "lock" ? "방향 고정" : strengthName(strength);
+      const what = mode === "none" ? "수평까지 끔" : mode === "off" ? "끔" : mode === "lock" ? "방향 고정" : strengthName(strength);
       return { draft: d, changed: n, detail: `흔들림 줄이기 ${what} (${n}개 클립)` };
     },
   },

@@ -1,5 +1,5 @@
-// 360 stabilisation in the inspector's 렌즈 group (DJI Studio's 흔들림 보정 / 수평 유지 /
-// 방향 고정): the mode, how smoothly the picture follows the camera's turns, the rolling-shutter
+// 360 levelling and stabilisation in the inspector's 렌즈 group (DJI Studio's 흔들림 보정 / 수평 유지 /
+// 방향 고정): the mode, how smoothly a stabilised picture follows the camera's turns, the rolling-shutter
 // fix, and what the analysis used (the camera's gyro or the picture). The work is in
 // src-tauri/src/motion.rs and shows in the exported file; the analysis runs at the first export,
 // or ahead of it with the 흔들림 분석 button.
@@ -11,9 +11,10 @@ import type { Asset, Lens, MotionInfo, Stab } from "../types";
 export const DEFAULT_STAB: Stab = { mode: "horizon", strength: 1, rs: true };
 
 const MODES: [Stab["mode"], string, string][] = [
-  ["horizon", "수평 유지", "흔들림을 없애고 수평선을 늘 반듯하게, 방향은 카메라를 천천히 따라갑니다"],
-  ["lock", "방향 고정", "카메라가 돌아도 처음 바라본 방향을 계속 봅니다"],
-  ["smooth", "흔들림만 줄이기", "기울기는 그대로 두고 떨림만 없앱니다"],
+  ["horizon", "수평만 맞추기", "수평선을 천천히 맞춥니다. 카메라 움직임은 찍힌 그대로 둡니다"],
+  ["eis", "수평 + 흔들림 보정", "수평을 맞추고 손떨림도 없앱니다. 방향은 카메라를 천천히 따라갑니다"],
+  ["lock", "방향 고정", "수평을 맞추고, 카메라가 돌아도 처음 바라본 방향을 계속 봅니다"],
+  ["smooth", "흔들림만 보정", "기울기는 그대로 두고 손떨림만 없앱니다"],
   ["off", "끄기", "찍힌 그대로 둡니다"],
 ];
 
@@ -41,18 +42,20 @@ export function Stab360({ a }: { a: Asset }) {
   const mode = MODES.find((m) => m[0] === s.mode) ?? MODES[0];
   return (
     <div class="stab360">
-      <label>흔들림 보정
+      <label>수평·흔들림
         <select value={s.mode} title={mode[2]} onChange={(e) => setStab(a, { ...s, mode: (e.target as HTMLSelectElement).value as Stab["mode"] })}>
           {MODES.map(([v, label, tip]) => <option value={v} title={tip}>{label}</option>)}
         </select>
       </label>
       {s.mode !== "off" && (
         <>
-          <label title="클수록 카메라가 돌 때 화면이 더 천천히, 부드럽게 따라갑니다">부드러움 {strength.toFixed(1)}초
-            <input type="range" min={0.2} max={5} step={0.1} value={strength}
-              onInput={(e) => setStrength(Number((e.target as HTMLInputElement).value))}
-              onChange={(e) => setStab(a, { ...s, strength: Number((e.target as HTMLInputElement).value) })} />
-          </label>
+          {(s.mode === "eis" || s.mode === "smooth") && (
+            <label title="클수록 카메라가 돌 때 화면이 더 천천히, 부드럽게 따라갑니다">부드러움 {strength.toFixed(1)}초
+              <input type="range" min={0.2} max={5} step={0.1} value={strength}
+                onInput={(e) => setStrength(Number((e.target as HTMLInputElement).value))}
+                onChange={(e) => setStab(a, { ...s, strength: Number((e.target as HTMLInputElement).value) })} />
+            </label>
+          )}
           <label class="check" title="빠르게 돌 때 화면이 젤리처럼 휘는 것(롤링 셔터)을 바로잡습니다. 카메라의 자이로 기록이 있을 때 쓰입니다.">
             <input type="checkbox" checked={false} disabled title="검증 중 (2.18에서는 꺼짐)" />
             젤리 현상(롤링 셔터) 보정
@@ -63,7 +66,7 @@ export function Stab360({ a }: { a: Asset }) {
               : `분석 전 · ${a.info.djmd ? "카메라 자이로 기록으로 보정합니다" : "자이로 기록이 없어 화면 움직임으로 분석합니다"}`}
           </p>
           {!found && !busy && (
-            <button class="small" onClick={() => analyzeMotion(a.id)} title="처음 내보낼 때 할 분석을 미리 해 둡니다 (진행은 아래 상태 표시줄에)">흔들림 분석</button>
+            <button class="small" onClick={() => analyzeMotion(a.id)} title="처음 내보낼 때 할 분석을 미리 해 둡니다 (진행은 아래 상태 표시줄에)">움직임 분석</button>
           )}
           <p class="muted tip">분석이 끝나면 미리보기도 내보낼 파일과 같은 방향으로 수평이 맞춰집니다.</p>
         </>

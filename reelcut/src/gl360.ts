@@ -47,6 +47,21 @@ export function dirToDfisheye(x: number, y: number, z: number, fov: number, swap
   return [u, fy];
 }
 
+/** The strip under a live 360 stream's picture (src-tauri/src/live.rs `frame_marks`): 16 px high, blocks 32 px wide. */
+export const MARK_H = 16;
+const MARK_W = 32, MARK_BITS = 20;
+/**
+ * The frame number in one row of that strip (RGBA, from the left), or null if it is not one: the
+ * block after the number is always white and the next always black.
+ */
+export function readMark(row: ArrayLike<number>): number | null {
+  const on = (i: number) => row[(i * MARK_W + MARK_W / 2) * 4] > 128;
+  if (!on(MARK_BITS) || on(MARK_BITS + 1)) return null;
+  let k = 0;
+  for (let b = 0; b < MARK_BITS; b++) if (on(b)) k += 2 ** b;
+  return k;
+}
+
 /** How the picture on the texture is laid out. */
 export type Proj = { kind: "equirect" } | { kind: "dfisheye"; fov: number; swap: boolean };
 
@@ -54,7 +69,7 @@ const VS = `attribute vec2 p; varying vec2 uv; void main(){ uv = vec2(p.x*0.5+0.
 const FS = `precision highp float;
 varying vec2 uv; uniform sampler2D tex; uniform vec4 q; uniform vec2 rng;
 uniform float fish; uniform float frng; uniform float swp; uniform vec4 stab;
-uniform float dist; uniform float rE; uniform float asp;
+uniform float dist; uniform float rE; uniform float asp; uniform vec2 vs;
 vec4 qm(vec4 a, vec4 b){ return vec4(
   a.x*b.x - a.y*b.y - a.z*b.z - a.w*b.w,
   a.x*b.y + a.y*b.x + a.z*b.w - a.w*b.z,
@@ -89,6 +104,7 @@ void main(){
     float th = asin(clamp(r.z, -1.0, 1.0));
     t = vec2((phi/3.14159265 + 1.0)*0.5, (th/1.5707963 + 1.0)*0.5);
   }
+  t.y = min(t.y * vs.x, vs.y);
   gl_FragColor = texture2D(tex, t);
 }`;
 
@@ -96,6 +112,8 @@ export class Flat360 {
   gl: WebGLRenderingContext;
   prog: WebGLProgram;
   tex: WebGLTexture;
+  private fb: WebGLFramebuffer | null = null;
+  private row = new Uint8Array((MARK_W * (MARK_BITS + 2)) * 4);
   constructor(public canvas: HTMLCanvasElement) {
     const gl = canvas.getContext("webgl", { preserveDrawingBuffer: true, antialias: false });
     if (!gl) throw new Error("WebGL을 쓸 수 없습니다");
@@ -126,8 +144,25 @@ export class Flat360 {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   }
-  /** `stab`: the frame's stabilising turn (w, x, y, z), the same one the export applies. */
-  draw(src: TexImageSource, view: View, proj: Proj = { kind: "equirect" }, stab?: ArrayLike<number> | null) {
+  /** The frame number under the picture just uploaded. */
+  private frameMark(w: number, h: number): number | null {
+    const { gl } = this;
+    this.fb ??= gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.tex, 0);
+    let k: number | null = null;
+    if (w >= MARK_W * (MARK_BITS + 2) && gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) {
+      gl.readPixels(0, h - MARK_H / 2, MARK_W * (MARK_BITS + 2), 1, gl.RGBA, gl.UNSIGNED_BYTE, this.row);
+      k = readMark(this.row);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return k;
+  }
+  /**
+   * `stab`: the frame's stabilising turn (w, x, y, z), the same one the export applies. As a function
+   * it gets the frame number the picture itself carries (null when it has none).
+   */
+  draw(src: TexImageSource, view: View, proj: Proj = { kind: "equirect" }, stab?: ArrayLike<number> | null | ((frame: number | null) => ArrayLike<number> | null)) {
     const { gl, canvas } = this;
     const w = canvas.clientWidth * devicePixelRatio, h = canvas.clientHeight * devicePixelRatio;
     if (canvas.width !== Math.round(w) || canvas.height !== Math.round(h)) { canvas.width = Math.round(w); canvas.height = Math.round(h); }
@@ -135,6 +170,11 @@ export class Flat360 {
     try {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
     } catch { return; }
+    // A stream with the strip: the picture is what lies above it.
+    const vw = (src as HTMLVideoElement).videoWidth ?? 0, vh = (src as HTMLVideoElement).videoHeight ?? 0;
+    const marked = vw > 0 && vh === vw / 2 + MARK_H;
+    gl.uniform2f(gl.getUniformLocation(this.prog, "vs"), marked ? (vh - MARK_H) / vh : 1, marked ? (vh - MARK_H - 0.5) / vh : 1);
+    if (typeof stab === "function") stab = stab(marked ? this.frameMark(vw, vh) : null);
     const q = rotation(view);
     const d = Math.max(0, Math.min(1, view.dist ?? 0));
     const tx = Math.tan((Math.max(20, Math.min(160, view.hfov)) * Math.PI) / 360);

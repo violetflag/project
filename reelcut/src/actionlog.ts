@@ -175,8 +175,8 @@ export const isAiLabel = (label: string) => /^AI(:| 스크립트)/.test(label);
 const r1 = (x: number) => Math.round(x * 10) / 10;
 const deg = (x: number | undefined) => Math.round(x ?? 0);
 const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-const STAB_MODE: Record<Stab["mode"], string> = { horizon: "수평", lock: "방향 고정", smooth: "흔들림만", off: "끔" };
-export const stabName = (s?: Stab | null) => !s ? "기본" : s.mode === "off" ? "끔" : `${s.strength <= 0.6 ? "약" : s.strength >= 1.5 ? "강" : "보통"}(${STAB_MODE[s.mode]})`;
+const STAB_MODE: Record<Stab["mode"], string> = { horizon: "수평", eis: "수평+흔들림", lock: "방향 고정", smooth: "흔들림만", off: "끔" };
+export const stabName = (s?: Stab | null) => !s ? "기본" : s.mode === "off" ? "끔" : s.mode === "horizon" ? "수평만" : `${s.strength <= 0.6 ? "약" : s.strength >= 1.5 ? "강" : "보통"}(${STAB_MODE[s.mode]})`;
 const PRESET: Record<string, string> = { best: "최적", zoom: "확대", wide: "광각", ultra: "초광각", planet: "작은 행성" };
 export const presetName = (p?: string) => (p ? PRESET[p] ?? p : "");
 
@@ -375,16 +375,16 @@ export function stateLine(d: Draft, assets: Map<string, Asset>): string {
   if (d.fx?.loudnorm) parts.push(`소리 고르게(초안 전체, ${d.fx.lufs ?? -16} LUFS)`);
   const c360 = d.clips.filter((c) => !isGap(c) && is360(assets.get(c.asset)));
   if (c360.length) {
-    // Clips without their own setting use the media's, whose default is horizon at medium strength.
+    // Clips without their own setting use the media's, whose default is level only.
     const eff = c360.map((c) => c.stab ?? assets.get(c.asset)?.lens?.stab ?? { mode: "horizon", strength: 1, rs: true } as Stab);
-    const on = eff.filter((s) => s.mode !== "off");
+    const on = eff.filter((s) => s.mode === "smooth" || s.mode === "eis" || s.mode === "lock");
     if (on.length) {
       const names = new Map<string, number>();
       for (const s of on) { const n = stabName(s).replace(/\(.*\)/, ""); names.set(n, (names.get(n) ?? 0) + 1); }
       const top = [...names.entries()].sort((a, b) => b[1] - a[1])[0][0];
       parts.push(`흔들림 ${top} 360 클립 ${on.length}/${c360.length}`);
     }
-    const level = eff.filter((s) => s.mode === "horizon" || s.mode === "lock").length;
+    const level = eff.filter((s) => s.mode === "horizon" || s.mode === "eis" || s.mode === "lock").length;
     if (level) parts.push(`수평 맞추기 ${level}/${c360.length}`);
     const views = new Map<string, number>();
     for (const c of c360) {

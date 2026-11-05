@@ -188,7 +188,7 @@ class Player {
    * The turn the export applies to this moment, so the preview looks the same way (level and
    * stabilised). Fetched once per file and settings; a recording with a gyro is analysed by itself.
    */
-  stabOf(a: Asset, t: number): Float32Array | null {
+  stabOf(a: Asset, t: number, frame?: number | null): Float32Array | null {
     if (a.info.layout360 !== "dual" && a.info.layout360 !== "dfisheye") return null;
     // The clip's own setting first, as the export does.
     const d0 = st.sourceId ? null : draft();
@@ -218,7 +218,7 @@ class Player {
     }
     if (!tr.q) return null;
     const n = tr.q.length / 4;
-    const k = Math.max(0, Math.min(n - 1, Math.round(t * tr.fps)));
+    const k = Math.max(0, Math.min(n - 1, frame ?? Math.round(t * tr.fps)));
     return tr.q.subarray(k * 4, k * 4 + 4);
   }
 
@@ -525,10 +525,18 @@ class Player {
       else if (v.readyState >= 2) {
         const gl = this.gl;
         if (this.playing && this.rate > 0 && this.frameCallbacks && this.shownAt >= 0) {
-          this.drawFrame = () => { if (this.playing && !this.stillOn) gl.draw(v, this.currentView(), projOf(a), this.stabOf(a, this.base + this.shownAt)); };
+          this.drawFrame = () => {
+            if (!this.playing || this.stillOn) return;
+            const at = this.base + this.shownAt;
+            gl.draw(v, this.currentView(), projOf(a), (frame) => {
+              (window as any).__stabSync?.push([frame, at, performance.now()]);
+              return this.stabOf(a, at, frame);
+            });
+          };
         } else {
           this.drawFrame = null;
-          gl.draw(v, this.currentView(), projOf(a), this.stabOf(a, this.playing && this.shownAt >= 0 ? this.base + this.shownAt : this.pos()));
+          const at = this.playing && this.shownAt >= 0 ? this.base + this.shownAt : this.pos();
+          gl.draw(v, this.currentView(), projOf(a), (frame) => this.stabOf(a, at, frame));
         }
       }
     }

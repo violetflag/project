@@ -217,7 +217,12 @@ impl Live {
         a.extend(s(&["-ss", &format!("{:.3}", req.t.max(0.0))]));
         // Real time after a short head start, so ffmpeg works only as fast as the picture plays.
         a.extend(s(&["-readrate", &format!("{rate:.3}"), "-readrate_initial_burst", "2", "-i", &req.info.path]));
-        a.extend(picture_with(&req.info, req.lens.as_ref(), gpu, self.sharp.load(Ordering::Relaxed)));
+        let mut pic = picture_with(&req.info, req.lens.as_ref(), gpu, self.sharp.load(Ordering::Relaxed));
+        if matches!(req.info.layout360.as_str(), "dual" | "dfisheye") {
+            let first = (req.t.max(0.0) * req.info.fps.max(1.0) - 1e-3).ceil().max(0.0) as u64;
+            pic[1] = pic[1].replace("[pv]", &format!(",{}[pv]", frame_marks(first)));
+        }
+        a.extend(pic);
         if req.info.has_audio {
             a.extend(s(&["-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"]));
         }
@@ -272,6 +277,18 @@ fn s(a: &[&str]) -> Vec<String> {
     a.iter().map(|x| x.to_string()).collect()
 }
 
+/// A strip under a 360 stream's picture holding each frame's number in the file, as black and white
+/// blocks: the viewer reads it from the very picture it draws, so the turn for that frame is never
+/// taken for another (timing alone cannot promise that; a turn one frame off shakes the view).
+/// Bit 0 first, then one block always white. See `src/gl360.ts`.
+fn frame_marks(first: u64) -> String {
+    let mut f = "pad=iw:ih+16:0:0:black".to_string();
+    for b in 0..20u32 {
+        f += &format!(",drawbox=x={}:y=ih-16:w=32:h=16:color=white:t=fill:enable='eq(mod(floor((n+{first})/{}),2),1)'", b * 32, 1u64 << b);
+    }
+    f + ",drawbox=x=640:y=ih-16:w=32:h=16:color=white:t=fill"
+}
+
 /// The picture as ffmpeg options (`-filter_complex … -map [pv]`): a two-lens 360 recording as
 /// the 2048×1024 stitched sphere (the viewer draws a flat view of it), anything else at most
 /// 1080 lines high.
@@ -320,6 +337,15 @@ mod tests {
 
     fn info(layout: &str) -> MediaInfo {
         MediaInfo { path: "x.osv".into(), kind: "video".into(), layout360: layout.into(), fps: 30.0, has_audio: true, ..Default::default() }
+    }
+
+    #[test]
+    fn frames_are_numbered_from_where_the_stream_starts() {
+        let m = frame_marks(8841);
+        assert!(m.starts_with("pad=iw:ih+16:0:0:black,"), "{m}");
+        assert_eq!(m.matches("drawbox").count(), 21);
+        assert!(m.contains("x=32:y=ih-16") && m.contains("floor((n+8841)/2)"), "{m}");
+        assert!(m.ends_with("x=640:y=ih-16:w=32:h=16:color=white:t=fill"), "{m}");
     }
 
     #[test]

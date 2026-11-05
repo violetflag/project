@@ -103,6 +103,7 @@ export function QuickBar() {
               <div class="menu-sep" role="separator" />
               <button role="menuitem" onClick={(e) => run(stab, e.shiftKey, { mode: "lock" })} title="카메라가 돌아도 보는 방향을 그대로 둡니다"><span class="mk" /><span class="ml">방향 고정</span><span class="mkey" /></button>
               <button role="menuitem" onClick={(e) => run(stab, e.shiftKey, { mode: "off" })}><span class="mk" /><span class="ml">끄기</span><span class="mkey" /></button>
+              <button role="menuitem" onClick={(e) => run(stab, e.shiftKey, { mode: "none" })} title="수평 맞추기도 끄고 찍힌 그대로 봅니다"><span class="mk" /><span class="ml">수평까지 끄기</span><span class="mkey" /></button>
             </div>
           )}
         </div>

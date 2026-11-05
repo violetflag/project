@@ -413,7 +413,7 @@ async fn motion_track(app: St<'_>, path: String, lens: Lens) -> Result<Option<Va
     let app = app.inner().clone();
     blocking(move || {
         let info = media::inspect(&app.bins.ffprobe, &path)?;
-        let Ok(t) = std::fs::read_to_string(app.dir("motion").join(format!("{}-m1.json", file_key(&path)))) else { return Ok(None) };
+        let Ok(t) = std::fs::read_to_string(app.dir("motion").join(format!("{}{}", file_key(&path), motion::TRACK_FILE))) else { return Ok(None) };
         let m: motion::Motion = serde_json::from_str(&t).map_err(|e| e.to_string())?;
         if !motion::usable(&m, &info) {
             return Ok(None);
@@ -436,7 +436,7 @@ async fn motion_track(app: St<'_>, path: String, lens: Lens) -> Result<Option<Va
 /// What the stabilisation found for a recording (gyro or picture), once analysed.
 #[tauri::command]
 fn motion_info(app: St<'_>, path: String) -> Option<Value> {
-    let t = std::fs::read_to_string(app.dir("motion").join(format!("{}-m1.json", file_key(&path)))).ok()?;
+    let t = std::fs::read_to_string(app.dir("motion").join(format!("{}{}", file_key(&path), motion::TRACK_FILE))).ok()?;
     let m: motion::Motion = serde_json::from_str(&t).ok()?;
     Some(json!({ "source": m.source, "note": m.note, "readout": m.readout, "product": m.product }))
 }

@@ -22,7 +22,7 @@ export type Stitch = {
   seam?: "linear" | "flow";
 };
 /** 360 stabilisation (see src-tauri/src/motion.rs). */
-export type Stab = { mode: "horizon" | "lock" | "smooth" | "off"; strength: number; rs: boolean };
+export type Stab = { mode: "horizon" | "eis" | "lock" | "smooth" | "off"; strength: number; rs: boolean };
 /** What the stabilisation analysis found (gyro in the file, or the picture). */
 export type MotionInfo = { source: string; note: string; readout: number; product: string };
 export type Lens = { layout: string; swap: boolean; fov: number; stitch?: Stitch | null; stab?: Stab | null };
