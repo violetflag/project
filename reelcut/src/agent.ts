@@ -24,6 +24,7 @@ import { LEVEL_VIEW_RULE, PEOPLE_360_RULE } from "./playbook";
 import { runScript, stopScript } from "./script";
 import { activityLog, aiBegin, aiEnd, archive, entries, logReady, noteAiTool, presetName, stabName, stateLine, userActionsNote, useLog } from "./actionlog";
 import { runAction } from "./actions";
+import { reviewText } from "./review";
 // The toolbar buttons the AI can press (quick_action).
 import "./quick";
 import "./quick360";
@@ -62,6 +63,7 @@ const SYSTEM = `당신은 Reelcut의 영상 편집 에이전트입니다. Reelcu
 - 무음 정리는 remove_silences(pacing: gentle/normal/tight/jump_cut), "음·어" 같은 군더더기 말은 remove_fillers를 쓰세요.
 - 모든 편집은 사용자가 되돌리기(Ctrl+Z)로 취소할 수 있습니다.
 - 내보내기(export_draft)는 사용자가 요청했을 때만 하세요.
+- 편집본을 만들거나 크게 고쳤으면 보고하기 전에 review_draft로 점검하고, 나온 문제를 고친 뒤 다시 점검하세요.
 - 끝나면 무엇을 했는지 2~4문장으로 알려 주세요. 편집본 길이, 잘라 낸 양처럼 확인한 숫자를 말하세요.
 
 ## 사용자가 직접 한 작업
@@ -342,6 +344,10 @@ action: level(수평 맞추기), stab(흔들림 줄이기, params.strength 0.5/1
       },
       required: ["action"],
     },
+  },
+  {
+    name: "review_draft", description: "편집본을 스스로 점검합니다: 360 시점이 너무 내려다보거나 올려다보는 곳(±30° 밖), 모서리가 1.4배 넘게 늘어나는 곳, 수평선이 화면 밖인 곳, 같은 촬영인데 컷에서 방향이 60° 넘게 튀는 곳, 0.7초 안 되는 클립. 편집을 마치면 보고하기 전에 꼭 부르고, 나온 것을 고친 뒤 다시 부르세요.",
+    input_schema: { type: "object", properties: { draft_id: draftId } },
   },
   {
     name: "get_activity_log", description: "프로젝트 작업 기록(사용자가 누른 버튼, 직접 편집, AI 작업, 되돌리기, 내보내기)을 시간순으로 봅니다. 줄마다 #번호, 시각, [누가/종류]가 붙습니다.",
@@ -1171,6 +1177,7 @@ async function runTool(name: string, inp: any): Promise<Out> {
       const r = await runAction(id, { scope: inp.scope ?? "selection", params: inp.params ?? {}, by: "ai", run: curRun, chat: curChat, draftId: d.id });
       return `${r.detail}${r.skipped.length ? ` (건너뜀: ${r.skipped.join(", ")})` : ""}`;
     }
+    case "review_draft": return reviewText(getDraft(inp.draft_id), assetMap());
     case "get_activity_log": return activityLog({ since_seq: inp.since_seq, limit: inp.limit, who: inp.who });
     case "get_export_log": {
       const n = Math.min(5, Math.max(1, Number(inp.n ?? 1)));
@@ -1537,7 +1544,7 @@ export const TOOL_LABEL: Record<string, string> = {
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
   run_script: "스크립트 실행 중", get_sdk_types: "스크립트 API 읽는 중", measure_loudness: "소리 크기 재는 중", find_beats: "박자 찾는 중", find_scene_cuts: "장면 바뀌는 곳 찾는 중", find_audio_events: "소리 구간 찾는 중", scan_gaze: "카메라 보는 구간 찾는 중", organize_media: "미디어 정리하는 중", trim_to_subjects: "사람이 없는 부분 빼는 중", merge_skills: "스킬 합치는 중", run_merged_skill: "병합 스킬 준비 중", finish_step: "단계 마치는 중", get_captions: "자막 읽는 중", edit_captions: "자막 고치는 중", fix_words: "받아쓰기 고치는 중", set_translation: "번역 넣는 중", paste_attributes: "속성 붙여넣는 중", sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", ask_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
-  quick_action: "버튼 작업 하는 중", get_activity_log: "작업 기록 읽는 중", get_export_log: "내보내기 기록 읽는 중",
+  quick_action: "버튼 작업 하는 중", review_draft: "편집본 점검하는 중", get_activity_log: "작업 기록 읽는 중", get_export_log: "내보내기 기록 읽는 중",
 };
 
 // ---------------------------------------------------------------- "Claude 계정" mode (Claude Code)
