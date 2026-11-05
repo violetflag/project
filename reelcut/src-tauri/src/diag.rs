@@ -157,6 +157,41 @@ mod tests {
         assert!((best - W as i64 / 2).abs() <= 2, "{best}");
     }
 
+    /// Reading back part of the lenses must not change a pixel (a real recording, Quick Sync).
+    #[test]
+    fn real_crop_changes_nothing() {
+        let Ok(path) = std::env::var("REELCUT_REAL_OSV") else { return };
+        let bin = |n: &str| std::path::PathBuf::from(std::env::var("FFDIR").unwrap_or_else(|_| "/usr/bin".into())).join(n);
+        let info = crate::media::inspect(&bin("ffprobe"), &path).unwrap();
+        let st: stitch::Stitch = serde_json::from_value(json!({ "on": true, "fov": 193.4, "yaw": 0.85, "pitch": 0.15, "roll": -0.45, "gain_a": [0.976, 0.431, -0.267], "gain_b": [1.025, -0.431, 0.267], "calibrated": true, "before": 21.17, "after": 8.58, "flow": false })).unwrap();
+        let lens = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: Some(st), stab: None };
+        let s = stitch::params(&lens);
+        for (start, yaw0, hfov) in [(270.0, 70.0, 91.0), (600.0, 180.0, 91.0), (290.0, 0.0, 118.0)] {
+            let run = |crop: bool| {
+                let mut src = motion::source_for(&info, &lens, start, 2.0, None, false);
+                src.gpu = true;
+                src.crop = crop;
+                let mut pics: Vec<Vec<f32>> = vec![];
+                let mut stitcher = crate::pano::Stitcher::new(&s, src.n() as f64, 1920, 1080, false, None);
+                let setup = move |k: usize, _t: f64| crate::pano::FrameSetup { rot: stitch::matrix(stitch::ypr(yaw0 + k as f64 * 0.3, -15.0, 0.0)), hfov: Some((hfov, 0.3)), omega: None };
+                let t = std::time::Instant::now();
+                let mut cb = |k: usize, f: &crate::pano::Frame<u8>| {
+                    if k % 20 == 0 {
+                        pics.push(f.p[0].iter().map(|v| *v as f32).collect());
+                    }
+                };
+                crate::pano::run::<u8>(&bin("ffmpeg"), &ff::Jobs::default(), "t", 0, &src, &mut stitcher, &setup, crate::pano::Sink::Call(&mut cb), |_| {}).unwrap();
+                (pics, t.elapsed().as_secs_f64())
+            };
+            let (a, ta) = run(false);
+            let (b, tb) = run(true);
+            assert_eq!(a.len(), b.len());
+            let worst = a.iter().zip(&b).map(|(x, y)| psnr(x, y, 1920, 0, 1920)).fold(99.0, f64::min);
+            println!("CROP start {start} yaw {yaw0} hfov {hfov}: full {ta:.1}s, cropped {tb:.1}s, worst {worst:.1} dB");
+            assert!(worst >= 50.0, "{worst}");
+        }
+    }
+
     /// A real recording (REELCUT_REAL_OSV, read only; REELCUT_DIAG_DIR for the working file).
     #[test]
     fn real_parity() {

@@ -148,6 +148,24 @@ impl<T: Px> Frame<T> {
             off += n * T::BYTES;
         }
     }
+    /// Like `fill`, from a picture holding only the `rects` of the two lenses side by side. The rest
+    /// of this frame is not looked at (`Stitcher::lens_rects`).
+    pub fn fill_rects(&mut self, b: &[u8], rects: &[LensRect; 2]) {
+        let n = self.w / 2;
+        let mut off = 0;
+        for i in 0..3 {
+            let d = if i == 0 { 1 } else { 2 };
+            let (fw, rows) = (self.w / d, rects[0].h as usize / d);
+            for r in 0..rows {
+                for (lens, q) in rects.iter().enumerate() {
+                    let (w, x, y) = (q.w as usize / d, q.x as usize / d, q.y as usize / d);
+                    let at = (y + r) * fw + lens * (n / d) + x;
+                    T::read(&b[off..off + w * T::BYTES], &mut self.p[i][at..at + w]);
+                    off += w * T::BYTES;
+                }
+            }
+        }
+    }
     pub fn from_bytes(w: usize, h: usize, b: &[u8]) -> Self {
         let mut f = Frame::new(w, h);
         let mut off = 0;
@@ -594,6 +612,15 @@ pub struct Rs {
     pub top_first: bool,
 }
 
+/// A part of one lens picture, in its pixels; all even, so chroma lines up.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LensRect {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
 pub struct Stitcher {
     pub geo: Geo,
     strip: Strip,
@@ -872,6 +899,55 @@ impl Stitcher {
         self.mesh_key = Some(key);
     }
 
+    /// Which part of each lens this run looks at, so only that comes off the graphics chip: a view
+    /// sees a small part of the sphere, and reading the pictures back is the slowest step of an
+    /// export. Both rects have one height (they go side by side). None: most of the lenses anyway.
+    pub fn lens_rects(&mut self, setup: &dyn Fn(usize, f64) -> FrameSetup, frames: usize, fps: f64) -> Option<[LensRect; 2]> {
+        let n = self.geo.n as u32;
+        // Lens pixels: what may move between the sampled frames, and more than the sampling reads.
+        let pad = (self.geo.n * 0.02) as f32 + 16.0;
+        // A lens counts a little before its blend starts.
+        let reach = self.blend / 2.0 + 2f32.to_radians();
+        let mut lo = [[f32::MAX; 2]; 2];
+        let mut hi = [[f32::MIN; 2]; 2];
+        let mut k = 0;
+        loop {
+            self.build_mesh(&setup(k, k as f64 / fps.max(1.0)));
+            for m in &self.mesh {
+                for lens in 0..2 {
+                    let used = if lens == 0 { m[5] < reach } else { m[5] > -reach };
+                    if used {
+                        for a in 0..2 {
+                            lo[lens][a] = lo[lens][a].min(m[lens * 2 + a]);
+                            hi[lens][a] = hi[lens][a].max(m[lens * 2 + a]);
+                        }
+                    }
+                }
+            }
+            if k + 1 >= frames {
+                break;
+            }
+            k = (k + 3).min(frames - 1);
+        }
+        let span = |lens: usize, a: usize| -> (u32, u32) {
+            if lo[lens][a] > hi[lens][a] {
+                return (0, 64.min(n)); // this lens is never seen
+            }
+            let from = ((lo[lens][a] - pad).max(0.0) as u32) & !1;
+            let to = (((hi[lens][a] + pad).ceil() as u32).min(n) + 1).min(n) & !1;
+            (from, to.max(from + 2).min(n))
+        };
+        let ((x0, x0e), (x1, x1e)) = (span(0, 0), span(1, 0));
+        let ((y0, y0e), (y1, y1e)) = (span(0, 1), span(1, 1));
+        let h = (y0e - y0).max(y1e - y1);
+        let rects = [
+            LensRect { x: x0, y: y0.min(n - h), w: x0e - x0, h },
+            LensRect { x: x1, y: y1.min(n - h), w: x1e - x1, h },
+        ];
+        let kept = (rects[0].w + rects[1].w) as f64 * h as f64 / (2.0 * n as f64 * n as f64);
+        (kept < 0.85).then_some(rects)
+    }
+
     /// One output frame from one side-by-side input frame.
     pub fn frame<T: Px>(&mut self, src: &Frame<T>, fs: &FrameSetup) -> Frame<T> {
         // The band strip and its seam search are only for the precise seam.
@@ -1089,6 +1165,8 @@ pub struct Source {
     pub every: u32,
     /// Decode and shrink on the GPU (Intel Quick Sync), as the live preview does.
     pub gpu: bool,
+    /// With `gpu`: bring back only the parts of the lenses this run looks at.
+    pub crop: bool,
 }
 
 impl Source {
@@ -1096,14 +1174,17 @@ impl Source {
         let n = self.scale_to.unwrap_or(self.lens_px).max(16);
         n - n % 2
     }
-    fn decode_args(&self, fmt: &str) -> Vec<String> {
+    fn decode_args(&self, fmt: &str, rects: Option<&[LensRect; 2]>) -> Vec<String> {
         let n = self.n();
         let sc = |l: &str| format!("[{l}]scale={n}:{n}:flags=area[{l}s]");
         let pick = if self.every > 1 { format!("select='not(mod(n\\,{}))',", self.every) } else { String::new() };
         let g = match self.layout.as_str() {
             "dual" => {
                 let (ia, ib) = if self.swap { (1, 0) } else { (0, 1) };
-                if self.gpu {
+                if let (true, Some([ra, rb])) = (self.gpu, rects) {
+                    let q = |r: &LensRect| format!("vpp_qsv=cx={}:cy={}:cw={}:ch={}:format=nv12,hwdownload,format=nv12", r.x, r.y, r.w, r.h);
+                    format!("[0:v:{ia}]{}[as];[0:v:{ib}]{}[bs];[as][bs]hstack,{pick}format={fmt}[o]", q(ra), q(rb))
+                } else if self.gpu {
                     let q = format!("vpp_qsv=w={n}:h={n}:format=nv12,hwdownload,format=nv12");
                     format!("[0:v:{ia}]{q}[as];[0:v:{ib}]{q}[bs];[as][bs]hstack,{pick}format={fmt}[o]")
                 } else {
@@ -1183,8 +1264,17 @@ pub fn run<T: Px>(
     }
     let n = src.n() as usize;
     let (iw, ih) = (2 * n, n);
-    let in_len = Frame::<T>::byte_len(iw, ih);
-    let mut dec_args = src.decode_args(T::FMT);
+    // Only at the file's own size: shrinking and cropping as two passes loses the last frame.
+    let rects = if src.crop && src.gpu && src.layout == "dual" && src.n() == src.lens_px && src.every == 1 && src.dur > 0.0 && !st.flow && st.rs.is_none() {
+        st.lens_rects(setup, ((src.dur * src.fps).ceil() as usize + 1).max(1), src.fps)
+    } else {
+        None
+    };
+    let in_len = match &rects {
+        Some(r) => Frame::<T>::byte_len((r[0].w + r[1].w) as usize, r[0].h as usize),
+        None => Frame::<T>::byte_len(iw, ih),
+    };
+    let mut dec_args = src.decode_args(T::FMT, rects.as_ref());
     let big = big_pipe::create();
     if let (Some((name, _)), Some(last)) = (&big, dec_args.last_mut()) {
         *last = "-y".to_string();
@@ -1254,7 +1344,10 @@ pub fn run<T: Px>(
             break;
         }
         let t1 = std::time::Instant::now();
-        input.fill(&buf);
+        match &rects {
+            Some(r) => input.fill_rects(&buf, r),
+            None => input.fill(&buf),
+        }
         let _ = tx_back.send(buf);
         let fs = setup(k, k as f64 / src.fps.max(1.0));
         let out = st.frame(&input, &fs);
@@ -1274,7 +1367,8 @@ pub fn run<T: Px>(
     }
     drop(rx_in);
     if k > 30 {
-        crate::logs::log("stage", &format!("{} frames, {}px per lens, gpu {}: waiting for decode {waited:.1}s, stitching {stitched:.1}s, waiting for encoder {written:.1}s", k, n, src.gpu));
+        let part = rects.as_ref().map(|r| format!(", read back {:.0}% of the lenses", (r[0].w + r[1].w) as f64 * r[0].h as f64 / (2.0 * (n * n) as f64) * 100.0)).unwrap_or_default();
+        crate::logs::log("stage", &format!("{} frames, {}px per lens, gpu {}{part}: waiting for decode {waited:.1}s, stitching {stitched:.1}s, waiting for encoder {written:.1}s", k, n, src.gpu));
     }
     if failed.is_some() {
         let _ = dec.lock().kill();
@@ -1314,6 +1408,55 @@ pub fn run<T: Px>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cropped_picture_lands_where_the_full_one_was() {
+        let (n, rects) = (8usize, [LensRect { x: 2, y: 4, w: 4, h: 2 }, LensRect { x: 0, y: 2, w: 2, h: 2 }]);
+        let mut f = Frame::<u8>::new(2 * n, n);
+        // Luma: 4+2 wide, 2 rows. Chroma: 2+1 wide, 1 row.
+        let b: Vec<u8> = (1..=12).chain(13..=15).chain(16..=18).collect();
+        f.fill_rects(&b, &rects);
+        assert_eq!(&f.p[0][4 * 16 + 2..4 * 16 + 6], &[1, 2, 3, 4]);
+        assert_eq!(&f.p[0][2 * 16 + 8..2 * 16 + 10], &[5, 6]);
+        assert_eq!(&f.p[0][5 * 16 + 2..5 * 16 + 6], &[7, 8, 9, 10]);
+        assert_eq!(&f.p[0][3 * 16 + 8..3 * 16 + 10], &[11, 12]);
+        assert_eq!(&f.p[1][2 * 8 + 1..2 * 8 + 3], &[13, 14]);
+        assert_eq!(f.p[1][8 + 4], 15);
+        assert_eq!(&f.p[2][2 * 8 + 1..2 * 8 + 3], &[16, 17]);
+        assert_eq!(f.p[2][8 + 4], 18);
+    }
+
+    #[test]
+    fn the_rects_hold_every_pixel_of_a_moving_view() {
+        let st = Stitch { fov: 193.4, ..Default::default() };
+        let n = 1024usize;
+        let mut s = Stitcher::new(&st, n as f64, 1920, 1080, false, None);
+        let setup = |k: usize, _t: f64| FrameSetup { rot: crate::stitch::matrix(crate::stitch::ypr(20.0 + k as f64 * 0.2, -15.0, 0.0)), hfov: Some((91.0, 0.3)), omega: None };
+        let r = s.lens_rects(&setup, 150, 30.0).expect("a view needs part of the lenses");
+        assert_eq!(r[0].h, r[1].h);
+        for q in &r {
+            assert!(q.x % 2 == 0 && q.y % 2 == 0 && q.w % 2 == 0 && q.h % 2 == 0, "{q:?}");
+            assert!(q.x + q.w <= n as u32 && q.y + q.h <= n as u32, "{q:?}");
+        }
+        // Every frame, also those it did not sample, at every mesh point a lens is used.
+        let bw = crate::stitch::blend_width(193.4).to_radians() as f32;
+        for k in 0..150 {
+            s.build_mesh(&setup(k, 0.0));
+            for m in &s.mesh {
+                for lens in 0..2 {
+                    if (lens == 0 && m[5] < bw / 2.0) || (lens == 1 && m[5] > -bw / 2.0) {
+                        let q = &r[lens];
+                        let (px, py) = (m[lens * 2], m[lens * 2 + 1]);
+                        assert!(px >= q.x as f32 - 0.5 && px + 1.0 <= (q.x + q.w) as f32 + 0.5, "lens {lens} frame {k} x {px} {q:?}");
+                        assert!(py >= q.y as f32 - 0.5 && py + 1.0 <= (q.y + q.h) as f32 + 0.5, "lens {lens} frame {k} y {py} {q:?}");
+                    }
+                }
+            }
+        }
+        // A whole-sphere picture needs everything.
+        let mut all = Stitcher::new(&st, n as f64, 2048, 1024, false, None);
+        assert!(all.lens_rects(&|_, _| FrameSetup { rot: I3, hfov: None, omega: None }, 10, 30.0).is_none());
+    }
 
     /// How long a moving 1080p view takes (REELCUT_BENCH=1 cargo test --release --lib bench_frame -- --nocapture).
     #[test]

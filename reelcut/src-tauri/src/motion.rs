@@ -685,9 +685,9 @@ pub fn source_for(info: &MediaInfo, lens: &Lens, start: f64, dur: f64, scale_to:
     let layout = if lens.layout.is_empty() || lens.layout == "none" { info.layout360.clone() } else { lens.layout.clone() };
     let fps = if info.fps > 1.0 { info.fps } else { 30.0 };
     match (&info.lrf, layout.as_str(), small) {
-        (Some(l), "dual", true) => Source { path: l.clone(), layout: "dfisheye".into(), swap: lens.swap, start, dur, lens_px: scale_to.unwrap_or(1024), scale_to, fps, every: 1, gpu: false },
-        (_, "dual", _) => Source { path: info.path.clone(), layout: "dual".into(), swap: lens.swap, start, dur, lens_px: info.videos.first().map(|v| v.width).unwrap_or(info.width), scale_to, fps, every: 1, gpu: false },
-        _ => Source { path: info.path.clone(), layout: "dfisheye".into(), swap: lens.swap, start, dur, lens_px: info.width / 2, scale_to, fps, every: 1, gpu: false },
+        (Some(l), "dual", true) => Source { path: l.clone(), layout: "dfisheye".into(), swap: lens.swap, start, dur, lens_px: scale_to.unwrap_or(1024), scale_to, fps, every: 1, gpu: false, crop: false },
+        (_, "dual", _) => Source { path: info.path.clone(), layout: "dual".into(), swap: lens.swap, start, dur, lens_px: info.videos.first().map(|v| v.width).unwrap_or(info.width), scale_to, fps, every: 1, gpu: false, crop: false },
+        _ => Source { path: info.path.clone(), layout: "dfisheye".into(), swap: lens.swap, start, dur, lens_px: info.width / 2, scale_to, fps, every: 1, gpu: false, crop: false },
     }
 }
 
@@ -963,7 +963,7 @@ pub fn motion_for(dir: &Path, ffmpeg: &Path, ffprobe: &Path, jobs: &Jobs, tag: &
 }
 
 /// Bump when the engine's picture changes, so kept clips are made again.
-pub const ENGINE_VERSION: u32 = 6;
+pub const ENGINE_VERSION: u32 = 7;
 
 /// How `render_flat` works: the lens size to decode at, the GPU, and the intermediate's quality.
 #[derive(Clone, Debug, Default)]
@@ -995,6 +995,7 @@ pub fn lens_px_for(fov: f64, w: u32, hfov_min: f64, dist: f64, lens_px: u32) -> 
 pub fn render_flat(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo, lens: &Lens, m: Option<&Motion>, start: f64, dur: f64, speed: f64, w: u32, h: u32, how: &FlatOptions, view_at: &dyn Fn(f64) -> crate::media::View, out: &Path, on: impl Fn(f64)) -> Result<(), String> {
     let mut src = source_for(info, lens, start, dur, how.lens_px, false);
     src.gpu = how.gpu && src.layout == "dual";
+    src.crop = true;
     let s = crate::stitch::params(lens);
     let stab = stab_of(lens);
     let mut st = Stitcher::new(&s, src.n() as f64, w as usize, h as usize, s.precise(), rs_of(m, &stab));
