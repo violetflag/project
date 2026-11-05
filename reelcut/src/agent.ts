@@ -24,6 +24,9 @@ import { LEVEL_VIEW_RULE, PEOPLE_360_RULE } from "./playbook";
 import { runScript, stopScript } from "./script";
 import { activityLog, aiBegin, aiEnd, archive, entries, logReady, noteAiTool, presetName, stabName, stateLine, userActionsNote, useLog } from "./actionlog";
 import { runAction } from "./actions";
+// The toolbar buttons the AI can press (quick_action).
+import "./quick";
+import "./quick360";
 import { captionLines, draftCaptions, joinNext, moveWordPrev, setBreak, setHidden, setLineText, wordKey } from "./captions";
 import type { AnimKey, Asset, ChatBlock, Clip, ChoiceCard, ChatMsg, ChatSession, Draft, Skill, TextItem, View, ViewKey, VolKey } from "./types";
 

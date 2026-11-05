@@ -8,6 +8,9 @@ import { asset, assetMap, canRedo, canUndo, draft, editDraft, importPaths, loadW
 import type { Clip } from "./types";
 import { player } from "./ui/Viewer";
 import { applyWorkspace, togglePanel } from "./ui/layout";
+import { actionList, runAction } from "./actions";
+import "./quick";
+import "./quick360";
 
 export type Cmd = {
   id: string;
@@ -125,6 +128,13 @@ const zoom = (k: number) => window.dispatchEvent(new CustomEvent("reelcut:zoom",
 const setTool = (t: Tool) => set({ tool: t });
 const ws = (w: Workspace) => applyWorkspace(w);
 
+/** Toolbar quick buttons with a shortcut (Alt+Shift+…), in the 클립 menu too. */
+const QUICK_CMDS: Cmd[] = actionList().filter((a) => a.key).map((a, i) => ({
+  id: `quick-${a.id}`, label: a.label, menu: "클립", keys: a.key, sep: i === 0, term: a.group === "360" ? "360" : undefined,
+  enabled: () => { const d = draft(); return draftMode() && !!d && (!a.enabled || a.enabled(d, { kind: "draft" })); },
+  run: () => { runAction(a.id, { scope: "selection" }).catch((e) => toast(`${a.label}: ${String((e as Error)?.message ?? e)}`)); },
+}));
+
 export const COMMANDS: Cmd[] = [
   // 파일
   { id: "new", label: "새 프로젝트…", menu: "파일", keys: "Ctrl+N", global: true, run: () => set({ dialog: "newProject" }) },
@@ -172,6 +182,8 @@ export const COMMANDS: Cmd[] = [
   { id: "zoomOut", label: "축소", menu: "타임라인", keys: "-", enabled: inProject, run: () => zoom(1 / 1.5) },
   { id: "zoomFit", label: "전체 맞춤", menu: "타임라인", keys: "Shift+Z", enabled: inProject, run: fit },
 
+  ...QUICK_CMDS,
+
   // 재생
   { id: "play", label: "재생 / 멈춤", menu: "재생", keys: "Space", enabled: inProject, run: () => player.toggle() },
   { id: "shuttleBack", label: "뒤로 재생 (누를수록 빠르게)", menu: "재생", keys: "J", term: "Shuttle", enabled: inProject, run: () => player.shuttle(-1) },
@@ -210,8 +222,8 @@ const DEFAULT_KEYS = new Map(COMMANDS.map((c) => [c.id, c.keys ?? ""]));
 export const KEY_LAYOUTS: { id: string; label: string; keys: Record<string, string> }[] = [
   { id: "default", label: "Reelcut 기본", keys: {} },
   { id: "premiere", label: "Premiere Pro", keys: { split: "Ctrl+K", delete: "Alt+Backspace|Shift+Delete", lift: "Delete|Backspace", dissolve: "Ctrl+D", "toggle-clip": "Shift+E", "paste-attrs": "Ctrl+Alt+V", marker: "M" } },
-  { id: "finalcut", label: "Final Cut Pro", keys: { split: "Ctrl+B", delete: "Delete|Backspace", lift: "Shift+Backspace", dissolve: "Ctrl+T", "toggle-clip": "V", "paste-attrs": "Ctrl+Shift+V", marker: "M" } },
-  { id: "resolve", label: "DaVinci Resolve", keys: { split: "Ctrl+B", delete: "Delete|Backspace", lift: "Backspace", dissolve: "Ctrl+T", "toggle-clip": "D", "paste-attrs": "Alt+V", marker: "M" } },
+  { id: "finalcut", label: "Final Cut Pro", keys: { split: "Ctrl+B", delete: "Delete|Backspace", lift: "Shift+Backspace", dissolve: "Ctrl+T", "toggle-clip": "V", "paste-attrs": "Ctrl+Shift+V", marker: "M", toolSelect: "A", toolBlade: "B" } },
+  { id: "resolve", label: "DaVinci Resolve", keys: { split: "Ctrl+B", delete: "Delete", lift: "Backspace", dissolve: "Ctrl+T", "toggle-clip": "D", "paste-attrs": "Alt+V", marker: "M" } },
 ];
 
 /** Puts the user's changes over the default keys; every list and the matcher read `keys`. */
@@ -232,7 +244,8 @@ export function eventKey(e: KeyboardEvent): string {
   if (/^Key[A-Z]$/.test(e.code)) k = e.code.slice(3);
   else if (/^Digit\d$/.test(e.code) && (e.altKey || e.ctrlKey)) k = e.code.slice(5);
   if (k.length === 1) k = k.toUpperCase();
-  const mods = [e.ctrlKey || e.metaKey ? "Ctrl" : "", e.altKey ? "Alt" : "", e.shiftKey && k.length > 1 ? "Shift" : e.shiftKey && /[A-Z]/.test(k) ? "Shift" : ""].filter(Boolean);
+  // Shift counts with letters, named keys and (with Alt/Ctrl) digits: Alt+Shift+1 is not Alt+1.
+  const mods = [e.ctrlKey || e.metaKey ? "Ctrl" : "", e.altKey ? "Alt" : "", e.shiftKey && (k.length > 1 || /[A-Z0-9]/.test(k)) ? "Shift" : ""].filter(Boolean);
   return [...mods, k].join("+");
 }
 

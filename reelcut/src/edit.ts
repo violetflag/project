@@ -2,7 +2,7 @@
 // editor and the AI agent.
 
 import { normView, smoothViewAt } from "./framing";
-import type { AnimKey, Asset, CaptionStyle, Clip, ColorAdj, Draft, Lens, MediaInfo, MusicClip, Overlay, Plan, PlanOverlay, SceneNote, Seg, ShrinkSettings, TrackId, Transform, View, ViewKey, VolKey, Word } from "./types";
+import type { AnimKey, Asset, CaptionStyle, Clip, ColorAdj, Draft, Lens, MediaInfo, MusicClip, Overlay, Plan, PlanOverlay, SceneNote, Seg, ShrinkSettings, Stab, TrackId, Transform, View, ViewKey, VolKey, Word } from "./types";
 
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 export const clamp = (x: number, a: number, b: number) => Math.min(b, Math.max(a, x));
@@ -142,7 +142,8 @@ export const CLIP_ATTRS: { id: string; label: string; keys: (keyof Clip)[] }[] =
   { id: "sound", label: "음량·잡음 줄이기", keys: ["volume", "volKeys", "denoise"] },
   { id: "fades", label: "페이드", keys: ["fadeIn", "fadeOut"] },
   { id: "transition", label: "전환", keys: ["xin", "xtype"] },
-  { id: "view", label: "360 시점", keys: ["view"] },
+  { id: "view", label: "360 시점", keys: ["view", "viewPreset"] },
+  { id: "stab", label: "흔들림 줄이기", keys: ["stab"] },
 ];
 
 /** The chosen settings of `from` copied onto `to`. Moves keep their shape, moved to the target's own times. */
@@ -271,6 +272,10 @@ export function previewSource(a: Asset, live = false): PreviewSrc {
 export function defaultLens(a: Asset): Lens {
   return a.lens ?? { layout: a.info.layout360 === "none" ? "none" : a.info.layout360, swap: false, fov: 190 };
 }
+/** Stabilisation a clip uses: its own (toolbar 흔들림 줄이기 / 수평 맞추기), else its media's (null = the default, horizon). */
+export const stabFor = (c: Pick<Clip, "stab">, a: Asset | undefined): Stab | null => c.stab ?? a?.lens?.stab ?? null;
+/** The lens a clip renders with: the media's, with the clip's own stabilisation when it has one. */
+export const lensFor = (c: Pick<Clip, "stab">, a: Asset): Lens => (c.stab ? { ...defaultLens(a), stab: c.stab } : defaultLens(a));
 export const DEFAULT_VIEW: View = { yaw: 0, pitch: 0, roll: 0, hfov: 100 };
 
 export function newClip(a: Asset, start = 0, end = a.info.duration || 5): Clip {
@@ -782,7 +787,7 @@ export function toSegs(d: Draft, assets: Map<string, Asset>): Seg[] {
     return [{
       path: a.info.path, kind: hideV1 ? "audio" : a.info.kind, start: r3(c.start), dur: r3(c.end - c.start), speed: c.speed || 1,
       volume: muteA1 || c.detached ? 0 : c.volume ?? 1,
-      has_audio: a.info.has_audio, lens: r360 ? defaultLens(a) : null, view: r360 ? planView(c.view, c.viewKeys) : null,
+      has_audio: a.info.has_audio, lens: r360 ? lensFor(c, a) : null, view: r360 ? planView(c.view, c.viewKeys) : null,
       fit: c.fit ?? "fit", fade_in: c.fadeIn ?? 0, fade_out: c.fadeOut ?? 0,
       transform: isDefaultTransform(c.transform) ? null : c.transform!, color: isDefaultColor(c.color) ? null : c.color!,
       denoise: !!c.denoise, view_keys: r360 ? planKeys(c.viewKeys, c.start, c.speed) : [], xin, xtype: c.xtype ?? "",
@@ -852,7 +857,8 @@ export function toPlan(d0: Draft, assets: Map<string, Asset>, o: ExportOpts): Pl
       return a && dur > 0.05 && !muted(m) && !m.disabled ? [{ path: a.info.path, start: r3(m.start), dur: r3(dur), at: r3(m.at), volume: m.volume, vol_keys: planTimed(m.volKeys, m.start, 1), fade_in: m.fadeIn, fade_out: m.fadeOut, denoise: !!m.denoise }] : [];
     }),
     width, height, fps: d.fps || 30, ass: o.ass, mode: o.mode, vbitrate: o.vbitrate, settings: o.shrink, out: o.out,
-    loudnorm: !!o.loudnorm, duck: !!o.duck, abr: o.abr ?? 256,
+    // 소리 고르게 on the draft (toolbar) evens the loudness on export too.
+    loudnorm: !!o.loudnorm || !!d.fx?.loudnorm, duck: !!o.duck, abr: o.abr ?? 256,
   };
 }
 

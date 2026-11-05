@@ -91,6 +91,9 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
     case "trash_list": return [];
     case "trash_restore": case "log_event": return;
     case "store_list": return ls.keys().filter((k) => k.startsWith(a.prefix));
+    case "jsonl_append": { const k = `jsonl:${a.kind}:${a.name}`; const v = ls.get(k); ls.set(k, (v ? v + "\n" : "") + a.lines.join("\n")); return; }
+    case "jsonl_tail": { const v = ls.get(`jsonl:${a.kind}:${a.name}`); return v ? String(v).split("\n").filter(Boolean).slice(-a.max) : []; }
+    case "loudness": return { i: -20 - (String(a.path).length % 7) };
     case "expand_paths": return a.paths.map((p: string) => [p, ""]);
     case "inspect": return info(a.path);
     case "calibrate_360": return { on: true, fov: 192.4, yaw: 0.6, pitch: -0.3, roll: 0.2, gain_a: [0.97, 1.2, -0.8], gain_b: [1.031, -1.2, 0.8], calibrated: true, before: 6.1, after: 2.3 };

@@ -6,6 +6,7 @@ import { DraftTabs } from "./DraftTabs";
 import { Inspector } from "./Inspector";
 import { layout, setLayout, Splitter, togglePanel } from "./layout";
 import { MediaBin } from "./MediaBin";
+import { QuickBar } from "./QuickBar";
 import { Timeline } from "./Timeline";
 import { Transcript } from "./Transcript";
 import { CaptionsPanel } from "./CaptionsPanel";
@@ -40,6 +41,8 @@ export function ProjectView() {
         <span class="sep" />
         <button class="icon-btn" disabled={!canUndo()} onClick={undo} title={undoLabel() ? `되돌리기: ${undoLabel()} (Ctrl+Z)` : "되돌리기 (Ctrl+Z)"} aria-label="되돌리기"><Undo2 size={16} /></button>
         <button class="icon-btn" disabled={!canRedo()} onClick={redo} title="다시 실행 (Ctrl+Y)" aria-label="다시 실행"><Redo2 size={16} /></button>
+        <span class="sep" />
+        <QuickBar />
         <span class="spacer" />
         {d && <span class="muted tc" title="편집본 길이">{d.name} · {Math.floor(draftDuration(d) / 60)}분 {Math.round(draftDuration(d) % 60)}초</span>}
         <button class="primary" disabled={!d?.clips.length} onClick={() => set({ dialog: "export" })} title="내보내기 (Ctrl+E)"><Upload size={15} aria-hidden="true" /> 내보내기</button>

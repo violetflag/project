@@ -54,6 +54,8 @@ export const api = {
   /** Append-only logs: "actions" (per project) and "chats" (raw AI conversation archive). */
   jsonlAppend: (kind: "actions" | "chats", name: string, lines: string[]) => invoke<void>("jsonl_append", { kind, name, lines }),
   jsonlTail: (kind: "actions" | "chats", name: string, max: number) => invoke<string[]>("jsonl_tail", { kind, name, max }),
+  /** Integrated loudness (LUFS, ffmpeg ebur128) of a stretch of a file; i is -70 or lower for silence. */
+  loudness: (path: string, start: number, dur: number) => invoke<{ i: number }>("loudness", { path, start, dur }),
   expandPaths: (paths: string[]) => invoke<[string, string][]>("expand_paths", { paths }),
   inspect: (path: string) => invoke<MediaInfo>("inspect", { path }),
   analyzeMotion: (id: string, info: MediaInfo, lens: Lens) => invoke<void>("analyze_motion", { id, info, lens }),
