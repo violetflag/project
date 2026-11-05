@@ -5,12 +5,13 @@ import { ask } from "../agent";
 import { draftWords, fmtTC } from "../edit";
 import { assetMap, draft, editDraft, set, useStore } from "../store";
 import type { CapEdits, Translation } from "../types";
+import { openChat } from "./layout";
 import { player } from "./Viewer";
 
 const LANGS = ["영어", "일본어", "중국어", "스페인어", "프랑스어", "독일어", "베트남어", "한국어"];
 
 function runAi(prompt: string) {
-  set({ rightTab: "agent" });
+  openChat();
   ask(prompt).catch((e) => set({ agentStatus: String(e) }));
 }
 

@@ -12,7 +12,6 @@ export type ExportJob = { id: string; draft: string; pct: number; state: string;
 /** Timeline tools: select (V), blade (C), roll (R), slip (Y). */
 export type Tool = "select" | "blade" | "roll" | "slip" | "rate";
 /** Panel arrangement: the editing page, the transcript page, the 360 page. */
-export type Workspace = "edit" | "transcript" | "r360";
 /** One AI request: the drafts before it, so its changes can be listed and undone as one. */
 export type AiRun = { id: string; chat: string; at: number; prompt: string; before: Draft[]; after?: Draft[]; draftId: string | null; done: boolean; undone?: boolean };
 
@@ -45,13 +44,11 @@ type S = {
   toast: string;
   agentBusy: boolean;
   agentStatus: string;
-  rightTab: "inspect" | "agent";
-  leftTab: "media" | "transcript" | "captions";
+  sideTab: "transcript" | "captions" | "inspect";
   /** Selected item on V2/V3 or A1–A3. */
   selItem: string | null;
   tool: Tool;
   snap: boolean;
-  workspace: Workspace;
   /** Words selected in the transcript, as timeline ranges (shown on the timeline). */
   trRanges: [number, number][];
   exportQueue: { draftId: string; choice: any }[];
@@ -82,8 +79,8 @@ type S = {
 export const st: S = {
   route: "home", projects: [], project: null, draftId: null, sourceId: null, folder: "", playhead: 0, selClip: null,
   settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, ccConnect: null, qwenSetup: null, downloads: {}, exportJob: null, brokenProjects: [], toast: "",
-  agentBusy: false, agentStatus: "", rightTab: "inspect", leftTab: "media",
-  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, projectFile: "", missing: [], dialog: "", backupPick: "", showSafe: false, showSilence: false, motion: {}, scans: {}, motionRev: 0, prompts: [], skills: [],
+  agentBusy: false, agentStatus: "", sideTab: "transcript",
+  selItem: null, tool: "select", snap: true, trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, projectFile: "", missing: [], dialog: "", backupPick: "", showSafe: false, showSilence: false, motion: {}, scans: {}, motionRev: 0, prompts: [], skills: [],
 };
 
 const subs = new Set<() => void>();

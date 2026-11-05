@@ -5,10 +5,10 @@ import { draftCaptions } from "./captions";
 import {
   clipAt, deleteClip, detachAudio, draftDuration, draftWords, is360, isGap, lensFor, trimClipTo, liftClip, nudgeClip, removeFillers, removeItem, removeSilences, setTransition, splitAt, splitItem, starts, uid, type Pacing,
 } from "./edit";
-import { asset, assetMap, canRedo, canUndo, draft, editDraft, importPaths, loadWave, redo, saveNow, set, st, toast, undo, waves, type Tool, type Workspace } from "./store";
+import { asset, assetMap, canRedo, canUndo, draft, editDraft, importPaths, loadWave, redo, saveNow, set, st, toast, undo, waves, type Tool } from "./store";
 import type { Clip } from "./types";
 import { player } from "./ui/Viewer";
-import { applyWorkspace, togglePanel } from "./ui/layout";
+import { layout, resetLayout, setView, togglePanel } from "./ui/layout";
 import { actionList, runAction } from "./actions";
 import { backupNow, makeDiagBundle, openProjectDialog, packProject, revealProjectFolder } from "./project";
 import "./quick";
@@ -189,7 +189,6 @@ export function setMark(which: "in" | "out") {
 const fit = () => window.dispatchEvent(new CustomEvent("reelcut:zoom", { detail: "fit" }));
 const zoom = (k: number) => window.dispatchEvent(new CustomEvent("reelcut:zoom", { detail: k }));
 const setTool = (t: Tool) => set({ tool: t });
-const ws = (w: Workspace) => applyWorkspace(w);
 
 /** Toolbar quick buttons with a shortcut (Alt+Shift+…), in the 클립 menu too. */
 const QUICK_CMDS: Cmd[] = actionList().filter((a) => a.key).map((a, i) => ({
@@ -280,14 +279,15 @@ export const COMMANDS: Cmd[] = [
   // 보기
   { id: "nextMarker", label: "다음 마커로", menu: "재생", keys: "Shift+M", term: "Go to Next Marker", enabled: draftMode, run: () => jumpMarker(1) },
   { id: "prevMarker", label: "이전 마커로", menu: "재생", keys: "Ctrl+Shift+M", term: "Go to Previous Marker", enabled: draftMode, run: () => jumpMarker(-1) },
-  { id: "wsEdit", label: "편집 화면", menu: "보기", keys: "Alt+1", term: "Edit Workspace", checked: () => st.workspace === "edit", enabled: inProject, run: () => ws("edit") },
-  { id: "wsTranscript", label: "대본 화면", menu: "보기", keys: "Alt+2", checked: () => st.workspace === "transcript", enabled: inProject, run: () => ws("transcript") },
-  { id: "ws360", label: "360 화면", menu: "보기", keys: "Alt+3", checked: () => st.workspace === "r360", enabled: inProject, run: () => ws("r360") },
-  { id: "panelLeft", label: "왼쪽 패널 보이기", menu: "보기", keys: "Ctrl+Alt+ArrowLeft", sep: true, enabled: inProject, run: () => togglePanel("left") },
-  { id: "panelRight", label: "오른쪽 패널 보이기", menu: "보기", keys: "Ctrl+Alt+ArrowRight", enabled: inProject, run: () => togglePanel("right") },
+  { id: "viewDefault", label: "기본 배치", menu: "보기", keys: "Alt+1", term: "Default View", checked: () => layout().view === "default", enabled: inProject, run: () => setView("default") },
+  { id: "viewVertical", label: "세로 영상 배치", menu: "보기", keys: "Alt+2", term: "Vertical Video View", checked: () => layout().view === "vertical", enabled: inProject, run: () => setView("vertical") },
+  { id: "viewPreview", label: "미리보기만", menu: "보기", keys: "Alt+3", checked: () => layout().view === "preview", enabled: inProject, run: () => setView("preview") },
+  { id: "panelChat", label: "AI 편집 패널", menu: "보기", keys: "Ctrl+Alt+ArrowUp", sep: true, checked: () => layout().chatOpen, enabled: inProject, run: () => togglePanel("chat") },
+  { id: "panelLeft", label: "미디어 패널", menu: "보기", keys: "Ctrl+Alt+ArrowLeft", checked: () => layout().sourceOpen, enabled: inProject, run: () => togglePanel("source") },
+  { id: "panelRight", label: "대본·자막·속성 패널", menu: "보기", keys: "Ctrl+Alt+ArrowRight", checked: () => layout().sideOpen, enabled: inProject, run: () => togglePanel("side") },
   { id: "fullscreen", label: "미리보기 전체 화면", menu: "보기", keys: "F", enabled: inProject, run: () => window.dispatchEvent(new Event("reelcut:fullscreen")) },
   { id: "safe", label: "안전 영역·격자", menu: "보기", term: "Safe Margins", checked: () => st.showSafe, enabled: inProject, run: () => set({ showSafe: !st.showSafe }) },
-  { id: "resetLayout", label: "패널 배치 초기화", menu: "보기", enabled: inProject, run: () => applyWorkspace(st.workspace, true) },
+  { id: "resetLayout", label: "패널 배치 초기화", menu: "보기", enabled: inProject, run: resetLayout },
   { id: "settings", label: "설정", menu: "보기", keys: "Ctrl+,", sep: true, global: true, run: () => set({ route: "settings" }) },
 
   // 도움말

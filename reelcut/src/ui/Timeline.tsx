@@ -13,6 +13,7 @@ import {
 } from "../edit";
 import { asset, assetMap, draft, editDraft, ensureStrip, loadWave, set, st, toast, useStore, waves } from "../store";
 import type { Clip, Draft, MusicClip, Overlay, TrackId } from "../types";
+import { setLayout } from "./layout";
 import { player } from "./Viewer";
 
 const H: Record<TrackId, number> = { V3: 46, V2: 46, V1: 66, A1: 40, A2: 40, A3: 40, C1: 26 };
@@ -409,7 +410,7 @@ export function Timeline() {
     );
     if (t === "C1") return (
       <div {...common as any} key={t}>
-        {caps.map((l) => <div class="cap" style={{ left: `${l.t0 * zoom}px`, width: `${Math.max(4, (l.t1 - l.t0) * zoom)}px` }} title={l.text} onClick={() => player.seek(l.t0)} onDblClick={() => set({ leftTab: "transcript" })}>{l.text}</div>)}
+        {caps.map((l) => <div class="cap" style={{ left: `${l.t0 * zoom}px`, width: `${Math.max(4, (l.t1 - l.t0) * zoom)}px` }} title={l.text} onClick={() => player.seek(l.t0)} onDblClick={() => { set({ sideTab: "transcript" }); setLayout({ sideOpen: true }); }}>{l.text}</div>)}
         {(d.texts ?? []).map((x) => <div class="cap txt-chip" style={{ left: `${x.at * zoom}px`, width: `${Math.max(4, x.dur * zoom)}px` }} title={x.text || x.sticker} onClick={() => player.seek(x.at)}><span>{x.kind === "sticker" ? "★" : x.text}</span></div>)}
         {!d.captions && !d.texts?.length && <div class="lane-hint">자막 꺼짐 — 위 '자막'을 켜면 받아쓰기로 자막이 생깁니다</div>}
       </div>

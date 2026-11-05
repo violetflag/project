@@ -1,4 +1,5 @@
 // Skills in settings: the user's own (written here, by the AI, or pasted in) and those that come with the app.
+import { openChat } from "./layout";
 import { useState } from "preact/hooks";
 import { ask } from "../agent";
 import { BUILTIN_SKILLS, cleanSkillName, isChain, mergeSkills, skillFromText, skillToText, upsertSkill } from "../skills";
@@ -98,7 +99,8 @@ export function SkillsSection() {
       <button class="small" disabled={!idea.trim() || !s.project || s.agentBusy} title={s.project ? "" : "프로젝트를 열면 쓸 수 있습니다"} onClick={() => {
         const want = idea.trim();
         setIdea("");
-        set({ route: "project", rightTab: "agent" });
+        set({ route: "project" });
+        openChat();
         ask(`get_playbook으로 make_skill 안내를 읽고, 다음 내용을 스킬로 만들어 저장해 줘: ${want}`).catch((e) => toast(String(e)));
       }}>AI로 스킬 만들기</button>
       <label>받은 스킬 글 붙여넣기

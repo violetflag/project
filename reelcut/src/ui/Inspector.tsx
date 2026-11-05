@@ -510,7 +510,7 @@ function DraftView({ d }: { d: Draft }) {
               <label>말하는 단어<input type="color" value={d.captionStyle.highlight || "#FFE14D"} onChange={(e) => editDraft("말하는 단어 색", (x) => ({ ...x, captionStyle: { ...x.captionStyle, highlight: (e.target as HTMLInputElement).value } }), st.draftId, false)} /></label>
               <label>강조 단어 색<input type="color" value={d.captionStyle.keyColor || "#FFE14D"} onChange={(e) => editDraft("강조 단어 색", (x) => ({ ...x, captionStyle: { ...x.captionStyle, keyColor: (e.target as HTMLInputElement).value } }), st.draftId, false)} /></label>
             </div>
-            <button class="small" onClick={() => set({ leftTab: "captions" })}>줄마다 고치기·번역…</button>
+            <button class="small" onClick={() => set({ sideTab: "captions" })}>줄마다 고치기·번역…</button>
             <Num label="크기" value={d.captionStyle.size} min={2} max={14} step={0.5} def={6} unit="%" onChange={(v) => editDraft("자막 크기", (x) => ({ ...x, captionStyle: { ...x.captionStyle, size: v } }), st.draftId, false)} />
             <Num label="한 줄 글자" value={d.captionStyle.maxChars} min={6} max={40} step={1} def={18} onChange={(v) => editDraft("자막 줄 길이", (x) => ({ ...x, captionStyle: { ...x.captionStyle, maxChars: v } }), st.draftId, false)} />
             <div class="row">

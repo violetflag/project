@@ -1,4 +1,4 @@
-import { Film, Home as HomeIcon, Minus, Settings as Gear, Square, X } from "lucide-preact";
+import { Film, Home as HomeIcon, LayoutPanelTop, Minus, Settings as Gear, Square, Upload, X } from "lucide-preact";
 import { useEffect } from "preact/hooks";
 import { api, beforeClose, onFileDrop, onOpenFiles, windowCmd } from "../api";
 import { flush, flushArchive } from "../actionlog";
@@ -15,7 +15,7 @@ import { ShortcutsDialog } from "./Shortcuts";
 import { PasteAttrsDialog } from "./PasteAttrs";
 import { applyKeymap } from "../commands";
 import { StatusBar } from "./StatusBar";
-import { applyWorkspace } from "./layout";
+import { layout, setView, type ViewMode } from "./layout";
 import { draft } from "../store";
 
 let booted = false;
@@ -48,10 +48,10 @@ async function boot() {
   window.addEventListener("keydown", (e) => { if (!st.dialog || e.key === "Escape") handleKey(e); });
 }
 
-const WS: { id: "edit" | "transcript" | "r360"; label: string; key: string }[] = [
-  { id: "edit", label: "편집", key: "Alt+1" },
-  { id: "transcript", label: "대본", key: "Alt+2" },
-  { id: "r360", label: "360", key: "Alt+3" },
+const VIEWS: { id: ViewMode; label: string; key: string }[] = [
+  { id: "default", label: "기본", key: "Alt+1" },
+  { id: "vertical", label: "세로 영상", key: "Alt+2" },
+  { id: "preview", label: "미리보기만", key: "Alt+3" },
 ];
 
 export function App() {
@@ -69,16 +69,19 @@ export function App() {
           <button class={s.route === "home" ? "on" : ""} onClick={() => { saveNow(); set({ route: "home" }); loadProjects(); }} title="홈 (프로젝트 목록)"><HomeIcon size={14} aria-hidden="true" /> 홈</button>
           {s.project && <button class={`proj ${s.route === "project" ? "on" : ""}`} onClick={() => set({ route: "project" })} title={s.project.name}>{s.project.name}</button>}
         </nav>
-        {s.route === "project" && s.project && (
-          <div class="pages" role="tablist" aria-label="작업 화면">
-            {WS.map((w) => (
-              <button role="tab" aria-selected={s.workspace === w.id} class={s.workspace === w.id ? "on" : ""} onClick={() => applyWorkspace(w.id)} title={`${w.label} 화면 (${w.key})`}>{w.label}</button>
-            ))}
-            <button role="tab" aria-selected={false} disabled={!d?.clips.length} onClick={() => set({ dialog: "export" })} title="내보내기 (Ctrl+E)">내보내기</button>
-          </div>
-        )}
         <div class="spacer" data-tauri-drag-region />
+        {s.route === "project" && s.project && (
+          <label class="view-mode" title="화면 배치">
+            <LayoutPanelTop size={15} aria-hidden="true" />
+            <select aria-label="화면 배치" value={layout().view} onChange={(e) => setView((e.target as HTMLSelectElement).value as ViewMode)}>
+              {VIEWS.map((v) => <option value={v.id}>{v.label}</option>)}
+            </select>
+          </label>
+        )}
         <button class={`icon-btn ${s.route === "settings" ? "on" : ""}`} onClick={() => set({ route: "settings" })} aria-label="설정" title="설정 (Ctrl+,)"><Gear size={16} /></button>
+        {s.route === "project" && s.project && (
+          <button class="primary small export-btn" disabled={!d?.clips.length} onClick={() => set({ dialog: "export" })} title="내보내기 (Ctrl+E)"><Upload size={14} aria-hidden="true" /> 내보내기</button>
+        )}
         <div class="winbtns">
           <button aria-label="최소화" onClick={() => windowCmd("minimize")}><Minus size={14} /></button>
           <button aria-label="최대화" onClick={() => windowCmd("toggleMaximize")}><Square size={12} /></button>

@@ -1,66 +1,67 @@
-// Panel sizes of the project screen: draggable splitters, collapsible side panels and three
-// arrangements (편집 / 대본 / 360). Sizes are remembered on this PC (localStorage).
-import { set, st, type Workspace } from "../store";
+// Panel sizes of the project screen, in percent of what holds them: AI chat on the left, then the
+// editor: media, preview and transcript above the timeline. Remembered on this PC (localStorage).
+import { set } from "../store";
 
-export type Layout = { left: number; right: number; timeline: number; leftOpen: boolean; rightOpen: boolean };
-
-const PRESETS: Record<Workspace, Layout & { leftTab: "media" | "transcript"; rightTab: "inspect" | "agent" }> = {
-  edit: { left: 300, right: 340, timeline: 300, leftOpen: true, rightOpen: true, leftTab: "media", rightTab: "inspect" },
-  transcript: { left: 520, right: 340, timeline: 220, leftOpen: true, rightOpen: true, leftTab: "transcript", rightTab: "inspect" },
-  r360: { left: 260, right: 380, timeline: 240, leftOpen: true, rightOpen: true, leftTab: "media", rightTab: "inspect" },
+export type ViewMode = "default" | "vertical" | "preview";
+export type Layout = {
+  chat: number; source: number; side: number; upper: number; vSource: number; vPreview: number;
+  chatOpen: boolean; sourceOpen: boolean; sideOpen: boolean; view: ViewMode;
 };
 
-const KEY = "reelcut-layout-v1";
-function load(): Record<Workspace, Layout> {
-  try {
-    const s = JSON.parse(localStorage.getItem(KEY) || "{}");
-    return { edit: { ...PRESETS.edit, ...s.edit }, transcript: { ...PRESETS.transcript, ...s.transcript }, r360: { ...PRESETS.r360, ...s.r360 } };
-  } catch {
-    return { edit: { ...PRESETS.edit }, transcript: { ...PRESETS.transcript }, r360: { ...PRESETS.r360 } };
-  }
-}
-const layouts = load();
-const save = () => { try { localStorage.setItem(KEY, JSON.stringify(layouts)); } catch { /* private mode */ } };
+const DEFAULT: Layout = { chat: 22, source: 21, side: 21, upper: 55, vSource: 45, vPreview: 34, chatOpen: true, sourceOpen: true, sideOpen: true, view: "default" };
 
-export const layout = (): Layout => layouts[st.workspace];
+const KEY = "reelcut-layout-v2";
+function load(): Layout {
+  try { return { ...DEFAULT, ...JSON.parse(localStorage.getItem(KEY) || "{}") }; } catch { return { ...DEFAULT }; }
+}
+let current = load();
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(current)); } catch { /* private mode */ } };
+
+export const layout = (): Layout => current;
 
 export function setLayout(p: Partial<Layout>) {
-  Object.assign(layouts[st.workspace], p);
+  current = { ...current, ...p };
   save();
   set({});
 }
 
-export function applyWorkspace(w: Workspace, reset = false) {
-  if (reset) {
-    const { leftTab, rightTab, ...l } = PRESETS[w];
-    layouts[w] = { ...l };
-    save();
-  }
-  set({ workspace: w, leftTab: PRESETS[w].leftTab, rightTab: PRESETS[w].rightTab });
+export const setView = (view: ViewMode) => setLayout({ view });
+
+export function resetLayout() {
+  current = { ...DEFAULT };
+  save();
+  set({});
 }
 
-export function togglePanel(side: "left" | "right") {
-  const l = layout();
-  setLayout(side === "left" ? { leftOpen: !l.leftOpen } : { rightOpen: !l.rightOpen });
+export function togglePanel(which: "chat" | "source" | "side") {
+  const k = `${which}Open` as "chatOpen" | "sourceOpen" | "sideOpen";
+  setLayout({ [k]: !current[k] });
 }
+
+/** Opens the AI chat, wherever a request comes from. */
+export const openChat = () => setLayout({ chatOpen: true });
 
 /** A drag handle between panels. `axis` x = vertical bar changing a width, y = horizontal bar changing a height. */
-export function Splitter({ axis, value, min, max, invert, onChange, label }: { axis: "x" | "y"; value: number; min: number; max: number; invert?: boolean; onChange: (v: number) => void; label: string }) {
+export function Splitter({ axis, value, min, max, invert, onChange, label, pct }: { axis: "x" | "y"; value: number; min: number; max: number; pct?: boolean; invert?: boolean; onChange: (v: number) => void; label: string }) {
   const down = (e: PointerEvent) => {
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
     const p0 = axis === "x" ? e.clientX : e.clientY;
     const v0 = value;
+    // A size in percent: of the panel that holds this bar.
+    const box = el.parentElement!.getBoundingClientRect();
+    const per = pct ? 100 / Math.max(1, axis === "x" ? box.width : box.height) : 1;
     const move = (ev: PointerEvent) => {
-      const d = (axis === "x" ? ev.clientX : ev.clientY) - p0;
-      onChange(Math.round(Math.max(min, Math.min(max, v0 + (invert ? -d : d)))));
+      const d = ((axis === "x" ? ev.clientX : ev.clientY) - p0) * per;
+      const v = Math.max(min, Math.min(max, v0 + (invert ? -d : d)));
+      onChange(pct ? Math.round(v * 10) / 10 : Math.round(v));
     };
     const up = () => { el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); };
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", up);
   };
   const key = (e: KeyboardEvent) => {
-    const step = e.shiftKey ? 40 : 10;
+    const step = pct ? (e.shiftKey ? 4 : 1) : e.shiftKey ? 40 : 10;
     const dec = axis === "x" ? "ArrowLeft" : "ArrowUp", inc = axis === "x" ? "ArrowRight" : "ArrowDown";
     if (e.key === dec || e.key === inc) {
       e.preventDefault();

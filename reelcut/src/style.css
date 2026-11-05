@@ -1,8 +1,8 @@
 /* Reelcut — dark editor theme. Tokens first; components use only these. */
 :root {
   /* surfaces: app < panel < raised < hover */
-  --bg: #0e0f12; --panel: #16181c; --panel2: #1e2126; --hover: #262a31; --sunk: #0b0c0e;
-  --line: #2a2e35; --line2: #3a3f48;
+  --bg: #0a0a0a; --panel: #171717; --panel2: #262626; --hover: #333333; --sunk: #0f0f0f;
+  --line: #2b2b2b; --line2: #404040;
   --text: #e9eaee; --muted: #9aa0aa; --faint: #6d737d;
   --accent: #5b8cff; --accent2: #3f6ee6; --accent-bg: #5b8cff1f;
   --ok: #3ecf8e; --warn: #ffb020; --err: #ff6161; --c360: #b37bff;
@@ -82,9 +82,6 @@ label.inline { flex-direction: row; align-items: center; gap: 6px; margin: 0; }
 .routes { display: flex; gap: 2px; margin-left: 6px; padding-left: 6px; border-left: 1px solid var(--line); }
 .routes button { background: none; border: none; border-radius: 4px; padding: 4px 10px; color: var(--muted); max-width: 240px; overflow: hidden; text-overflow: ellipsis; display: inline-flex; }
 .routes button.on { color: var(--text); background: var(--panel2); }
-.pages { display: flex; margin-left: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 2px; }
-.pages button { background: none; border: none; border-radius: 5px; padding: 3px 14px; color: var(--muted); font-size: var(--fs-s); }
-.pages button.on { background: var(--panel2); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
 .winbtns { display: flex; }
 .winbtns button { background: none; border: none; border-radius: 0; height: 38px; width: 46px; justify-content: center; color: var(--muted); }
 .winbtns button:hover { color: var(--text); }
@@ -121,9 +118,30 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .qwen-box { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 6px 0; }
 
 /* project */
-.project { display: grid; grid-template-columns: minmax(0, 1fr); height: 100%; min-height: 0; min-width: 0; }
-.toolbar { display: flex; gap: 4px; align-items: center; padding: 4px 8px; border-bottom: 1px solid var(--line); background: var(--panel); height: 40px; }
-.toolbar .tc { font-size: var(--fs-s); margin-right: 8px; }
+/* The project screen: AI chat on the left, then media | preview | right panel above the timeline. */
+.project { display: flex; height: 100%; min-height: 0; min-width: 0; }
+.rail { width: 44px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; padding-top: 8px; background: var(--panel); border-right: 1px solid var(--line); }
+.p-chat, .p-source, .p-side { background: var(--panel); display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; flex-shrink: 0; }
+.p-side[style*="flex"] { flex-shrink: 1; }
+.p-editor { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.p-upper { flex-shrink: 0; min-height: 0; min-width: 0; display: flex; }
+.p-preview { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+.preview-bar { flex-shrink: 0; height: 36px; display: flex; align-items: center; padding: 0 6px; border-bottom: 1px solid var(--line); background: var(--panel); overflow: visible; }
+.preview-bar .quickbar { flex: 1; min-width: 0; }
+.preview-body { position: relative; flex: 1 1 0; min-height: 0; min-width: 0; display: flex; }
+.p-timeline { flex: 1 1 0; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--panel); }
+.panel-head { display: flex; align-items: center; height: 36px; padding: 0 6px 0 12px; border-bottom: 1px solid var(--line); flex-shrink: 0; font-size: var(--fs-s); }
+.fold { color: var(--muted); }
+.tabs .fold { flex: 0 0 auto; padding: 0 6px; border-bottom: none; }
+.unfold { position: absolute; top: 6px; z-index: 10; background: #262626cc; border: 1px solid #ffffff1a; border-radius: 12px; padding: 5px 10px; font-size: var(--fs-s); }
+.unfold.left { left: 6px; }
+.unfold.right { right: 6px; }
+.tl-head { display: flex; align-items: stretch; flex-shrink: 0; min-height: 36px; border-bottom: 1px solid var(--line); background: var(--sunk); }
+.tl-head .draft-tabs { flex: 1 1 0; min-width: 0; border-bottom: none; background: transparent; }
+.tl-head-tools { display: flex; align-items: center; gap: 4px; padding: 0 8px; flex-shrink: 0; }
+.view-mode { display: inline-flex; flex-direction: row; align-items: center; gap: 4px; color: var(--muted); margin: 0 4px 0 0; }
+.view-mode select { background: transparent; border-color: transparent; padding: 2px 4px; font-size: var(--fs-s); }
+.export-btn { margin: 0 6px; }
 /* Quick buttons (2.18): basic and 360 groups between redo and the spacer. */
 .quickbar { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .qb-btn { background: transparent; border-color: transparent; color: var(--muted); padding: 0 8px; height: 28px; font-size: var(--fs-s); gap: 5px; }
@@ -135,18 +153,17 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .chips .chip { cursor: pointer; }
 .seg { display: flex; gap: 1px; background: var(--sunk); border: 1px solid var(--line); border-radius: 7px; padding: 1px; }
 .seg .icon-btn { width: 30px; height: 26px; }
-.workspace { min-height: 0; min-width: 0; display: grid; }
-.left, .right { background: var(--panel); display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
-.left[hidden], .right[hidden] { display: none; }
 .tabs { display: flex; border-bottom: 1px solid var(--line); flex-shrink: 0; }
 .tabs button { flex: 1; background: none; border: none; border-radius: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: 8px; justify-content: center; }
 .tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
-.center { min-width: 0; min-height: 0; display: flex; }
-.splitter { background: var(--line); transition: background-color .12s; }
+/* A thin line with a wider place to grab. */
+.splitter { position: relative; flex: 0 0 1px; background: var(--line); transition: background-color .12s; }
+.splitter::after { content: ""; position: absolute; z-index: 6; }
 .splitter.x { cursor: col-resize; }
+.splitter.x::after { inset: 0 -3px; }
 .splitter.y { cursor: row-resize; }
+.splitter.y::after { inset: -3px 0; }
 .splitter:hover, .splitter:focus-visible { background: var(--accent); outline: none; }
-.tl-area { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--panel); }
 .draft-tabs { display: flex; align-items: center; gap: 2px; padding: 3px 8px 0; border-bottom: 1px solid var(--line); background: var(--sunk); flex-shrink: 0; overflow-x: auto; }
 .dtab { background: none; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; padding: 4px 12px; font-size: var(--fs-s); color: var(--muted); }
 .dtab.on { background: var(--panel); border-color: var(--line); color: var(--text); }
@@ -335,7 +352,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
 /* timeline */
 .timeline { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
-.tl-tools { display: flex; gap: 6px; align-items: center; padding: 4px 10px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.tl-tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 4px 10px; border-bottom: 1px solid var(--line); flex-shrink: 0; white-space: nowrap; }
 .tl-tools select { font-size: var(--fs-s); padding: 2px 6px; }
 .tl-tools .zoom { width: 120px; }
 .io-badge { font-size: var(--fs-xs); color: var(--warn); border: 1px solid #ffb02066; border-radius: 4px; padding: 1px 6px; font-variant-numeric: tabular-nums; }
@@ -432,6 +449,16 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
 /* AI conversations: list, context meter, compaction divider */
 .agent-sub { display: flex; gap: 6px; padding: 4px 8px 6px; border-bottom: 1px solid var(--line); align-items: center; }
+.p-chat { container-type: inline-size; }
+@container (max-width: 380px) {
+  .agent-sub .conn { display: none; }
+  .p-chat .ctx-bar { width: 40px; }
+}
+.p-preview { container-type: inline-size; }
+.p-preview .time { white-space: nowrap; }
+@container (max-width: 560px) {
+  .p-preview .controls .badge { display: none; }
+}
 .chat-pick { flex: 1; min-width: 0; font-size: var(--fs-s); }
 .chat-name { flex: 1; min-width: 0; }
 .ctx-meter { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--muted); }

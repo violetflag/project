@@ -14,14 +14,18 @@ import type { Draft } from "../types";
 
 const ICONS: Record<string, any> = { Ruler, Vibrate, Gauge, Focus, ZoomIn, Expand, Aperture, Globe, LensConvex, ScanEye, Route };
 
+/** How wide the bar's own panel is. */
 function useWidth() {
-  const [w, setW] = useState(typeof window === "undefined" ? 1600 : window.innerWidth);
+  const ref = useRef<HTMLDivElement>(null);
+  const [w, setW] = useState(1600);
   useEffect(() => {
-    const f = () => setW(window.innerWidth);
-    window.addEventListener("resize", f);
-    return () => window.removeEventListener("resize", f);
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setW(el.clientWidth));
+    ro.observe(el);
+    return () => ro.disconnect();
   }, []);
-  return w;
+  return [w, ref] as const;
 }
 
 /** Closes a popup on a click outside it or Escape. */
@@ -42,23 +46,23 @@ const has360 = (d: Draft) => { const am = assetMap(); return d.clips.some((c) =>
 
 export function QuickBar() {
   const s = useStore();
-  const w = useWidth();
+  const [w, barRef] = useWidth();
   const [busy, setBusy] = useState("");
   const [menu, setMenu] = useState<"" | "stab" | "more">("");
   const close = () => setMenu("");
   const stabRef = useDismiss(menu === "stab", close);
   const moreRef = useDismiss(menu === "more", close);
   const d = draft();
-  if (!d || s.sourceId) return null;
+  if (!d || s.sourceId) return <div class="quickbar" ref={barRef} />;
 
   const sel = s.selClip && d.clips.some((c) => c.id === s.selClip);
   const scopeText = sel ? "선택한 클립" : "편집본 전체";
   const all = actionList();
   const basic = all.filter((a) => a.group === "기본");
   const v360 = has360(d) ? all.filter((a) => a.group === "360") : [];
-  // Names next to the icons while they fit (measured: the 360 names need a 1600 px window).
-  const labelsBasic = w >= 1250, labels360 = w >= 1600;
-  const fold = w < 1100;
+  // Names next to the icons while they fit in the preview panel's bar.
+  const labelsBasic = w >= 620, labels360 = w >= 1000;
+  const fold = w < 420;
 
   const run = async (a: ActionDef, shift: boolean, params: Record<string, unknown> = {}) => {
     close();
@@ -86,7 +90,7 @@ export function QuickBar() {
 
   const stab = basic.find((a) => a.id === "stab");
   return (
-    <div class="quickbar" role="group" aria-label="빠른 작업">
+    <div class="quickbar" ref={barRef} role="group" aria-label="빠른 작업">
       {basic.map((a) => a.id !== "stab" ? btn(a, labelsBasic) : (
         <div class="qb-split" ref={stabRef}>
           {btn(a, labelsBasic)}
