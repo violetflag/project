@@ -3,7 +3,7 @@ import { useEffect } from "preact/hooks";
 import { api, beforeClose, onFileDrop, onOpenFiles, windowCmd } from "../api";
 import { flush, flushArchive } from "../actionlog";
 import { openPaths, startProjectFiles } from "../project";
-import { BackupsDialog, SaveAsDialog } from "./ProjectDialogs";
+import { BackupsDialog, RelinkDialog, SaveAsDialog } from "./ProjectDialogs";
 import { handleKey } from "../commands";
 import { initJobs, loadProjects, loadPrompts, loadSettings, loadSkills, refreshModels, refreshCc, refreshQwen, saveNow, set, st, useStore } from "../store";
 import { ExportDialog } from "./ExportDialog";
@@ -94,6 +94,7 @@ export function App() {
       {s.dialog === "newProject" && <NewProjectDialog onClose={() => set({ dialog: "" })} />}
       {s.dialog === "saveAs" && s.project && <SaveAsDialog onClose={() => set({ dialog: "" })} />}
       {s.dialog === "backups" && s.project && <BackupsDialog onClose={() => set({ dialog: "" })} />}
+      {s.dialog === "relink" && s.project && <RelinkDialog onClose={() => set({ dialog: "" })} />}
       {s.dialog === "export" && d && <ExportDialog draft={d} onClose={() => set({ dialog: "" })} />}
       {s.toast && <div class="toast" role="status">{s.toast}</div>}
     </div>

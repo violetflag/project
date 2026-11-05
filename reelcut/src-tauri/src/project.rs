@@ -326,7 +326,7 @@ pub fn write_folder(dir: &Path, img: &Path, project: &Value, app: &str, saved_at
     }
     if let Some(assets) = proj.get_mut("assets").and_then(Value::as_array_mut) {
         for a in assets.iter_mut() {
-            if let Some(r) = a.get("path").and_then(Value::as_str).and_then(|p| relative(dir, Path::new(p))) {
+            if let Some(r) = a.pointer("/info/path").and_then(Value::as_str).and_then(|p| relative(dir, Path::new(p))) {
                 a["rel"] = json!(r);
             }
         }
@@ -456,11 +456,11 @@ pub fn read_folder(path: &Path, private: &Path) -> Result<Opened, String> {
     // together with the footage, or another drive letter).
     if let Some(assets) = proj.get_mut("assets").and_then(Value::as_array_mut) {
         for a in assets.iter_mut() {
-            let gone = a.get("path").and_then(Value::as_str).is_none_or(|p| !Path::new(p).exists());
+            let gone = a.pointer("/info/path").and_then(Value::as_str).is_none_or(|p| !Path::new(p).exists());
             if let (true, Some(rel)) = (gone, a.get("rel").and_then(Value::as_str)) {
                 let p = normalize(&dir.join(rel));
-                if p.exists() {
-                    a["path"] = json!(p.to_string_lossy());
+                if p.exists() && a["info"].is_object() {
+                    a["info"]["path"] = json!(p.to_string_lossy());
                 }
             }
             if let Some(o) = a.as_object_mut() {
@@ -744,6 +744,66 @@ pub fn trash_folder(dir: &Path, root: &Path, time: &str) -> Result<PathBuf, Stri
     Ok(to)
 }
 
+// ---------------------------------------------------------------- moved footage
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct Wanted {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub size: u64,
+}
+
+/// Looks for moved media under `root` (8 folders deep, project folders skipped): the same file
+/// name, and the same size when the size is known. Returns asset id → new path.
+pub fn relink_search(root: &Path, wanted: &[Wanted]) -> HashMap<String, String> {
+    let want: HashMap<String, Vec<&Wanted>> = wanted.iter().fold(HashMap::new(), |mut m, w| {
+        m.entry(w.name.to_lowercase()).or_default().push(w);
+        m
+    });
+    let mut out: HashMap<String, String> = HashMap::new();
+    fn walk(d: &Path, depth: u32, want: &HashMap<String, Vec<&Wanted>>, out: &mut HashMap<String, String>, seen: &mut u32) {
+        if depth > 8 || *seen > 200_000 {
+            return;
+        }
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            *seen += 1;
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name == "$RECYCLE.BIN" {
+                continue;
+            }
+            let p = e.path();
+            if p.is_dir() {
+                if !crate::media::is_project_dir(&p) {
+                    walk(&p, depth + 1, want, out, seen);
+                }
+                continue;
+            }
+            let Some(ws) = want.get(&name.to_lowercase()) else { continue };
+            let len = e.metadata().map(|m| m.len()).unwrap_or(0);
+            for w in ws {
+                if (w.size == 0 || w.size == len) && !out.contains_key(&w.id) {
+                    out.insert(w.id.clone(), p.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    let mut seen = 0;
+    walk(root, 0, &want, &mut out, &mut seen);
+    out
+}
+
+#[tauri::command]
+pub async fn relink_search_cmd(folder: String, wanted: Vec<Wanted>) -> Result<HashMap<String, String>, String> {
+    super::blocking(move || Ok(relink_search(Path::new(&folder), &wanted))).await
+}
+
+/// Which of these paths exist (one call for a whole project's media).
+#[tauri::command]
+pub fn paths_exist(paths: Vec<String>) -> Vec<bool> {
+    paths.iter().map(|p| Path::new(p).exists()).collect()
+}
+
 // ---------------------------------------------------------------- commands
 
 static REG: Mutex<Option<Reg>> = parking_lot::const_mutex(None);
@@ -1016,7 +1076,7 @@ mod tests {
     fn sample(id: &str, name: &str, media: &Path) -> Value {
         json!({
             "id": id, "name": name, "created": 1, "updated": 2, "folders": [],
-            "assets": [{ "id": "a1", "path": media.to_string_lossy(), "name": "CAM_0001.OSV" }],
+            "assets": [{ "id": "a1", "folder": "", "info": { "path": media.to_string_lossy(), "name": "CAM_0001.OSV", "size": 1 } }],
             "drafts": [{ "id": "d1", "name": "첫 편집본", "clips": [] }],
             "activeChat": "s1",
             "chats": [{
@@ -1086,11 +1146,19 @@ mod tests {
         // Unchanged: the conversation is not written again.
         let again = write_folder(&dir, &img, &p, "2.18.0", "t", &mut w).unwrap();
         assert_eq!((again.chats, again.skipped), (0, 1));
+        assert!(text.contains("\"rel\":\"../../DJI/CAM_0001.OSV\""), "{text}");
         // Read back: equal to what was saved.
         let o = read_folder(&out.file, &root.join("none")).unwrap();
         assert_eq!(o.from, "file");
         assert!(o.warnings.is_empty(), "{:?}", o.warnings);
         assert_eq!(o.project, p);
+        // The footage and the project folder moved together (another drive letter): found by `rel`.
+        let moved = root.join("moved");
+        std::fs::create_dir_all(moved.join("Reelcut")).unwrap();
+        std::fs::rename(&dir, moved.join("Reelcut").join("제주_ 여행")).unwrap();
+        std::fs::rename(root.join("DJI"), moved.join("DJI")).unwrap();
+        let o = read_folder(&moved.join("Reelcut/제주_ 여행").join(out.file.file_name().unwrap()), &root).unwrap();
+        assert_eq!(o.project.pointer("/assets/0/info/path").and_then(Value::as_str), Some(&*moved.join("DJI/CAM_0001.OSV").to_string_lossy()));
     }
 
     #[test]
@@ -1238,6 +1306,23 @@ mod tests {
         let to = trash_folder(&dir, &root.join("Docs/Reelcut"), "2026-11-05 1200").unwrap();
         assert!(to.join("기록.reelcut").is_file() && !dir.exists());
         assert!(std::fs::read_to_string(root.join("Docs/Reelcut/_휴지통/삭제 기록.txt")).unwrap().contains("기록"));
+    }
+
+    #[test]
+    fn moved_footage_is_found_by_name_and_size() {
+        let root = tmp("relink");
+        std::fs::create_dir_all(root.join("새 폴더/2026-10")).unwrap();
+        std::fs::create_dir_all(root.join("Reelcut/여행")).unwrap();
+        std::fs::write(root.join("새 폴더/2026-10/CAM_0001.OSV"), b"abc").unwrap();
+        std::fs::write(root.join("새 폴더/cam_0002.osv"), b"x").unwrap();
+        // A same-named file inside a project folder is not footage.
+        std::fs::write(root.join("Reelcut/여행/여행.reelcut"), b"{}").unwrap();
+        std::fs::write(root.join("Reelcut/여행/CAM_0003.OSV"), b"y").unwrap();
+        let w = |id: &str, name: &str, size: u64| Wanted { id: id.into(), name: name.into(), size };
+        let found = relink_search(&root, &[w("a", "CAM_0001.OSV", 3), w("b", "CAM_0002.OSV", 0), w("c", "CAM_0003.OSV", 1), w("d", "CAM_0001.OSV", 99)]);
+        assert_eq!(found.get("a").map(String::as_str), Some(&*root.join("새 폴더/2026-10/CAM_0001.OSV").to_string_lossy()));
+        assert!(found.get("b").is_some_and(|p| p.ends_with("cam_0002.osv")));
+        assert!(!found.contains_key("c") && !found.contains_key("d"));
     }
 
     #[test]

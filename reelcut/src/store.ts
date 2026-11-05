@@ -59,7 +59,9 @@ type S = {
   savedAt: number;
   /** The open project's file in its folder (Documents\Reelcut\<이름>\<이름>.reelcut). */
   projectFile: string;
-  dialog: "" | "shortcuts" | "export" | "newProject" | "pasteAttrs" | "saveAs" | "backups";
+  /** Media of the open project whose file is not where it was (moved or on a drive not plugged in). */
+  missing: string[];
+  dialog: "" | "shortcuts" | "export" | "newProject" | "pasteAttrs" | "saveAs" | "backups" | "relink";
   showSafe: boolean;
   /** Timeline shows where silence removal would cut. */
   showSilence: boolean;
@@ -79,7 +81,7 @@ export const st: S = {
   route: "home", projects: [], project: null, draftId: null, sourceId: null, folder: "", playhead: 0, selClip: null,
   settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, ccConnect: null, qwenSetup: null, downloads: {}, exportJob: null, brokenProjects: [], toast: "",
   agentBusy: false, agentStatus: "", rightTab: "inspect", leftTab: "media",
-  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, projectFile: "", dialog: "", showSafe: false, showSilence: false, motion: {}, scans: {}, motionRev: 0, prompts: [], skills: [],
+  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, projectFile: "", missing: [], dialog: "", showSafe: false, showSilence: false, motion: {}, scans: {}, motionRev: 0, prompts: [], skills: [],
 };
 
 const subs = new Set<() => void>();
@@ -149,6 +151,16 @@ export async function saveNow() {
   const meta = metaOf(p);
   set({ projects: [meta, ...st.projects.filter((m) => m.id !== p.id)].sort((a, b) => b.updated - a.updated), savedAt: Date.now(), projectFile: r?.file ?? st.projectFile });
 }
+/** Which media files are not where the project expects them; `ask` opens the relink dialog. */
+export async function checkMissing(ask = false): Promise<string[]> {
+  const p = st.project;
+  if (!p?.assets.length) { set({ missing: [] }); return []; }
+  const ok = await api.pathsExist(p.assets.map((a) => a.info.path)).catch(() => p.assets.map(() => true));
+  if (st.project?.id !== p.id) return [];
+  const missing = p.assets.filter((_, i) => !ok[i]).map((a) => a.id);
+  set({ missing, ...(ask && missing.length && !st.dialog ? { dialog: "relink" as const } : {}) });
+  return missing;
+}
 /** A dated copy in the project's 백업 folder ("AI 작업 전", "수동", …); never fails the caller. */
 export async function backupProject(reason: string): Promise<string | null> {
   const p = st.project;
@@ -217,6 +229,8 @@ export async function openProject(id: string) {
   // The folder's file, and the first backup of the day ("열기").
   api.projectInfo(p.id).then((f) => { if (st.project?.id === p.id) set({ projectFile: f?.file ?? "" }); }).catch(() => {});
   void backupProject("열기");
+  // Media that moved: asked about once, on opening.
+  void checkMissing(true);
   // Resume work that was cut off when the app closed.
   for (const a of p.assets) {
     prepare360(a.id);

@@ -1,8 +1,8 @@
 // 파일 > 다른 이름으로 저장 and 파일 > 백업에서 되살리기 (2.18 project files).
-import { Archive, FolderOpen, MessagesSquare, RotateCcw } from "lucide-preact";
+import { Archive, FolderOpen, FolderSearch, MessagesSquare, RotateCcw } from "lucide-preact";
 import { useEffect, useState } from "preact/hooks";
-import { api, type FoundChat, type ProjectBackup } from "../api";
-import { backupNow, recoverConversations, recoverGroup, restoreBackup, revealProjectFolder, saveProjectAs } from "../project";
+import { api, pickFiles, pickFolder, type FoundChat, type ProjectBackup } from "../api";
+import { backupNow, recoverConversations, recoverGroup, relinkAssets, relinkFrom, restoreBackup, revealProjectFolder, saveProjectAs } from "../project";
 import { st, toast, useStore } from "../store";
 import { Modal } from "./Modal";
 
@@ -111,6 +111,46 @@ export function RecoverDialog({ onClose }: { onClose: () => void }) {
           </div>
         ))}
       </div>
+    </Modal>
+  );
+}
+
+/** Media whose file moved: find it in a folder (by name and size), or pick it by hand. */
+export function RelinkDialog({ onClose }: { onClose: () => void }) {
+  const s = useStore();
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const list = (s.project?.assets ?? []).filter((a) => s.missing.includes(a.id));
+  const search = async () => {
+    const d = await pickFolder();
+    if (!d) return;
+    setBusy(true);
+    setNote("찾는 중…");
+    try {
+      const r = await relinkFrom(d);
+      setNote(r.found ? `${r.found}개를 다시 연결했습니다.${r.left ? ` ${r.left}개는 그 폴더에 없습니다.` : ""}` : "그 폴더와 하위 폴더에서 같은 이름·크기의 파일을 찾지 못했습니다.");
+      if (!r.left) { toast(`미디어 ${r.found}개를 다시 연결했습니다`); onClose(); }
+    } catch (e) { setNote(String(e)); }
+    setBusy(false);
+  };
+  const one = async (id: string) => {
+    const [f] = await pickFiles();
+    if (f) await relinkAssets({ [id]: f });
+  };
+  return (
+    <Modal title="원본 파일을 찾을 수 없습니다" wide onClose={onClose}
+      footer={<><span class="spacer" /><button onClick={onClose}>나중에</button><button class="primary" disabled={busy || !list.length} onClick={search}><FolderSearch size={15} aria-hidden="true" /> 폴더에서 찾기…</button></>}>
+      <p class="muted">이 프로젝트의 영상 {list.length}개가 원래 자리에 없습니다(옮겼거나, 외장 드라이브가 꽂혀 있지 않음). 옮긴 폴더를 고르면 하위 폴더까지 같은 이름과 크기의 파일을 찾아 다시 연결합니다. 편집 내용은 그대로입니다.</p>
+      {note && <p class={note.startsWith("찾는") ? "muted" : ""}>{busy && <span class="spin" />} {note}</p>}
+      <div class="backup-list">
+        {list.map((a) => (
+          <div class="recover-row relink-row" title={a.info.path}>
+            <span class="grow ellipsis"><b>{a.info.name}</b> <span class="muted">{a.info.path}</span></span>
+            <button class="small" onClick={() => one(a.id)}>직접 고르기…</button>
+          </div>
+        ))}
+      </div>
+      {!list.length && <p class="muted">모든 원본이 연결되어 있습니다.</p>}
     </Modal>
   );
 }

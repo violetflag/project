@@ -1628,6 +1628,8 @@ pub fn run() {
             project::project_migrate,
             project::project_trash,
             project::project_copy_logs,
+            project::relink_search_cmd,
+            project::paths_exist,
             recover::recover_scan,
             recover::recover_chats
         ])

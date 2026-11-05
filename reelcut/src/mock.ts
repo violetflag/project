@@ -122,6 +122,8 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
     case "project_migrate": return { saved: 0, skipped: ls.keys().filter((k) => k.startsWith("project-")).length, failed: [] };
     case "project_trash": ls.del(`folder:${a.id}`); return;
     case "project_copy_logs": { const v = ls.get(`jsonl:actions:${a.from}`); if (v) ls.set(`jsonl:actions:${a.to}`, v); return; }
+    case "paths_exist": return a.paths.map((x: string) => !/[\\/]missing[\\/]/i.test(x));
+    case "relink_search_cmd": return Object.fromEntries(a.wanted.map((w: any) => [w.id, `C:/새 위치/${w.name}`]));
     case "recover_scan": return (window as any).__mockRecover ?? [];
     case "recover_chats": return ((window as any).__mockRecover ?? []).filter((f: any) => a.sessions.includes(f.session)).map((f: any) => ({ id: "r" + f.session.slice(0, 8), title: f.title ?? f.first.slice(0, 30), created: f.started, updated: f.ended, ccSession: f.session, chatMode: "account", messages: [{ role: "user", content: [{ type: "text", text: f.first }] }, { role: "assistant", content: [{ type: "text", text: "(복구된 답)" }] }] }));
     case "loudness": return { i: -20 - (String(a.path).length % 7) };

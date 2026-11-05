@@ -69,6 +69,9 @@ export const api = {
   projectMigrate: (savedAt: string, force = false) => invoke<{ saved: number; skipped: number; failed: string[] }>("project_migrate", { savedAt, force }),
   projectTrash: (id: string, time: string) => invoke<void>("project_trash", { id, time }),
   projectCopyLogs: (from: string, to: string) => invoke<void>("project_copy_logs", { from, to }),
+  /** Moved footage: asset id → new path, found under `folder` by name (and size). */
+  relinkSearch: (folder: string, wanted: { id: string; name: string; size: number }[]) => invoke<Record<string, string>>("relink_search_cmd", { folder, wanted }),
+  pathsExist: (paths: string[]) => invoke<boolean[]>("paths_exist", { paths }),
   // 대화 복구: Claude Code conversations no project refers to (their project was deleted).
   recoverScan: () => invoke<FoundChat[]>("recover_scan"),
   recoverChats: (sessions: string[]) => invoke<any[]>("recover_chats", { sessions }),

@@ -1,10 +1,10 @@
 // Media bin: grid or list, sort, smart filters (360 / with transcript / picks / 3★+), star
 // ratings (1–5 keys), pick / reject (P / X), tags, and hover scrubbing over the thumbnails.
-import { Check, Flag, FolderPlus, LayoutGrid, List, Music, Plus, Star, X as XIcon } from "lucide-preact";
+import { Check, Flag, FolderPlus, LayoutGrid, List, Music, Plus, Star, Unlink, X as XIcon } from "lucide-preact";
 import { useEffect, useState } from "preact/hooks";
 import { api, fileSrc, pickFiles } from "../api";
 import { draftDuration, fmtTC, insertClips, is360, newClip, overlays, searchScenes, uid } from "../edit";
-import { draft, editDraft, ensureStrip, importPaths, mutate, patchAsset, scanShots, set, startTranscribe, syncAssets, toast, useStore } from "../store";
+import { draft, editDraft, ensureStrip, importPaths, mutate, patchAsset, scanShots, set, st, startTranscribe, syncAssets, toast, useStore } from "../store";
 import type { Asset } from "../types";
 import { player } from "./Viewer";
 
@@ -55,6 +55,10 @@ function Thumb({ a }: { a: Asset }) {
       <span class="dur">{a.info.kind === "image" ? "사진" : fmtTC(a.info.duration)}</span>
       {a.flag === "pick" && <span class="flag pick" title="고른 컷"><Check size={11} /></span>}
       {a.flag === "reject" && <span class="flag reject" title="안 씀"><XIcon size={11} /></span>}
+      {st.missing.includes(a.id) && (
+        <button class="offline" title={`원본 파일이 없습니다: ${a.info.path}\n눌러서 다시 연결`} aria-label="원본 파일 없음, 다시 연결"
+          onClick={(e) => { e.stopPropagation(); set({ dialog: "relink" }); }}><Unlink size={11} aria-hidden="true" /> 없음</button>
+      )}
     </div>
   );
 }

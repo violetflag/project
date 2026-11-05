@@ -7,7 +7,7 @@ import { api, pickProject, type FoundChat } from "./api";
 import { flush, logAction } from "./actionlog";
 import { newDraft, uid } from "./edit";
 import {
-  backupProject, checkpoint, cleanProject, createProject, importPaths, loadProjects, localIso, mutate, openProject, saveNow, set, st, toast,
+  backupProject, checkMissing, checkpoint, cleanProject, createProject, importPaths, loadProjects, localIso, mutate, openProject, saveNow, set, st, toast,
 } from "./store";
 import type { Project } from "./types";
 
@@ -194,4 +194,41 @@ export async function recoverConversations(found: FoundChat[]): Promise<number> 
   }
   await loadProjects();
   return made;
+}
+
+// ---------------------------------------------------------------- moved footage
+
+const base = (p: string) => p.split(/[\\/]/).pop() ?? p;
+const dirOf = (p: string) => p.replace(/[\\/][^\\/]*$/, "");
+
+/** Points media at its new place (and its .lrf preview file when it sits beside it); logged. */
+export async function relinkAssets(found: Record<string, string>): Promise<number> {
+  const p = st.project;
+  if (!p) return 0;
+  const ids = Object.keys(found).filter((id) => p.assets.some((a) => a.id === id));
+  if (!ids.length) return 0;
+  const lrfs = ids.map((id) => { const a = p.assets.find((x) => x.id === id)!; return a.info.lrf ? `${dirOf(found[id])}/${base(a.info.lrf)}` : ""; });
+  const lrfOk = await api.pathsExist(lrfs.map((x) => x || "-")).catch(() => lrfs.map(() => false));
+  const next = new Map(ids.map((id, i) => [id, { path: found[id], lrf: lrfs[i] && lrfOk[i] ? lrfs[i] : undefined }]));
+  mutate((x) => ({
+    ...x,
+    assets: x.assets.map((a) => {
+      const n = next.get(a.id);
+      return n ? { ...a, info: { ...a.info, path: n.path, ...(n.lrf ? { lrf: n.lrf } : {}) } } : a;
+    }),
+  }), `미디어 다시 연결: ${ids.length}개`);
+  set({ missing: st.missing.filter((id) => !next.has(id)) });
+  await saveNow();
+  await checkMissing();
+  return ids.length;
+}
+
+/** Searches a folder (and its subfolders) for the missing media by name and size. */
+export async function relinkFrom(folder: string): Promise<{ found: number; left: number }> {
+  const p = st.project;
+  if (!p) return { found: 0, left: 0 };
+  const wanted = p.assets.filter((a) => st.missing.includes(a.id)).map((a) => ({ id: a.id, name: base(a.info.path), size: a.info.size ?? 0 }));
+  const found = await api.relinkSearch(folder, wanted);
+  const n = await relinkAssets(found);
+  return { found: n, left: st.missing.length };
 }

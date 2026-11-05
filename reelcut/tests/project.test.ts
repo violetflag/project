@@ -2,8 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../src/api";
 import { newDraft } from "../src/edit";
-import { hourlyTick, HOURLY_MS, isProjectFile, openPaths, openProjectFile, recoverConversations, recoverGroup, restoreBackup, saveProjectAs } from "../src/project";
-import { canUndo, localIso, localStamp, mutate, SAVE_DEBOUNCE, SAVE_MAX, set, st, undo } from "../src/store";
+import { hourlyTick, HOURLY_MS, isProjectFile, openPaths, openProjectFile, recoverConversations, recoverGroup, relinkFrom, restoreBackup, saveProjectAs } from "../src/project";
+import { canUndo, checkMissing, localIso, localStamp, mutate, SAVE_DEBOUNCE, SAVE_MAX, set, st, undo } from "../src/store";
 import type { Project } from "../src/types";
 
 /** The app store and the folders, in memory. */
@@ -154,5 +154,22 @@ describe("대화 복구", () => {
     expect(jeju.chats?.map((c) => c.ccSession)).toEqual(["b", "a"]);
     expect(jeju.drafts.length).toBe(1);
     expect(jeju.created).toBe(1000);
+  });
+});
+
+describe("moved footage", () => {
+  it("is noticed on opening and found again by name and size, with its .lrf", async () => {
+    const asset = (id: string, path: string, lrf: string | null = null) => ({ id, folder: "", tState: "idle" as const, added: 0, info: { path, name: path.split("/").pop()!, size: 42, lrf } as any });
+    set({ dialog: "", project: proj("p8", { assets: [asset("a", "E:/DJI/CAM_1.OSV", "E:/DJI/CAM_1.LRF"), asset("b", "C:/v/ok.mp4")] }), draftId: "d1" });
+    vi.spyOn(api, "pathsExist").mockImplementation(async (ps) => ps.map((p) => p.startsWith("C:/") || p.startsWith("F:/")));
+    expect(await checkMissing(true)).toEqual(["a"]);
+    expect(st.dialog).toBe("relink");
+    const search = vi.spyOn(api, "relinkSearch").mockResolvedValue({ a: "F:/옮김/CAM_1.OSV" });
+    expect(await relinkFrom("F:/옮김")).toEqual({ found: 1, left: 0 });
+    expect(search).toHaveBeenCalledWith("F:/옮김", [{ id: "a", name: "CAM_1.OSV", size: 42 }]);
+    const a = st.project!.assets.find((x) => x.id === "a")!;
+    expect([a.info.path, a.info.lrf]).toEqual(["F:/옮김/CAM_1.OSV", "F:/옮김/CAM_1.LRF"]);
+    expect(st.missing).toEqual([]);
+    expect(JSON.parse(saves[saves.length - 1].json).assets[0].info.path).toBe("F:/옮김/CAM_1.OSV");
   });
 });
