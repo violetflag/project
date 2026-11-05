@@ -540,5 +540,9 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .backup-row:hover { background: var(--hover); }
 .backup-row.on { border-color: var(--accent); background: var(--accent-bg); }
 .backup-row .b-when { font-variant-numeric: tabular-nums; }
+.recover-group { display: flex; flex-direction: column; gap: 2px; margin: 6px 0 8px; }
+.recover-row { display: grid; grid-template-columns: auto 9.5em 1fr auto; gap: 10px; align-items: center; padding: 4px 8px; border-radius: var(--r); min-height: 32px; cursor: pointer; }
+.recover-row:hover { background: var(--hover); }
+.recover-row .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .project-root { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .project-root code { flex: 1; min-width: 12em; overflow-wrap: anywhere; }

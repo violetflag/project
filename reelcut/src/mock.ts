@@ -122,6 +122,8 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
     case "project_migrate": return { saved: 0, skipped: ls.keys().filter((k) => k.startsWith("project-")).length, failed: [] };
     case "project_trash": ls.del(`folder:${a.id}`); return;
     case "project_copy_logs": { const v = ls.get(`jsonl:actions:${a.from}`); if (v) ls.set(`jsonl:actions:${a.to}`, v); return; }
+    case "recover_scan": return (window as any).__mockRecover ?? [];
+    case "recover_chats": return ((window as any).__mockRecover ?? []).filter((f: any) => a.sessions.includes(f.session)).map((f: any) => ({ id: "r" + f.session.slice(0, 8), title: f.title ?? f.first.slice(0, 30), created: f.started, updated: f.ended, ccSession: f.session, chatMode: "account", messages: [{ role: "user", content: [{ type: "text", text: f.first }] }, { role: "assistant", content: [{ type: "text", text: "(복구된 답)" }] }] }));
     case "loudness": return { i: -20 - (String(a.path).length % 7) };
     case "expand_paths": return a.paths.map((p: string) => [p, ""]);
     case "inspect": return info(a.path);

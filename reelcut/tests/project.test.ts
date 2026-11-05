@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../src/api";
 import { newDraft } from "../src/edit";
-import { hourlyTick, HOURLY_MS, isProjectFile, openPaths, openProjectFile, restoreBackup, saveProjectAs } from "../src/project";
+import { hourlyTick, HOURLY_MS, isProjectFile, openPaths, openProjectFile, recoverConversations, recoverGroup, restoreBackup, saveProjectAs } from "../src/project";
 import { canUndo, localIso, localStamp, mutate, SAVE_DEBOUNCE, SAVE_MAX, set, st, undo } from "../src/store";
 import type { Project } from "../src/types";
 
@@ -138,5 +138,21 @@ describe("backups", () => {
     expect(backups).toEqual([]);
     await hourlyTick(1_000 + HOURLY_MS + 5);
     expect(backups.map((b) => b.reason)).toEqual(["1시간마다"]);
+  });
+});
+
+describe("대화 복구", () => {
+  it("makes one project per mentioned project name, else per day", async () => {
+    const f = (session: string, project: string | null, started: number) => ({ session, started, ended: started + 1, messages: 2, first: "둘 다", project, title: null, bytes: 1 });
+    const found = [f("a", "제주 여행", 1000), f("b", "제주 여행", 2000), f("c", null, new Date(2026, 10, 3, 10).getTime())];
+    vi.spyOn(api, "recoverChats").mockImplementation(async (ss) => ss.map((s, i) => ({ id: "r" + s, title: s, created: 10 - i, updated: 20, messages: [{ role: "user", content: "x" }], ccSession: s, chatMode: "account" })));
+    expect(recoverGroup(found[2])).toBe("복구된 대화 2026-11-03");
+    expect(await recoverConversations(found)).toBe(2);
+    const made = saves.map((x) => JSON.parse(x.json) as Project);
+    expect(made.map((p) => p.name).sort()).toEqual(["복구된 대화 2026-11-03", "제주 여행 (복구된 대화)"]);
+    const jeju = made.find((p) => p.name.startsWith("제주"))!;
+    expect(jeju.chats?.map((c) => c.ccSession)).toEqual(["b", "a"]);
+    expect(jeju.drafts.length).toBe(1);
+    expect(jeju.created).toBe(1000);
   });
 });

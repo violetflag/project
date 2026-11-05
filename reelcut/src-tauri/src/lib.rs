@@ -13,6 +13,7 @@ mod media;
 mod probe;
 mod proj;
 mod project;
+mod recover;
 mod qwen;
 mod render;
 mod shots;
@@ -1626,7 +1627,9 @@ pub fn run() {
             project::project_backup_read,
             project::project_migrate,
             project::project_trash,
-            project::project_copy_logs
+            project::project_copy_logs,
+            recover::recover_scan,
+            recover::recover_chats
         ])
         .run(tauri::generate_context!())
         .expect("error while running reelcut");

@@ -3,9 +3,9 @@
 // records and dated backups (src-tauri/src/project.rs writes it on every save). This module opens
 // such files (double-click, 파일 > 열기, a drop, a second start), saves a copy under another name,
 // restores a backup, and keeps the hourly backup.
-import { api, pickProject } from "./api";
+import { api, pickProject, type FoundChat } from "./api";
 import { flush, logAction } from "./actionlog";
-import { uid } from "./edit";
+import { newDraft, uid } from "./edit";
 import {
   backupProject, checkpoint, cleanProject, createProject, importPaths, loadProjects, localIso, mutate, openProject, saveNow, set, st, toast,
 } from "./store";
@@ -159,4 +159,39 @@ export async function startProjectFiles() {
   } catch (e) {
     api.logEvent("project", `migrate: ${msg(e)}`).catch(() => {});
   }
+}
+
+// ---------------------------------------------------------------- 대화 복구
+
+/** The project a found conversation goes to: the name it mentions, else its day. */
+export function recoverGroup(f: FoundChat): string {
+  if (f.project) return `${f.project} (복구된 대화)`;
+  const d = new Date(f.started || Date.now()), p = (n: number) => String(n).padStart(2, "0");
+  return `복구된 대화 ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/**
+ * Makes one project per group with the chosen conversations as its chats (on their Claude Code
+ * session, so asking again continues them). Media and edits are not in a conversation, so the
+ * projects start with an empty draft.
+ */
+export async function recoverConversations(found: FoundChat[]): Promise<number> {
+  const groups = new Map<string, FoundChat[]>();
+  for (const f of found) groups.set(recoverGroup(f), [...(groups.get(recoverGroup(f)) ?? []), f]);
+  let made = 0;
+  for (const [name, fs] of groups) {
+    const chats = await api.recoverChats(fs.map((f) => f.session));
+    if (!chats.length) continue;
+    chats.sort((a, b) => a.created - b.created);
+    const now = Date.now();
+    const p: Project = {
+      id: uid(), name, created: Math.min(...fs.map((f) => f.started || now)), updated: now,
+      assets: [], folders: [], drafts: [newDraft("첫 편집본")], chats, activeChat: chats[chats.length - 1].id,
+    };
+    await api.projectSave(p.id, JSON.stringify(p), localIso());
+    logAction(p.id, { who: "user", kind: "edit", label: "대화 복구", detail: `Claude Code 대화 ${chats.length}개를 되살림` });
+    made++;
+  }
+  await loadProjects();
+  return made;
 }

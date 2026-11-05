@@ -37,6 +37,7 @@ export type AppInfo = {
 };
 export type QwenStatus = { env: boolean; package: boolean; models: boolean; ready: boolean; cuda: boolean; gpu: string; vram_gb: number; torch: string; error: string };
 export type ProjectRoot = { root: string; default: string; custom: boolean; docsSyncedBy: string | null; rootSyncedBy: string | null };
+export type FoundChat = { session: string; started: number; ended: number; messages: number; first: string; project: string | null; title: string | null; bytes: number };
 export type ProjectBackup = { file: string; time: number; reason: string; size: number };
 /** Claude Code on this PC (the "Claude 계정" connection). */
 export type CcStatus = { found: boolean; path: string; version: string; logged_in: boolean; method: string; account: string; plan: string; error: string };
@@ -68,6 +69,9 @@ export const api = {
   projectMigrate: (savedAt: string, force = false) => invoke<{ saved: number; skipped: number; failed: string[] }>("project_migrate", { savedAt, force }),
   projectTrash: (id: string, time: string) => invoke<void>("project_trash", { id, time }),
   projectCopyLogs: (from: string, to: string) => invoke<void>("project_copy_logs", { from, to }),
+  // 대화 복구: Claude Code conversations no project refers to (their project was deleted).
+  recoverScan: () => invoke<FoundChat[]>("recover_scan"),
+  recoverChats: (sessions: string[]) => invoke<any[]>("recover_chats", { sessions }),
   /** Integrated loudness (LUFS, ffmpeg ebur128) of a stretch of a file; i is -70 or lower for silence. */
   loudness: (path: string, start: number, dur: number) => invoke<{ i: number }>("loudness", { path, start, dur }),
   expandPaths: (paths: string[]) => invoke<[string, string][]>("expand_paths", { paths }),

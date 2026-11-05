@@ -1,9 +1,9 @@
 // 파일 > 다른 이름으로 저장 and 파일 > 백업에서 되살리기 (2.18 project files).
-import { Archive, FolderOpen, RotateCcw } from "lucide-preact";
+import { Archive, FolderOpen, MessagesSquare, RotateCcw } from "lucide-preact";
 import { useEffect, useState } from "preact/hooks";
-import { api, type ProjectBackup } from "../api";
-import { backupNow, restoreBackup, revealProjectFolder, saveProjectAs } from "../project";
-import { st, useStore } from "../store";
+import { api, type FoundChat, type ProjectBackup } from "../api";
+import { backupNow, recoverConversations, recoverGroup, restoreBackup, revealProjectFolder, saveProjectAs } from "../project";
+import { st, toast, useStore } from "../store";
 import { Modal } from "./Modal";
 
 export function SaveAsDialog({ onClose }: { onClose: () => void }) {
@@ -66,6 +66,49 @@ export function BackupsDialog({ onClose }: { onClose: () => void }) {
             <span class="b-why" title={REASON_TIP[b.reason] ?? ""}>{b.reason || "백업"}</span>
             <span class="muted b-size">{size(b.size)}</span>
           </button>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
+/** 홈 > 대화 복구: AI conversations whose project was deleted, made readable again. */
+export function RecoverDialog({ onClose }: { onClose: () => void }) {
+  const [found, setFound] = useState<FoundChat[] | null>(null);
+  const [off, setOff] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { api.recoverScan().then(setFound).catch((e) => { setFound([]); toast(String(e)); }); }, []);
+  const groups = new Map<string, FoundChat[]>();
+  for (const f of found ?? []) groups.set(recoverGroup(f), [...(groups.get(recoverGroup(f)) ?? []), f]);
+  const chosen = (found ?? []).filter((f) => !off.has(f.session));
+  const flip = (id: string) => { const n = new Set(off); n.has(id) ? n.delete(id) : n.add(id); setOff(n); };
+  const go = async () => {
+    setBusy(true);
+    try {
+      const n = await recoverConversations(chosen);
+      toast(`대화 ${chosen.length}개를 프로젝트 ${n}개로 되살렸습니다`);
+      onClose();
+    } catch (e) { toast(`되살리지 못했습니다: ${String(e)}`); setBusy(false); }
+  };
+  return (
+    <Modal title="대화 복구" wide onClose={onClose}
+      footer={<><span class="spacer" /><button onClick={onClose}>닫기</button><button class="primary" disabled={busy || !chosen.length} onClick={go}><MessagesSquare size={15} aria-hidden="true" /> {chosen.length ? `${chosen.length}개 되살리기` : "되살리기"}</button></>}>
+      <p class="muted">프로젝트를 지워도 AI(Claude 계정)와 나눈 대화는 이 PC에 남아 있습니다. 어느 프로젝트에도 연결되지 않은 대화를 찾아, 대화에 적힌 프로젝트 이름별로 새 프로젝트에 넣습니다. 미디어와 편집본은 대화에 없어서 빈 편집본으로 시작합니다. 원래 파일은 그대로 둡니다.</p>
+      {found === null && <p class="muted">찾는 중…</p>}
+      {found?.length === 0 && <p class="muted">되살릴 대화가 없습니다. 모든 대화가 프로젝트에 연결되어 있습니다.</p>}
+      <div class="backup-list">
+        {[...groups].map(([name, fs]) => (
+          <div class="recover-group">
+            <b>{name}</b>
+            {fs.map((f) => (
+              <label class="recover-row" title={f.first}>
+                <input type="checkbox" checked={!off.has(f.session)} onChange={() => flip(f.session)} />
+                <span class="b-when">{when(f.started)}</span>
+                <span class="grow ellipsis">{f.title || f.first || "(내용 없음)"}</span>
+                <span class="muted">메시지 {f.messages}</span>
+              </label>
+            ))}
+          </div>
         ))}
       </div>
     </Modal>
