@@ -18,6 +18,8 @@ export type Stitch = {
   gain_a: number[]; gain_b: number[]; calibrated: boolean; before: number; after: number;
   /** Line the lenses up again on every frame (DJI's AI seam, Reelcut's own matching). */
   flow?: boolean;
+  /** "linear" = the live preview's blend (default); "flow" = slower alignment the preview cannot show. */
+  seam?: "linear" | "flow";
 };
 /** 360 stabilisation (see src-tauri/src/motion.rs). */
 export type Stab = { mode: "horizon" | "lock" | "smooth" | "off"; strength: number; rs: boolean };

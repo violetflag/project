@@ -4,7 +4,7 @@
 import { patchAsset, prepare360 } from "../store";
 import type { Asset, Lens, Stitch } from "../types";
 
-const defaults: Stitch = { on: true, fov: 0, yaw: 0, pitch: 0, roll: 0, gain_a: [1, 0, 0], gain_b: [1, 0, 0], calibrated: false, before: 0, after: 0, flow: true };
+const defaults: Stitch = { on: true, fov: 0, yaw: 0, pitch: 0, roll: 0, gain_a: [1, 0, 0], gain_b: [1, 0, 0], calibrated: false, before: 0, after: 0, seam: "linear" };
 
 function lensOf(a: Asset): Lens {
   return a.lens ?? { layout: a.info.layout360, swap: false, fov: 190 };
@@ -37,13 +37,15 @@ export function Stitch360({ a }: { a: Asset }) {
         ) : <p class="muted tip">불러올 때 자동으로 맞춥니다. 겹치는 띠 가운데를 부드럽게 섞어 이어 붙입니다.</p>
       )}
       {s.on && (
-        <label class="check" title="두 렌즈가 겹치는 띠를 프레임마다 다시 비교해, 가까운 물체나 움직이는 사람이 이음새에서 어긋나지 않게 맞춥니다 (DJI의 AI 이음새와 같은 역할)">
-          <input type="checkbox" checked={s.flow !== false} onChange={(e) => setStitch(a, { ...s, flow: (e.target as HTMLInputElement).checked })} />
-          프레임마다 이음새 다시 맞추기 (AI 이음새)
+        <label>이음새
+          <select value={s.seam === "flow" ? "flow" : "linear"} onChange={(e) => setStitch(a, { ...s, seam: (e.target as HTMLSelectElement).value as "linear" | "flow" })}>
+            <option value="linear">미리보기와 같게 (기본)</option>
+            <option value="flow">정밀 (느림, 미리보기에는 안 보임)</option>
+          </select>
         </label>
       )}
       {s.on && !a.stitching && (
-        <button class="small" onClick={() => setStitch(a, { ...defaults, on: true, flow: s.flow !== false })} title="두 렌즈의 각도·화각·밝기를 다시 찾습니다">다시 맞추기</button>
+        <button class="small" onClick={() => setStitch(a, { ...defaults, on: true, seam: s.seam })} title="두 렌즈의 각도·화각·밝기를 다시 찾습니다">다시 맞추기</button>
       )}
     </div>
   );

@@ -53,6 +53,16 @@ pub struct Stitch {
     /// here with Reelcut's own motion matching; on by default).
     #[serde(default = "yes")]
     pub flow: bool,
+    /// "" or "linear": the same blend as the live preview. "flow": the slower per-frame alignment,
+    /// which the preview cannot show. (`flow` above is left from older files and not read.)
+    #[serde(default)]
+    pub seam: String,
+}
+
+impl Stitch {
+    pub fn precise(&self) -> bool {
+        self.seam == "flow"
+    }
 }
 
 fn yes() -> bool {
@@ -64,7 +74,7 @@ fn neutral() -> [f64; 3] {
 
 impl Default for Stitch {
     fn default() -> Self {
-        Stitch { on: true, fov: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, gain_a: neutral(), gain_b: neutral(), calibrated: false, before: 0.0, after: 0.0, flow: true }
+        Stitch { on: true, fov: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, gain_a: neutral(), gain_b: neutral(), calibrated: false, before: 0.0, after: 0.0, flow: true, seam: String::new() }
     }
 }
 
@@ -80,6 +90,12 @@ pub fn params(lens: &Lens) -> Stitch {
         s.fov = lens.fov;
     }
     s
+}
+
+/// The front lens's share of a pixel `sigma` degrees past the lens boundary, in a blend `b` degrees
+/// wide (back lens = 1 − this). The live preview's mask and the engine both come from this.
+pub fn front_weight(sigma: f64, b: f64) -> f64 {
+    ((sigma + b / 2.0) / b).clamp(0.0, 1.0)
 }
 
 /// Width of the cross-fade around the seam, degrees: the middle half of the overlap.
@@ -253,19 +269,21 @@ pub fn graph(i: usize, lens: &Lens, scale_each: Option<u32>, pre: &str, out: &Ou
         }
         Out::Equi { w, h } => {
             let (y, p, r) = back_angles(&View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 90.0 }, &s);
-            (format!("output=equirect:w={w}:h={h}:yaw={:.3}:pitch={:.3}:roll={:.3}", wrap180(y), p, r), format!("output=equirect:w={w}:h={h}"), None, format!(",scale={w}:{h}:flags=neighbor"))
+            (format!("output=equirect:w={w}:h={h}:yaw={:.3}:pitch={:.3}:roll={:.3}", wrap180(y), p, r), format!("output=equirect:w={w}:h={h}"), None, format!(",scale={w}:{h}:flags=bilinbor"))
         }
     };
     let lut = |gn: &[f64; 3]| gain_lut(gn).map(|l| format!(",{l}")).unwrap_or_default();
     g += &format!("[{n}_fa]v360@{na}=input=fisheye:ih_fov={f:.3}:iv_fov={f:.3}:{opts_a}:interp=lanczos,format=yuv420p{}[{n}_A];", lut(&s.gain_a));
     g += &format!("[{n}_fb]v360@{nb}=input=fisheye:ih_fov={f:.3}:iv_fov={f:.3}:{opts_b}:interp=lanczos,format=yuv420p{}[{n}_B];", lut(&s.gain_b));
-    // The weight of the front lens: 1 up to the band, falling straight to 0 across it (by longitude
-    // only, so a 2-pixel-high strip is enough; v360 spreads it over the view).
-    let e = format!("255*clip(({:.4}-abs((X+0.5)/W*360-180))/{b:.4},0,1)", 90.0 + b / 2.0);
-    g += &format!("[{n}_ft]crop=2:2:0:0,scale=4096:2:flags=neighbor,format=yuv420p,geq=lum='{e}':cb='{e}':cr='{e}'");
+    // The weight of the front lens (`front_weight`): the angle past the lens boundary at each point
+    // of the sphere, so the blend is as wide at the top of the picture as at the horizon.
+    let e = format!("255*clip((asin(cos((0.5-(Y+0.5)/H)*PI)*cos(((X+0.5)/W*2-1)*PI))*180/PI+{b:.4}/2)/{b:.4},0,1)");
+    let mask = format!("crop=2:2:0:0,scale=1024:512:flags=neighbor,format=yuv420p,geq=lum='{e}':cb='{e}':cr='{e}'");
     match opts_m {
-        Some(o) => g += &format!(",v360@{nm}=input=equirect:{o}:interp=linear[{n}_M];"),
-        None => g += &format!("{tail_m}[{n}_M];"),
+        // The view moves, so the mask is redrawn through it on every frame.
+        Some(o) => g += &format!("[{n}_ft]{mask},v360@{nm}=input=equirect:{o}:interp=linear[{n}_M];"),
+        // One picture, kept for the whole clip (maskedmerge repeats its last mask frame).
+        None => g += &format!("[{n}_ft]trim=end_frame=1,{mask}{tail_m}[{n}_M];"),
     }
     g += &format!("[{n}_A][{n}_B][{n}_M]maskedmerge[{name}]");
     g
@@ -596,6 +614,39 @@ pub fn calibrate(ffmpeg: &Path, ffprobe: &Path, info: &MediaInfo, lens: &Lens) -
         return Err("이음새 맞추기용 장면을 읽지 못했습니다.".into());
     }
     Ok(calibrate_frames(&frames, s, n, lens))
+}
+
+#[cfg(test)]
+mod weight_tests {
+    use super::*;
+
+    #[test]
+    fn front_weight_matches_the_old_mask_on_the_equator() {
+        let b = blend_width(193.4);
+        for lon in [0.0, 60.0, 85.0, 88.0, 90.0, 92.0, 95.0, 120.0, 180.0f64] {
+            let old = ((90.0 + b / 2.0 - lon) / b).clamp(0.0, 1.0);
+            assert!((front_weight(90.0 - lon, b) - old).abs() < 1e-9, "{lon}");
+        }
+        for s in [-10.0, -2.0, 0.0, 1.5, 3.0, 8.0f64] {
+            assert!((front_weight(s, b) + front_weight(-s, b) - 1.0).abs() < 1e-9);
+        }
+        assert!(front_weight(1.0, b) > front_weight(-1.0, b));
+    }
+
+    #[test]
+    fn the_preview_mask_is_two_dimensional_and_a_single_still() {
+        let l = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: None, stab: None };
+        let g = graph(0, &l, Some(1024), "", &Out::Equi { w: 2048, h: 1024 }, None, "sb");
+        assert!(g.contains("trim=end_frame=1") && g.contains("asin(cos((0.5-(Y+0.5)/H)*PI)*cos("), "{g}");
+    }
+
+    #[test]
+    fn older_files_get_the_preview_seam() {
+        let s: Stitch = serde_json::from_str(r#"{"on":true,"flow":true}"#).unwrap();
+        assert!(!s.precise());
+        let p: Stitch = serde_json::from_str(r#"{"on":true,"seam":"flow"}"#).unwrap();
+        assert!(p.precise());
+    }
 }
 
 #[cfg(test)]

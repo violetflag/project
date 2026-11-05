@@ -139,6 +139,15 @@ impl<T: Px> Frame<T> {
     pub fn byte_len(w: usize, h: usize) -> usize {
         (w * h + 2 * (w / 2) * (h / 2)) * T::BYTES
     }
+    /// Fills an existing frame, so a long run does not make a new one for every picture.
+    pub fn fill(&mut self, b: &[u8]) {
+        let mut off = 0;
+        for i in 0..3 {
+            let n = self.p[i].len();
+            T::read(&b[off..off + n * T::BYTES], &mut self.p[i]);
+            off += n * T::BYTES;
+        }
+    }
     pub fn from_bytes(w: usize, h: usize, b: &[u8]) -> Self {
         let mut f = Frame::new(w, h);
         let mut off = 0;
@@ -591,6 +600,8 @@ pub struct Stitcher {
     pub geo: Geo,
     strip: Strip,
     pub flow: bool,
+    /// Width of the plain blend, radians (`stitch::blend_width`).
+    blend: f32,
     gains: [[f64; 3]; 2],
     state: SeamState,
     pub out_w: usize,
@@ -612,7 +623,8 @@ impl Stitcher {
         let strip = Strip::new(&geo, out_w.clamp(256, lens_w.max(256)));
         let nc = strip.nc;
         let step = if out_w * out_h > 4_000_000 { 8 } else { 4 };
-        Stitcher { geo, strip, flow, gains: [s.gain_a, s.gain_b], state: SeamState::new(nc), out_w, out_h, step, rs, mesh_key: None, mesh: vec![], gw: 0, gh: 0 }
+        let blend = crate::stitch::blend_width(geo.fov).to_radians() as f32;
+        Stitcher { geo, strip, flow, blend, gains: [s.gain_a, s.gain_b], state: SeamState::new(nc), out_w, out_h, step, rs, mesh_key: None, mesh: vec![], gw: 0, gh: 0 }
     }
 
     /// The lenses' strips (luma and chroma, gains applied) from a side-by-side frame.
@@ -865,10 +877,16 @@ impl Stitcher {
 
     /// One output frame from one side-by-side input frame.
     pub fn frame<T: Px>(&mut self, src: &Frame<T>, fs: &FrameSetup) -> Frame<T> {
-        let strips = self.strips(src);
-        self.update_seam::<T>(&strips);
-        let band = self.blend_band::<T>(&strips);
+        // The band strip and its seam search are only for the precise seam.
+        let band: [Vec<f32>; 3] = if self.flow {
+            let strips = self.strips(src);
+            self.update_seam::<T>(&strips);
+            self.blend_band::<T>(&strips)
+        } else {
+            Default::default()
+        };
         self.build_mesh(fs);
+        let (flow, bw) = (self.flow, self.blend);
         let mut out = Frame::<T>::new(self.out_w, self.out_h);
         let st = &self.strip;
         let n = self.geo.n as usize;
@@ -902,7 +920,25 @@ impl Stitcher {
                         a + (bb - a) * ty
                     };
                     let s = lerp(5);
-                    let val = if s <= -b || s >= b {
+                    let val = if !flow {
+                        // The live preview's blend: front lens weight by the angle past the boundary.
+                        let w = crate::stitch::front_weight(s as f64, bw as f64) as f32;
+                        let sample = |lens: usize| {
+                            let (mut px, mut py) = (lerp(lens * 2), lerp(lens * 2 + 1));
+                            if ci == 1 {
+                                px = (px + 0.5) * 0.5 - 0.5;
+                                py = (py + 0.5) * 0.5 - 0.5;
+                            }
+                            ga[lens].apply(pl, bil(plane, fw, lens * ln, ln, fh, px, py))
+                        };
+                        if w <= 0.0 {
+                            sample(0)
+                        } else if w >= 1.0 {
+                            sample(1)
+                        } else {
+                            w * sample(1) + (1.0 - w) * sample(0)
+                        }
+                    } else if s <= -b || s >= b {
                         let lens = if s >= b { 1 } else { 0 };
                         let (mut px, mut py) = (lerp(lens * 2), lerp(lens * 2 + 1));
                         if ci == 1 {
@@ -950,6 +986,8 @@ pub struct Source {
     pub fps: f64,
     /// Keep one frame in this many (1 = all); frame k of the run is frame k·every of the source.
     pub every: u32,
+    /// Decode and shrink on the GPU (Intel Quick Sync), as the live preview does.
+    pub gpu: bool,
 }
 
 impl Source {
@@ -964,12 +1002,20 @@ impl Source {
         let g = match self.layout.as_str() {
             "dual" => {
                 let (ia, ib) = if self.swap { (1, 0) } else { (0, 1) };
-                format!("[0:v:{ia}]null[a];[0:v:{ib}]null[b];{};{};[as][bs]hstack,{pick}format={fmt}[o]", sc("a"), sc("b"))
+                if self.gpu {
+                    let q = format!("vpp_qsv=w={n}:h={n}:format=nv12,hwdownload,format=nv12");
+                    format!("[0:v:{ia}]{q}[as];[0:v:{ib}]{q}[bs];[as][bs]hstack,{pick}format={fmt}[o]")
+                } else {
+                    format!("[0:v:{ia}]null[a];[0:v:{ib}]null[b];{};{};[as][bs]hstack,{pick}format={fmt}[o]", sc("a"), sc("b"))
+                }
             }
             _ if self.swap => format!("[0:v:0]scale={}:{n}:flags=area,split[l][r];[l]crop=iw/2:ih:0:0[b];[r]crop=iw/2:ih:iw/2:0[a];[a][b]hstack,{pick}format={fmt}[o]", 2 * n),
             _ => format!("[0:v:0]scale={}:{n}:flags=area,{pick}format={fmt}[o]", 2 * n),
         };
         let mut a: Vec<String> = ["-hide_banner", "-nostdin", "-loglevel", "error"].iter().map(|x| x.to_string()).collect();
+        if self.gpu {
+            a.extend(["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"].iter().map(|x| x.to_string()));
+        }
         if self.start > 0.0 {
             a.extend(["-ss".to_string(), format!("{:.3}", self.start)]);
         }
@@ -1041,9 +1087,11 @@ pub fn run<T: Px>(
     let dec_err = stderr_text(&dec);
     let mut stdout = dec.lock().stdout.take().ok_or("ffmpeg 출력 없음")?;
     let (tx_in, rx_in) = sync_channel::<Vec<u8>>(2);
+    // Used buffers come back: one input frame is tens of MB, too much to allocate for every picture.
+    let (tx_back, rx_back) = std::sync::mpsc::channel::<Vec<u8>>();
     let reader = std::thread::spawn(move || {
         loop {
-            let mut buf = vec![0u8; in_len];
+            let mut buf = rx_back.try_recv().unwrap_or_else(|_| vec![0u8; in_len]);
             let mut got = 0;
             while got < in_len {
                 match stdout.read(&mut buf[got..]) {
@@ -1082,15 +1130,23 @@ pub fn run<T: Px>(
     }
     let mut k = 0usize;
     let mut failed: Option<String> = None;
-    for buf in rx_in {
+    let mut input = Frame::<T>::new(iw, ih);
+    let (mut waited, mut stitched, mut written) = (0f64, 0f64, 0f64);
+    loop {
+        let t0 = std::time::Instant::now();
+        let Ok(buf) = rx_in.recv() else { break };
+        waited += t0.elapsed().as_secs_f64();
         if jobs.generation(tag) != gen {
             failed = Some(CANCELLED.into());
             break;
         }
-        let f = Frame::<T>::from_bytes(iw, ih, &buf);
-        drop(buf);
+        let t1 = std::time::Instant::now();
+        input.fill(&buf);
+        let _ = tx_back.send(buf);
         let fs = setup(k, k as f64 / src.fps.max(1.0));
-        let out = st.frame(&f, &fs);
+        let out = st.frame(&input, &fs);
+        stitched += t1.elapsed().as_secs_f64();
+        let t2 = std::time::Instant::now();
         if let Some((_, _, tx, _)) = &enc {
             if tx.send(out.to_bytes()).is_err() {
                 failed = Some("인코더가 멈췄습니다".into());
@@ -1099,8 +1155,13 @@ pub fn run<T: Px>(
         } else if let Some(cb) = call.as_mut() {
             cb(k, &out);
         }
+        written += t2.elapsed().as_secs_f64();
         k += 1;
         on(k);
+    }
+    drop(rx_in);
+    if k > 30 {
+        crate::logs::log("stage", &format!("{} frames, {}px per lens, gpu {}: waiting for decode {waited:.1}s, stitching {stitched:.1}s, waiting for encoder {written:.1}s", k, n, src.gpu));
     }
     if failed.is_some() {
         let _ = dec.lock().kill();

@@ -94,3 +94,58 @@ pub fn detect(ffmpeg: &Path, cache: &Path, force: bool) -> Hw {
     let _ = std::fs::write(cache, serde_json::to_string_pretty(&hw).unwrap_or_default());
     hw
 }
+
+/// Free memory in MB (Windows; elsewhere a figure that allows one worker).
+#[cfg(windows)]
+pub fn avail_mb() -> u64 {
+    #[repr(C)]
+    struct Mem { len: u32, load: u32, total: u64, avail: u64, page_total: u64, page_avail: u64, virt_total: u64, virt_avail: u64, ext: u64 }
+    extern "system" {
+        fn GlobalMemoryStatusEx(m: *mut Mem) -> i32;
+    }
+    let mut m = Mem { len: std::mem::size_of::<Mem>() as u32, load: 0, total: 0, avail: 0, page_total: 0, page_avail: 0, virt_total: 0, virt_avail: 0, ext: 0 };
+    // Safe: the struct is the documented MEMORYSTATUSEX with its size set.
+    if unsafe { GlobalMemoryStatusEx(&mut m) } != 0 { m.avail / (1 << 20) } else { 4000 }
+}
+#[cfg(not(windows))]
+pub fn avail_mb() -> u64 {
+    4000
+}
+
+/// Free disk space where `path` is, in MB (0 when it cannot be read).
+#[cfg(windows)]
+pub fn free_mb(path: &std::path::Path) -> u64 {
+    use std::os::windows::ffi::OsStrExt;
+    extern "system" {
+        fn GetDiskFreeSpaceExW(dir: *const u16, free: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
+    }
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let mut free = 0u64;
+    // Safe: `wide` is a NUL-terminated path; the null out-pointers are allowed.
+    if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) } != 0 { free / (1 << 20) } else { 0 }
+}
+#[cfg(not(windows))]
+pub fn free_mb(_path: &std::path::Path) -> u64 {
+    0
+}
+
+/// How many clips the 360 stage runs at once: each needs its own decoder's memory.
+pub fn clip_workers(avail_mb: u64, gpu: bool) -> usize {
+    if !gpu {
+        return 1;
+    }
+    (avail_mb.saturating_sub(3000) / 1500).clamp(1, 2) as usize
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+
+    #[test]
+    fn workers_fit_memory_and_need_the_gpu() {
+        assert_eq!(clip_workers(16000, false), 1);
+        assert_eq!(clip_workers(16000, true), 2);
+        assert_eq!(clip_workers(4000, true), 1);
+        assert_eq!(clip_workers(1000, true), 1);
+    }
+}

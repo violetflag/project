@@ -685,9 +685,9 @@ pub fn source_for(info: &MediaInfo, lens: &Lens, start: f64, dur: f64, scale_to:
     let layout = if lens.layout.is_empty() || lens.layout == "none" { info.layout360.clone() } else { lens.layout.clone() };
     let fps = if info.fps > 1.0 { info.fps } else { 30.0 };
     match (&info.lrf, layout.as_str(), small) {
-        (Some(l), "dual", true) => Source { path: l.clone(), layout: "dfisheye".into(), swap: lens.swap, start, dur, lens_px: scale_to.unwrap_or(1024), scale_to, fps, every: 1 },
-        (_, "dual", _) => Source { path: info.path.clone(), layout: "dual".into(), swap: lens.swap, start, dur, lens_px: info.videos.first().map(|v| v.width).unwrap_or(info.width), scale_to, fps, every: 1 },
-        _ => Source { path: info.path.clone(), layout: "dfisheye".into(), swap: lens.swap, start, dur, lens_px: info.width / 2, scale_to, fps, every: 1 },
+        (Some(l), "dual", true) => Source { path: l.clone(), layout: "dfisheye".into(), swap: lens.swap, start, dur, lens_px: scale_to.unwrap_or(1024), scale_to, fps, every: 1, gpu: false },
+        (_, "dual", _) => Source { path: info.path.clone(), layout: "dual".into(), swap: lens.swap, start, dur, lens_px: info.videos.first().map(|v| v.width).unwrap_or(info.width), scale_to, fps, every: 1, gpu: false },
+        _ => Source { path: info.path.clone(), layout: "dfisheye".into(), swap: lens.swap, start, dur, lens_px: info.width / 2, scale_to, fps, every: 1, gpu: false },
     }
 }
 
@@ -910,6 +910,9 @@ pub fn stab_track(m: &Motion, s: &Stab) -> Vec<[f32; 4]> {
 }
 
 pub fn rs_of(m: Option<&Motion>, s: &Stab) -> Option<Rs> {
+    if !RS_VERIFIED {
+        return None;
+    }
     let m = m?;
     (s.rs && s.mode != "off" && m.readout > 0.0).then_some(Rs { readout: m.readout, top_first: m.top_first })
 }
@@ -959,15 +962,40 @@ pub fn motion_for(dir: &Path, ffmpeg: &Path, ffprobe: &Path, jobs: &Jobs, tag: &
     }
 }
 
+/// Bump when the engine's picture changes, so kept clips are made again.
+pub const ENGINE_VERSION: u32 = 2;
+
+/// How `render_flat` works: the lens size to decode at, the GPU, and the intermediate's quality.
+#[derive(Clone, Debug, Default)]
+pub struct FlatOptions {
+    pub lens_px: Option<u32>,
+    pub gpu: bool,
+    pub lossless: bool,
+}
+
+/// Rolling-shutter correction stays off until it has been measured on a real shaky recording
+/// (right sign and size); until then it would only make the picture differ from the preview.
+pub const RS_VERIFIED: bool = false;
+
+/// The lens size a flat view needs: enough for its centre at the narrowest view of the clip, never
+/// more than the file has. A small or wide output decodes less.
+pub fn lens_px_for(fov: f64, w: u32, hfov_min: f64, lens_px: u32) -> u32 {
+    let r_e = (hfov_min.clamp(20.0, 160.0).to_radians() / 2.0).tan();
+    let want = fov.to_radians() * (w as f64 / 2.0) / r_e * 1.1;
+    let n = want.clamp(1024.0_f64.min(lens_px as f64), lens_px as f64) as u32;
+    n + n % 2
+}
+
 /// One timeline clip of a 360 recording rendered flat at w×h through the engine: source
 /// seconds `start`..`start+dur` at the source's frame rate, the view following `view_at(t)` where
 /// t is in output seconds (source seconds / speed). Sound copied along as PCM.
 #[allow(clippy::too_many_arguments)]
-pub fn render_flat(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo, lens: &Lens, m: Option<&Motion>, start: f64, dur: f64, speed: f64, w: u32, h: u32, view_at: &dyn Fn(f64) -> crate::media::View, out: &Path, on: impl Fn(f64)) -> Result<(), String> {
-    let src = source_for(info, lens, start, dur, None, false);
+pub fn render_flat(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo, lens: &Lens, m: Option<&Motion>, start: f64, dur: f64, speed: f64, w: u32, h: u32, how: &FlatOptions, view_at: &dyn Fn(f64) -> crate::media::View, out: &Path, on: impl Fn(f64)) -> Result<(), String> {
+    let mut src = source_for(info, lens, start, dur, how.lens_px, false);
+    src.gpu = how.gpu && src.layout == "dual";
     let s = crate::stitch::params(lens);
     let stab = stab_of(lens);
-    let mut st = Stitcher::new(&s, src.n() as f64, w as usize, h as usize, s.flow, rs_of(m, &stab));
+    let mut st = Stitcher::new(&s, src.n() as f64, w as usize, h as usize, s.precise(), rs_of(m, &stab));
     let tg = m.map(|m| targets(m, &stab)).unwrap_or_default();
     let fps = src.fps;
     let k0 = (start * fps).round().max(0.0) as usize;
@@ -978,7 +1006,11 @@ pub fn render_flat(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &Media
     };
     let setup = setup_fn(m, &tg, k0, &stab, &view);
     let mut args: Vec<String> = vec!["-ss".into(), format!("{:.3}", start.max(0.0)), "-t".into(), format!("{dur:.3}"), "-i".into(), info.path.clone(), "-map".into(), "0:v".into(), "-map".into(), "1:a:0?".into()];
-    args.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", "-f", "matroska"].iter().map(|x| x.to_string()));
+    // Only a stepping stone to the final encode: fast, and lossless when there is room for it.
+    let quality: &[&str] = if how.lossless { &["-qp", "0"] } else { &["-crf", "10"] };
+    args.extend(["-c:v", "libx264", "-preset", "ultrafast"].iter().map(|x| x.to_string()));
+    args.extend(quality.iter().map(|x| x.to_string()));
+    args.extend(["-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", "-f", "matroska"].iter().map(|x| x.to_string()));
     args.push(out.to_string_lossy().into_owned());
     let total = (dur * fps).max(1.0);
     pano::run::<u8>(ffmpeg, jobs, tag, gen, &src, &mut st, &setup, Sink::Encode { args }, |k| on(k as f64 / total))?;
@@ -1062,6 +1094,23 @@ pub fn sphere_run(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaI
 
 pub fn rotate_view(rot: M3, w: [f64; 3]) -> M3 {
     mmul(&rot, &expmap(w))
+}
+
+#[cfg(test)]
+mod flat_tests {
+    use super::*;
+
+    #[test]
+    fn lens_size_follows_the_view() {
+        // 1080p at 91° needs nearly all of a 3840 lens; a wide view or a small output much less.
+        let full = lens_px_for(193.4, 1920, 91.0, 3840);
+        assert!(full > 3300 && full <= 3840, "{full}");
+        assert!(lens_px_for(193.4, 1280, 91.0, 3840) < full);
+        assert!(lens_px_for(193.4, 1920, 130.0, 3840) < full);
+        assert_eq!(lens_px_for(193.4, 3840, 60.0, 3840), 3840);
+        assert_eq!(lens_px_for(193.4, 320, 130.0, 3840), 1024);
+        assert_eq!(lens_px_for(193.4, 1920, 91.0, 800) % 2, 0);
+    }
 }
 
 #[cfg(test)]

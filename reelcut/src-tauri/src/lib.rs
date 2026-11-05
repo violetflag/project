@@ -1,5 +1,6 @@
 mod analysis;
 mod args;
+mod logs;
 mod cc;
 mod faces;
 mod ff;
@@ -74,12 +75,6 @@ mod store_tests {
         assert!(!d.join("backups").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
-
-    #[test]
-    fn stamps_are_calendar_times() {
-        assert_eq!(stamp(0), "1970-01-01 00:00:00");
-        assert_eq!(stamp(1_793_880_000_000), "2026-11-05 12:00:00");
-    }
 }
 
 #[cfg(test)]
@@ -123,18 +118,8 @@ impl App {
         let _ = std::fs::create_dir_all(&d);
         d
     }
-    /// One line in `<data>/logs/reelcut.log` (UTC); the old file is kept once when it passes 5 MB.
     fn log(&self, kind: &str, text: &str) {
-        use std::io::Write;
-        let dir = self.data_dir.join("logs");
-        let _ = std::fs::create_dir_all(&dir);
-        let p = dir.join("reelcut.log");
-        if std::fs::metadata(&p).map(|m| m.len() > 5 << 20).unwrap_or(false) {
-            let _ = std::fs::rename(&p, dir.join("reelcut.old.log"));
-        }
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
-            let _ = writeln!(f, "{} [{kind}] {}", stamp(now_ms()), text.replace('\n', " "));
-        }
+        logs::log(kind, text);
     }
     fn store_dir(&self) -> PathBuf {
         let d = self.data_dir.join("store");
@@ -258,10 +243,6 @@ const BACKUP_VERSIONS: usize = 50;
 const BACKUP_DAYS: usize = 30;
 const BACKUP_EVERY_MS: u128 = 600_000;
 
-fn now_ms() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
-}
-
 /// `v-<ms>.json` copies of a project before it is replaced, at most one every ten minutes, plus
 /// the first copy of each day. The newest 50 and 30 stay.
 fn back_up(data: &Path, name: &str, current: &Path, now: u128) -> Result<(), String> {
@@ -293,21 +274,7 @@ fn back_up(data: &Path, name: &str, current: &Path, now: u128) -> Result<(), Str
     Ok(())
 }
 
-/// UTC time as "YYYY-MM-DD HH:MM:SS".
-fn stamp(ms: u128) -> String {
-    let secs = (ms / 1000) as i64;
-    let (day, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
-    // Days to a calendar date (Howard Hinnant's civil_from_days).
-    let z = day + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z.rem_euclid(146097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
-    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}", rem / 3600, rem / 60 % 60, rem % 60)
-}
+use logs::{now_ms, stamp};
 
 #[tauri::command]
 fn store_set(app: St<'_>, name: String, value: String) -> Result<(), String> {
@@ -647,6 +614,17 @@ async fn script_files(req: ScriptFiles) -> Result<Value, String> {
             }
             o => Err(format!("모르는 동작: {o}")),
         }
+    })
+    .await
+}
+
+/// Loudness of a stretch of a file, for the 소리 고르게 button.
+#[tauri::command]
+async fn loudness(app: St<'_>, path: String, start: f64, dur: f64) -> Result<Value, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let r = analysis::loudness(&app.bins.ffmpeg, &path, start, start + dur)?;
+        Ok(json!({ "i": r["lufs"], "peak": r["peak"], "range": r["range"] }))
     })
     .await
 }
@@ -1110,11 +1088,23 @@ fn export(handle: tauri::AppHandle, app: St<'_>, id: String, plan: render::Plan)
         let mut built = built;
         let t0 = std::time::Instant::now();
         let warnings: Mutex<Vec<String>> = Mutex::default();
+        let elog = logs::export_log_path(&id);
+        let note = |v: Value| {
+            if let Some(p) = &elog {
+                let _ = logs::append_jsonl(p, &v);
+            }
+        };
+        note(json!({ "t": stamp(now_ms()), "event": "start", "id": id, "clips": plan.segs.len(), "w": plan.width, "h": plan.height, "fps": plan.fps, "mode": plan.mode, "out": out2, "loudnorm": plan.loudnorm }));
         // 360 clips first go through Reelcut's 360 engine (seam per frame, stabilisation) into
         // flat pictures; the main render then treats them as ordinary clips.
-        let (pre_w, pre_end) = if n360 > 0 { (60.0, 60.0) } else { (0.0, 0.0) };
+        // The 360 stage is nearly all of the time (measured: 23 of 24 minutes).
+        let (pre_w, pre_end) = if n360 > 0 { (90.0, 90.0) } else { (0.0, 0.0) };
+        let started = std::time::Instant::now();
         if n360 > 0 {
-            match engine_prepass(&app, &tag, gen, &plan, &work, &warnings, |f| emit(&handle, &id, "export", f * pre_w, "running", "-1", json!({ "stage": "360" }))) {
+            match engine_prepass(&app, &tag, gen, &plan, &work, &warnings, |f| {
+                let left = if f > 0.01 { started.elapsed().as_secs_f64() * (1.0 - f) / f + 60.0 } else { -1.0 };
+                emit(&handle, &id, "export", f * pre_w, "running", &format!("{left:.0}"), json!({ "stage": "360" }))
+            }) {
                 Ok(Some(p2)) => match render::build(&p2, &hw, &graph_file.to_string_lossy(), app.ffmpeg_major() >= 7, has_ass, &part).and_then(|b| std::fs::write(&graph_file, &b.graph).map(|_| b).map_err(|e| e.to_string())) {
                     Ok(b) => built = b,
                     Err(e) => {
@@ -1138,6 +1128,7 @@ fn export(handle: tauri::AppHandle, app: St<'_>, id: String, plan: render::Plan)
         let t_final = std::time::Instant::now();
         if n360 > 0 {
             app.log("export", &format!("{id} 360 stage done in {:.1}s", t0.elapsed().as_secs_f64()));
+            note(json!({ "t": stamp(now_ms()), "event": "360-stage", "seconds": t0.elapsed().as_secs_f64() }));
         }
         app.log("export", &format!("{id} final pass: {}", built.args.join(" ")));
         let res = ff::run_ffmpeg_in(&app.jobs, &tag, gen, &app.bins.ffmpeg, &built.args, Some(&work), |p| {
@@ -1150,6 +1141,7 @@ fn export(handle: tauri::AppHandle, app: St<'_>, id: String, plan: render::Plan)
                 let _ = std::fs::rename(&part, &out2);
                 let size = std::fs::metadata(&out2).map(|m| m.len()).unwrap_or(0);
                 let check = probe::check(&app.bins.ffprobe, &out2).ok();
+                note(json!({ "t": stamp(now_ms()), "event": "done", "seconds": t0.elapsed().as_secs_f64(), "final_seconds": t_final.elapsed().as_secs_f64(), "duration": dur, "size": size, "warnings": *warnings.lock() }));
                 app.log("export", &format!("{id} done: {:.1} s of video in {:.1}s (final pass {:.1}s), {size} bytes", dur, t0.elapsed().as_secs_f64(), t_final.elapsed().as_secs_f64()));
                 let warn = match &check {
                     Some(c) if (c.duration - dur).abs() > 1.0 => format!("결과 길이({:.1}초)가 예상({:.1}초)과 다릅니다", c.duration, dur),
@@ -1159,6 +1151,7 @@ fn export(handle: tauri::AppHandle, app: St<'_>, id: String, plan: render::Plan)
                 emit(&handle, &id, "export", 100.0, "done", &warn, json!({ "path": out2, "size": size, "seconds": t0.elapsed().as_secs_f64(), "duration": dur, "warnings": *warnings.lock() }));
             }
             Err(e) => {
+                note(json!({ "t": stamp(now_ms()), "event": "ended", "error": e, "warnings": *warnings.lock() }));
                 app.log("export", &format!("{id} ended: {e}"));
                 let _ = std::fs::remove_file(&part);
                 emit(&handle, &id, "export", 0.0, if e == CANCELLED { "cancelled" } else { "error" }, &e, Value::Null);
@@ -1169,9 +1162,26 @@ fn export(handle: tauri::AppHandle, app: St<'_>, id: String, plan: render::Plan)
     Ok(out)
 }
 
+/// Oldest clips go first once the engine's kept clips pass `limit_mb`.
+fn prune_engine_cache(dir: &Path, limit_mb: u64) {
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| {
+        let m = e.metadata().ok()?;
+        Some((m.modified().ok()?, m.len(), e.path()))
+    }).collect();
+    files.sort_by_key(|f| f.0);
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    for (_, len, p) in files {
+        if total <= limit_mb << 20 {
+            break;
+        }
+        let _ = std::fs::remove_file(p);
+        total -= len;
+    }
+}
+
 /// Renders every 360 clip of the plan (main track and overlays) flat through the engine and
 /// returns the plan with those clips pointing at the results; None when nothing needed it.
-fn engine_prepass(app: &App, tag: &str, gen: u64, plan: &render::Plan, work: &Path, warnings: &Mutex<Vec<String>>, on: impl Fn(f64)) -> Result<Option<render::Plan>, String> {
+fn engine_prepass(app: &App, tag: &str, gen: u64, plan: &render::Plan, work: &Path, warnings: &Mutex<Vec<String>>, on: impl Fn(f64) + Sync) -> Result<Option<render::Plan>, String> {
     use media::View;
     struct Job {
         main: bool,
@@ -1198,36 +1208,108 @@ fn engine_prepass(app: &App, tag: &str, gen: u64, plan: &render::Plan, work: &Pa
     if jobs.is_empty() {
         return Ok(None);
     }
-    let total: f64 = jobs.iter().map(|j| j.dur.max(0.1)).sum();
-    let mut done = 0.0;
-    let mut p2 = plan.clone();
+    let total_frames: f64 = jobs.iter().map(|j| j.dur.max(0.1)).sum();
     let (w, h) = (plan.width.max(16) & !1, plan.height.max(16) & !1);
+    let gpu = app.hw().tested.iter().any(|(n, ok)| n.ends_with("_qsv") && *ok);
+    // Room for lossless stepping stones (about 3 bits per pixel), or else lossy ones.
+    let est_mb = total_frames * plan.fps * (w as f64 * h as f64 * 3.0 / 8.0) / 1_048_576.0;
+    let lossless = hw::free_mb(work) as f64 >= 2.0 * est_mb;
+    if !lossless {
+        warnings.lock().push("디스크 공간이 적어 중간 파일을 작게 만들었습니다".into());
+    }
+    let workers = hw::clip_workers(hw::avail_mb(), gpu).min(jobs.len()).max(1);
+    app.log("export", &format!("360 stage: {} clips, {workers} at once, gpu {gpu}, lossless {lossless}", jobs.len()));
+    // Each recording's motion once, before the clips share it.
+    let mut prepared = Vec::with_capacity(jobs.len());
     for (n, j) in jobs.iter().enumerate() {
         let info = media::inspect(&app.bins.ffprobe, &j.path)?;
         if !motion::engine_lens(&info, &j.lens) {
+            prepared.push(None);
             continue;
         }
-        let share = j.dur.max(0.1) / total;
-        // Analysis (only the first time for a recording) counts as a fifth of the clip's share.
-        let m = motion::motion_for(&app.dir("motion"), &app.bins.ffmpeg, &app.bins.ffprobe, &app.jobs, tag, gen, &info, &j.lens, &file_key(&j.path), |f| on((done + f * share * 0.2) / 1.0))?;
+        let m = motion::motion_for(&app.dir("motion"), &app.bins.ffmpeg, &app.bins.ffprobe, &app.jobs, tag, gen, &info, &j.lens, &file_key(&j.path), |f| on(f * 0.02))?;
         if m.is_none() && motion::stab_of(&j.lens).mode != "off" {
-            let w = format!("흔들림 정보가 없어 {} 클립은 보정 없이 내보냈습니다", n + 1);
+            let w = format!("흔들림 정보가 없어 {} 번째 360 클립은 보정 없이 내보냈습니다", n + 1);
             app.log("export", &w);
             warnings.lock().push(w);
         }
+        prepared.push(Some((info, m)));
+    }
+    let done: Mutex<Vec<f64>> = Mutex::new(vec![0.0; jobs.len()]);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<Result<std::path::PathBuf, String>>>> = Mutex::new((0..jobs.len()).map(|_| None).collect());
+    let cache_dir = app.dir("engine-cache");
+    let worker = || loop {
+        let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n >= jobs.len() {
+            return;
+        }
+        let j = &jobs[n];
+        let Some((info, m)) = &prepared[n] else { continue };
         let mut keys = j.keys.clone();
         keys.sort_by(|a, b| a.t.total_cmp(&b.t));
         let still = j.view.clone().unwrap_or(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0 });
+        let hfov_min = keys.iter().map(|k| k.view.hfov).fold(if keys.is_empty() { still.hfov } else { f64::MAX }, f64::min);
+        let lens_files = info.videos.first().map(|v| v.width).unwrap_or(info.width / 2);
+        let how = motion::FlatOptions { lens_px: Some(motion::lens_px_for(stitch::params(&j.lens).fov, w, hfov_min, lens_files)), gpu, lossless };
         // Prepared once: the engine asks for the view on every frame (clips may carry 20 000 keys).
         let curve = framing::Curve::new(&keys);
         let view_at = move |t: f64| if keys.len() >= 2 { curve.at(t) } else if keys.len() == 1 { framing::norm_view(&keys[0].view) } else { framing::norm_view(&still) };
-        let out = work.join(format!("360-{n}.mkv"));
-        let base = done + share * 0.2;
-        let t_clip = std::time::Instant::now();
-        motion::render_flat(&app.bins.ffmpeg, &app.jobs, tag, gen, &info, &j.lens, m.as_ref(), j.start, j.dur, j.speed, w, h, &view_at, &out, |f| on(base + f * share * 0.8))?;
-        let took = t_clip.elapsed().as_secs_f64();
-        app.log("export", &format!("360 clip {n}: source {:.2}+{:.2}s in {took:.1}s ({:.1} fps, {}x{w}x{h} flow {})", j.start, j.dur, j.dur * info.fps / took.max(0.001), stitch::params(&j.lens).fov, stitch::params(&j.lens).flow));
-        done += share;
+        let share = j.dur.max(0.1) / total_frames;
+        let report = |f: f64| {
+            let mut d = done.lock();
+            d[n] = f * share;
+            on(0.02 + d.iter().sum::<f64>() * 0.98);
+        };
+        let key = hash(&serde_json::to_string(&json!({ "v": motion::ENGINE_VERSION, "path": j.path, "size": info.size, "lens": j.lens, "keys": j.keys, "view": j.view, "start": j.start, "dur": j.dur, "speed": j.speed, "w": w, "h": h })).unwrap_or_default());
+        let cached = cache_dir.join(format!("{key:x}.mkv"));
+        let result = if cached.is_file() {
+            report(1.0);
+            app.log("export", &format!("360 clip {n}: already made, reusing it"));
+            Ok(cached)
+        } else {
+            let tmp = work.join(format!("360-{n}.mkv"));
+            let t_clip = std::time::Instant::now();
+            let first = motion::render_flat(&app.bins.ffmpeg, &app.jobs, tag, gen, info, &j.lens, m.as_ref(), j.start, j.dur, j.speed, w, h, &how, &view_at, &tmp, &report);
+            let run = match first {
+                Err(e) if how.gpu && e != CANCELLED => {
+                    let w0 = format!("{n}번 360 클립을 그래픽 칩으로 풀지 못해 CPU로 다시 처리했습니다: {}", logs::tail_lines(&e, 2));
+                    app.log("export", &w0);
+                    warnings.lock().push(w0);
+                    let soft = motion::FlatOptions { gpu: false, ..how.clone() };
+                    motion::render_flat(&app.bins.ffmpeg, &app.jobs, tag, gen, info, &j.lens, m.as_ref(), j.start, j.dur, j.speed, w, h, &soft, &view_at, &tmp, &report)
+                }
+                other => other,
+            };
+            run.map(|_| {
+                let took = t_clip.elapsed().as_secs_f64();
+                app.log("export", &format!("360 clip {n}: source {:.2}+{:.2}s in {took:.1}s ({:.1} fps, lens {:?}, seam {})", j.start, j.dur, j.dur * info.fps / took.max(0.001), how.lens_px, if stitch::params(&j.lens).precise() { "flow" } else { "linear" }));
+                // Kept for the next export with the same clip; the work folder goes away.
+                if std::fs::rename(&tmp, &cached).is_ok() { cached } else { tmp }
+            })
+        };
+        report(1.0);
+        let stop = result.is_err();
+        results.lock()[n] = Some(result);
+        if stop {
+            app.jobs.cancel(tag);
+            return;
+        }
+    };
+    std::thread::scope(|sc| {
+        for _ in 0..workers {
+            sc.spawn(&worker);
+        }
+    });
+    prune_engine_cache(&cache_dir, 20 * 1024);
+    let mut p2 = plan.clone();
+    let results = results.into_inner();
+    for (n, j) in jobs.iter().enumerate() {
+        let out = match &results[n] {
+            Some(Ok(p)) => p.clone(),
+            Some(Err(e)) => return Err(e.clone()),
+            None => continue,
+        };
         let path = out.to_string_lossy().into_owned();
         let flat_tf = |t: &Option<render::Transform>| t.clone().map(|t| render::Transform { rotation: 0.0, crop_l: 0.0, crop_r: 0.0, crop_t: 0.0, crop_b: 0.0, ..t });
         if j.main {
@@ -1419,6 +1501,7 @@ pub fn run() {
             let res = app.path().resource_dir().ok();
             let home = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("reelcut"));
             let data_dir = resolve_data_dir(&home);
+            logs::init(&data_dir);
             let cache_dir = app.path().app_cache_dir().unwrap_or_else(|_| std::env::temp_dir().join("reelcut-cache"));
             let _ = std::fs::create_dir_all(&data_dir);
             let _ = std::fs::create_dir_all(&cache_dir);
@@ -1472,6 +1555,7 @@ pub fn run() {
             find_faces,
             scan_gaze,
             measure,
+            loudness,
             script_files,
             dir_exists,
             track_people,
