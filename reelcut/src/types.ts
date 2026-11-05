@@ -24,7 +24,8 @@ export type Stab = { mode: "horizon" | "lock" | "smooth" | "off"; strength: numb
 /** What the stabilisation analysis found (gyro in the file, or the picture). */
 export type MotionInfo = { source: string; note: string; readout: number; product: string };
 export type Lens = { layout: string; swap: boolean; fov: number; stitch?: Stitch | null; stab?: Stab | null };
-export type View = { yaw: number; pitch: number; roll: number; hfov: number };
+/** 360 view. dist 0..1: projection from ordinary lens (0) to stereographic (1), see src/proj.ts. */
+export type View = { yaw: number; pitch: number; roll: number; hfov: number; dist?: number };
 export type Word = { s: number; e: number; t: string };
 export type Hw = {
   threads: number; gpus: string[]; ffmpeg_version: string; tested: [string, boolean][];
