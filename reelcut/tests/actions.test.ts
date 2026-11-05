@@ -172,10 +172,10 @@ describe("what the AI may change", () => {
   it("refuses to change a view, keys or sound the user set by hand unless it says override_user", () => {
     const d = draftWith([clip("c1", { userSet: { view: 1, volume: 1 } }), clip("c2")]);
     openProject(d);
-    expect(() => applyOps(d, [{ op: "set", clip_id: "c1", view: { yaw: 30 } }])).toThrow("사용자 지정 항목");
+    expect(() => applyOps(d, [{ op: "set", clip_id: "c1", view: { yaw: 30 } }])).toThrow("사용자가 직접 정한 항목");
     expect(() => applyOps(d, [{ op: "set", clip_id: "c1", volume: 0.2 }])).toThrow("override_user");
-    expect(() => applyOps(d, [{ op: "set_view_keys", clip_id: "c1", keys: [{ t: 0, yaw: 10 }] }])).toThrow("사용자 지정");
-    expect(() => applyOps(d, [{ op: "clear_view_keys", clip_id: "c1" }])).toThrow("사용자 지정");
+    expect(() => applyOps(d, [{ op: "set_view_keys", clip_id: "c1", keys: [{ t: 0, yaw: 10 }] }])).toThrow("사용자가 직접 정한");
+    expect(() => applyOps(d, [{ op: "clear_view_keys", clip_id: "c1" }])).toThrow("사용자가 직접 정한");
     expect(applyOps(d, [{ op: "set", clip_id: "c1", view: { yaw: 30 }, override_user: true }]).clips[0].view!.yaw).toBe(30);
     expect(applyOps(d, [{ op: "set", clip_id: "c1", speed: 2 }]).clips[0].speed).toBe(2);
     expect(applyOps(d, [{ op: "set", clip_id: "c2", view: { yaw: 30 } }]).clips[1].view!.yaw).toBe(30);

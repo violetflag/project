@@ -68,7 +68,7 @@ const SYSTEM = `당신은 Reelcut의 영상 편집 에이전트입니다. Reelcu
 - 끝나면 무엇을 했는지 2~4문장으로 알려 주세요. 편집본 길이, 잘라 낸 양처럼 확인한 숫자를 말하세요.
 
 ## 사용자가 직접 한 작업
-사용자가 상단 버튼이나 직접 편집으로 한 작업은 <user-actions>와 '켜져 있는 것' 줄에 나옵니다. 그 결과를 유지한 채 이어서 작업하세요. '사용자 지정' 표시가 있는 클립의 시점·화각·흔들림·소리는 사용자가 분명히 요청하지 않으면 바꾸지 마세요. '시점'이 사용자 지정이면 그 클립은 시점 작업에서 빼고, '화각'만 사용자 지정이면 방향은 맞춰도 되고 화각은 자동으로 유지됩니다. 꼭 바꿔야 하면 override_user: true와 이유를 함께 보내세요. 360 시점은 pitch를 -30~+30 안에서 고르고 수평선이 화면에 보이게 하세요. 더 넓게 보여야 하면 hfov를 직접 키우지 말고 quick_action의 view.wide나 view.ultra를 쓰세요. 컷이 바뀔 때 같은 녹화의 방향을 45도 넘게 갑자기 바꾸지 마세요. 버튼과 같은 작업은 quick_action으로 하세요. 사용자가 전에 무엇을 했는지 물으면 get_activity_log를 보세요.`;
+사용자가 상단 버튼이나 직접 편집으로 한 작업은 <user-actions>와 '켜져 있는 것' 줄에 나옵니다. 그 결과를 유지한 채 이어서 작업하세요. '사용자 지정' 표시가 있는 클립의 시점·화각·흔들림·소리는 사용자가 분명히 요청하지 않으면 바꾸지 마세요. '시점'이 사용자 지정이면 그 클립은 시점 작업에서 빼고, '화각'만 사용자 지정이면 방향은 맞춰도 되고 화각은 자동으로 유지됩니다. "전체", "다시 손봐", "다듬어"처럼 넓은 요청은 바꾸라는 뜻이 아닙니다: 그 클립은 그대로 두고 답에 어느 클립을 왜 그대로 두었는지 적으세요. 사용자가 이번 메시지에서 그 클립의 그 항목을 콕 집어 바꾸라고 했을 때만 override_user: true를 보내세요. 360 시점은 pitch를 -30~+30 안에서 고르고 수평선이 화면에 보이게 하세요. 더 넓게 보여야 하면 hfov를 직접 키우지 말고 quick_action의 view.wide나 view.ultra를 쓰세요. 컷이 바뀔 때 같은 녹화의 방향을 45도 넘게 갑자기 바꾸지 마세요. 버튼과 같은 작업은 quick_action으로 하세요. 사용자가 전에 무엇을 했는지 물으면 get_activity_log를 보세요.`;
 
 const num = { type: "number" };
 const str = { type: "string" };
@@ -255,7 +255,7 @@ export const TOOLS = [
           items: { type: "object", properties: { name: str, marks: { type: "array", items: { type: "array", items: num } } }, required: ["marks"] },
         },
         track: { type: "boolean", description: "표시를 시작점으로 얼굴·머리를 자동 추적해 0.2초 단위로 다듬습니다(기본 켬, 구간 3분 이하). 표시가 몇 개뿐이어도 따라갑니다." },
-        allow_steep, override_user: { type: "boolean", description: "사용자가 직접 맞춘 시점·고른 화각을 바꿔 달라고 분명히 요청했을 때만 true" },
+        allow_steep, override_user: { type: "boolean", description: "사용자가 이번 메시지에서 이 클립의 시점·화각을 콕 집어 바꾸라고 했을 때만 true. '전체 다시 손봐' 같은 넓은 요청에는 쓰지 않습니다" },
         hfov: { ...num, description: "화각. 보통 비워 둡니다(16:9는 91, 9:16은 56). 사용자가 버튼으로 고른 화각은 자동으로 유지됩니다" }, headroom: { ...num, description: "머리 위 여백 비율(기본 0.33)" },
         step: { ...num, description: "키 간격 초(기본 0.1)" }, smooth: { ...num, description: "부드럽게 하는 정도 초(기본 0.4, 0이면 끔)" },
         from: num, to: num,
@@ -442,7 +442,7 @@ function userSetNote(c: Clip): string {
 }
 /** The AI may change what the user set by hand only when it says so (override_user). */
 function guardUser(c: Clip, field: keyof typeof USER_FIELD, o: any) {
-  if (c.userSet?.[field] && !o.override_user) throw new Error(`클립 ${c.id}의 ${USER_FIELD[field]}은(는) 사용자 지정 항목입니다: override_user와 이유가 필요합니다`);
+  if (c.userSet?.[field] && !o.override_user) throw new Error(`클립 ${c.id}의 ${USER_FIELD[field]}은(는) 사용자가 직접 정한 항목입니다. 이 클립은 건너뛰고 답에 그렇게 적으세요. 사용자가 이번 메시지에서 이 클립의 그 항목을 콕 집어 바꾸라고 했을 때만 override_user: true를 보내세요`);
 }
 
 export function applyOps(d: Draft, ops: any[]): Draft {

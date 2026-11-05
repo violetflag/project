@@ -1632,6 +1632,7 @@ pub fn run() {
             project::project_root,
             project::project_pack,
             project::project_unpack,
+            project::project_unpack_drop,
             project::diag_bundle,
             project::project_set_root,
             project::project_backup,

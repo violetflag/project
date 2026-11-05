@@ -23,8 +23,9 @@ const msg = (e: unknown) => String((e as Error)?.message ?? e);
  */
 export async function openProjectFile(path: string): Promise<boolean> {
   let r: Awaited<ReturnType<typeof api.projectOpen>>;
+  let unpacked: string | null = null;
   try {
-    if (isPack(path)) path = (await api.projectUnpack(path)).file;
+    if (isPack(path)) { const u = await api.projectUnpack(path); path = u.file; unpacked = u.folder; }
     r = await api.projectOpen(path, localStamp());
   } catch (e) {
     toast(`프로젝트를 열 수 없습니다: ${msg(e)}`);
@@ -46,6 +47,8 @@ export async function openProjectFile(path: string): Promise<boolean> {
   if (!cur || (p.updated ?? 0) > (cur.updated ?? 0)) await api.projectSave(p.id, JSON.stringify(p), localIso());
   await loadProjects();
   await openProject(p.id);
+  // On the PC that has the project, the pack opened as a copy with a folder of its own.
+  if (unpacked && r.conflict) await api.projectUnpackDrop(unpacked).catch(() => {});
   if (r.backup && !r.conflict && st.project?.id === p.id) {
     set({ dialog: "backups", backupPick: r.backup });
     toast("백업 파일은 프로젝트를 연 뒤 '되살리기'로 되돌립니다");

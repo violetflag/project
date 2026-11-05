@@ -1403,6 +1403,23 @@ pub async fn project_unpack(app: super::St<'_>, handle: tauri::AppHandle, path: 
     .await
 }
 
+/// A pack opened on the PC that already has its project: the project opened as a copy with a folder
+/// of its own, so the folder just unpacked goes. Only a project folder right under the root.
+#[tauri::command]
+pub async fn project_unpack_drop(app: super::St<'_>, handle: tauri::AppHandle, folder: String) -> Result<(), String> {
+    let app = app.inner().clone();
+    super::blocking(move || {
+        let (docs, home) = places(&handle);
+        let root = with_reg(&app.data_dir, |r| r.root(docs.as_deref(), &home));
+        let dir = PathBuf::from(&folder);
+        if dir.parent() != Some(root.as_path()) || !is_project_folder(&dir) {
+            return Err(format!("{folder}: 풀어 놓은 폴더가 아닙니다"));
+        }
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("{folder}: {e}"))
+    })
+    .await
+}
+
 /// 도움말 > 진단 파일 만들기: the logs only, no pictures or conversations.
 #[tauri::command]
 pub async fn diag_bundle(app: super::St<'_>, dest: String) -> Result<Value, String> {
