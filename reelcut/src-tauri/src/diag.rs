@@ -12,7 +12,8 @@ const H: u32 = 540;
 
 fn psnr(ffmpeg: &Path, a: &Path, b: &Path, crop: Option<(u32, u32)>) -> Result<f64, String> {
     let c = crop.map(|(w, x)| format!("crop={w}:{H}:{x}:0,")).unwrap_or_default();
-    let g = format!("[0]{c}format=gray[x];[1]{c}format=gray[y];[x][y]psnr");
+    // `b` is the export's larger picture, brought down to the preview's size.
+    let g = format!("[0]{c}format=gray[x];[1]scale={W}:{H}:flags=area,{c}format=gray[y];[x][y]psnr");
     let o = ff::command(ffmpeg)
         .args(["-hide_banner", "-nostdin", "-i"])
         .arg(a)
@@ -72,7 +73,7 @@ pub fn parity(ffmpeg: &Path, jobs: &ff::Jobs, info: &MediaInfo, lens: &Lens, tim
             let look = move |_t: f64| (rot, Some((view.hfov, 0.0)));
             let d2 = dir.join(&name);
             std::fs::create_dir_all(&d2).map_err(|e| e.to_string())?;
-            let shots = motion::stills(ffmpeg, jobs, "diag", gen, info, &flat, None, &[t], W, H, &look, &|_| "null".to_string(), &d2)?;
+            let shots = motion::stills(ffmpeg, jobs, "diag", gen, info, &flat, None, &[t], W * 2, H * 2, &look, &|_| "null".to_string(), &d2)?;
             let eng = shots.first().ok_or("엔진 그림이 없습니다")?;
             // Middle of the frame, as wide as the blend plus a margin.
             let px = ((band * 1.5 / 100.0 * W as f64) as u32).clamp(32, W) & !1;

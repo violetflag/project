@@ -269,7 +269,7 @@ pub fn graph(i: usize, lens: &Lens, scale_each: Option<u32>, pre: &str, out: &Ou
         }
         Out::Equi { w, h } => {
             let (y, p, r) = back_angles(&View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 90.0, dist: 0.0 }, &s);
-            (format!("output=equirect:w={w}:h={h}:yaw={:.3}:pitch={:.3}:roll={:.3}", wrap180(y), p, r), format!("output=equirect:w={w}:h={h}"), None, format!(",scale={w}:{h}:flags=bilinbor"))
+            (format!("output=equirect:w={w}:h={h}:yaw={:.3}:pitch={:.3}:roll={:.3}", wrap180(y), p, r), format!("output=equirect:w={w}:h={h}"), None, format!(",scale={w}:{h}:flags=bilinear"))
         }
     };
     let lut = |gn: &[f64; 3]| gain_lut(gn).map(|l| format!(",{l}")).unwrap_or_default();
@@ -692,7 +692,7 @@ mod tests {
         assert!(g.starts_with("[0:v:0]null[x_fa];[0:v:1]split=2[x_fb][x_ft];"), "{g}");
         assert!(g.contains("v360@xa=input=fisheye:ih_fov=190.000:iv_fov=190.000:output=flat:h_fov=100.000:v_fov=67.673:yaw=-90.000"), "{g}");
         assert!(g.contains("v360@xb=input=fisheye:ih_fov=190.000:iv_fov=190.000:output=flat:h_fov=100.000:v_fov=67.673:yaw=90.000"), "{g}");
-        assert!(g.contains("geq=lum='255*clip((92.5000-abs((X+0.5)/W*360-180))/5.0000,0,1)'"), "{g}");
+        assert!(g.contains("geq=lum='255*clip((asin(cos((0.5-(Y+0.5)/H)*PI)*cos(((X+0.5)/W*2-1)*PI))*180/PI+5.0000/2)/5.0000,0,1)'"), "{g}");
         assert!(g.ends_with("[x_A][x_B][x_M]maskedmerge[x]"), "{g}");
     }
 
@@ -705,7 +705,7 @@ mod tests {
         assert!(g.contains("[sb_l]crop=iw/2:ih:iw/2:0,scale=1024:1024:flags=area,null[sb_fa];[sb_r]crop=iw/2:ih:0:0"), "{g}");
         assert!(g.contains("output=equirect:w=2048:h=1024:yaw=180.000"), "{g}");
         assert!(g.contains("lutyuv=y='clip(val*1.0500,0,255)':u='clip(val+1.00,0,255)':v='clip(val+-2.00,0,255)'"), "{g}");
-        assert!(g.contains(",scale=2048:1024:flags=neighbor[sb_M]"), "{g}");
+        assert!(g.contains(",scale=2048:1024:flags=bilinear[sb_M]"), "{g}");
     }
 
     #[test]
