@@ -5,7 +5,7 @@ import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chain
 import { applyVerdicts, badSpans, capView, closeShortPieces, easePitch, frameGroup, frameSubject, maxFov, normView, percentOk, pitchLimit, project, smoothViewAt, saneMarks, subjectLooks, thinMarks } from "../src/framing";
 import { PEOPLE_360_RULE, PLAYBOOK_360 } from "../src/playbook";
 import { TOOLS } from "../src/agent";
-import { aiExportSound, DEFAULT_CHOICE, rememberedChoice } from "../src/exporter";
+import { aiExportSound, DEFAULT_CHOICE, rememberedChoice, sourceLimits } from "../src/exporter";
 import { isEmptyProject, type Meta } from "../src/store";
 import { NOT_IN_SCRIPT, SDK, transpileScript } from "../src/script";
 import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
@@ -596,6 +596,21 @@ describe("nothing is lost by accident", () => {
     const c = rememberedChoice({ ...DEFAULT_CHOICE, name: "a", loudnorm: false });
     expect(c.loudnorm).toBe(false);
     expect("name" in c).toBe(false);
+  });
+  it("exports small, at the footage's size up to 4K and its rate up to 60 fps, by default", () => {
+    expect(DEFAULT_CHOICE).toMatchObject({ mode: "shrink", quality: "auto", preset: "small", fps: 0 });
+    const video = (id: string, w: number, h: number, fps: number, extra = {}): any => [id, { id, info: { kind: "video", width: w, height: h, fps, layout360: "none", videos: [{ width: w }], ...extra } }];
+    const am = new Map<string, any>([video("uhd60", 3840, 2160, 60), video("fhd30", 1920, 1080, 29.97), video("big120", 7680, 4320, 120), video("tall", 1080, 1920, 30), video("osv", 3840, 3840, 29.97, { layout360: "dual" }), video("lrf", 1440, 720, 30, { layout360: "dfisheye" })]);
+    const of = (...ids: string[]) => sourceLimits({ fps: 30, clips: ids.map((a) => ({ id: a, asset: a })), overlays: [] } as any, am);
+    expect(of("uhd60")).toEqual({ short: 2160, fps: 60 });
+    expect(of("fhd30")).toEqual({ short: 1080, fps: 29.97 });
+    expect(of("big120")).toEqual({ short: 2160, fps: 60 });
+    expect(of("tall")).toEqual({ short: 1080, fps: 30 });
+    expect(of("osv")).toEqual({ short: 2160, fps: 29.97 });
+    expect(of("fhd30", "uhd60")).toEqual({ short: 2160, fps: 60 });
+    expect(of().short).toBe(1080);
+    // The sound choices come back; the picture ones start from the default each run.
+    expect(Object.keys(rememberedChoice({ loudnorm: true, duck: false, srt: false })).sort()).toEqual(["duck", "loudnorm", "srt"]);
   });
   it("has no AI tool that deletes a project or a conversation", () => {
     const names = TOOLS.map((t) => t.name);

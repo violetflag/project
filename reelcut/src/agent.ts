@@ -329,8 +329,8 @@ export const TOOLS = [
   },
   { name: "delete_draft", description: "편집본을 지웁니다 (마지막 하나는 지울 수 없고, Ctrl+Z로 되돌릴 수 있습니다).", input_schema: { type: "object", properties: { draft_id: str }, required: ["draft_id"] } },
   {
-    name: "export_draft", description: "편집본을 파일로 내보냅니다 (끝날 때까지 기다림). preset: fhd/4k/hd/sd는 일반 H.264 MP4, shrink_balanced/shrink_small/shrink_archive/shrink_lecture는 크기를 많이 줄이는 고압축(AV1/HEVC), audio는 WAV 소리만.",
-    input_schema: { type: "object", properties: { srt: { type: "boolean", description: "자막 파일(SRT)도 같이 저장" }, draft_id: draftId, preset: { type: "string", enum: ["4k", "fhd", "hd", "sd", "shrink_archive", "shrink_balanced", "shrink_small", "shrink_lecture", "audio"] }, file_name: { ...str, description: "파일 이름이나 전체 경로. 전체 경로의 폴더가 있으면 거기에, 없으면 내보내기 폴더에 저장합니다. 같은 이름이 있으면 덮어쓰지 않고 번호를 붙입니다." } }, required: ["preset"] },
+    name: "export_draft", description: "편집본을 파일로 내보냅니다 (끝날 때까지 기다림). 사용자가 화질을 말하지 않으면 preset을 비우세요: 기본은 작게(고압축), 원본 해상도 최대 4K, 원본 프레임 레이트 최대 60fps이고 원본보다 키우지 않습니다. preset을 정할 때: fhd/4k/hd/sd는 일반 H.264 MP4, shrink_balanced/shrink_small/shrink_archive/shrink_lecture는 고압축(AV1/HEVC, 원본 해상도), audio는 WAV 소리만.",
+    input_schema: { type: "object", properties: { srt: { type: "boolean", description: "자막 파일(SRT)도 같이 저장" }, draft_id: draftId, preset: { type: "string", enum: ["4k", "fhd", "hd", "sd", "shrink_archive", "shrink_balanced", "shrink_small", "shrink_lecture", "audio"] }, file_name: { ...str, description: "파일 이름이나 전체 경로. 전체 경로의 폴더가 있으면 거기에, 없으면 내보내기 폴더에 저장합니다. 같은 이름이 있으면 덮어쓰지 않고 번호를 붙입니다." } }, required: [] },
   },
   {
     name: "quick_action", description: `상단 버튼과 똑같은 작업을 합니다. 사용자가 누른 것처럼 작업 기록에 남고 Ctrl+Z 한 번으로 되돌아갑니다. 이미 된 것이면 '이미 적용됨'을 돌려줍니다.
@@ -1165,14 +1165,14 @@ async function runTool(name: string, inp: any): Promise<Out> {
     }
     case "export_draft": {
       const d = getDraft(inp.draft_id);
-      const pr = String(inp.preset);
+      const pr = String(inp.preset || "shrink_small");
       const shrink = pr.startsWith("shrink_");
       const given = splitOutName(String(inp.file_name ?? ""));
       const noFolder = given.dir && !(await api.dirExists(given.dir)) ? given.dir : "";
       set({ agentStatus: "내보내는 중…" });
       const e = await exportAndWait(d, {
-        mode: pr === "audio" ? "audio" : shrink ? "shrink" : "standard", quality: shrink ? "fhd" : pr, preset: shrink ? pr.slice(7) : "balanced",
-        codec: "auto", container: "mkv", dir: noFolder ? "" : given.dir, name: given.name, srt: !!inp.srt, ...aiExportSound(st.settings.lastExport),
+        mode: pr === "audio" ? "audio" : shrink ? "shrink" : "standard", quality: shrink ? "auto" : pr, preset: shrink ? pr.slice(7) : "balanced",
+        codec: "auto", container: "mp4", dir: noFolder ? "" : given.dir, name: given.name, srt: !!inp.srt, ...aiExportSound(st.settings.lastExport),
       });
       if (e.state !== "done") return `내보내기 실패: ${e.message}`;
       const warned: string[] = e.result.warnings ?? [];

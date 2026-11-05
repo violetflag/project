@@ -3,10 +3,10 @@
 import { aiActive, logAction } from "./actionlog";
 import { api } from "./api";
 import { draftCaptions, toAss, toSrt } from "./captions";
-import { draftDuration, draftWords, outSize, rangeDraft, toPlan, uid } from "./edit";
+import { draftDuration, draftWords, is360, isGap, outSize, overlays, rangeDraft, toPlan, uid } from "./edit";
 import { pickCodec, QUALITIES, SHRINK, shrinkSettings } from "./presets";
 import { assetMap, set, st, toast } from "./store";
-import type { Draft, JobEvent } from "./types";
+import type { Asset, Draft, JobEvent } from "./types";
 
 export type ExportChoice = {
   /** Also save the captions as an .srt next to the video. */
@@ -33,12 +33,42 @@ export type ExportChoice = {
   purpose?: string;
 };
 
-// Matches the "유튜브 FHD" purpose it starts on.
-export const DEFAULT_CHOICE: ExportChoice = { mode: "standard", quality: "fhd", preset: "balanced", codec: "auto", container: "mkv", dir: "", name: "", kbps: 0, abr: 256, fps: 0, loudnorm: true, duck: false, range: false, purpose: "yt-fhd" };
+// 작게, at the footage's own size up to 4K and its own frame rate up to 60: `sourceLimits`.
+export const DEFAULT_CHOICE: ExportChoice = { mode: "shrink", quality: "auto", preset: "small", codec: "auto", container: "mp4", dir: "", name: "", kbps: 0, abr: 256, fps: 0, loudnorm: true, duck: false, range: false, purpose: "small" };
 
-/** The choices worth remembering between exports (not the name, folder or range of one export). */
-export function rememberedChoice(c: ExportChoice) {
-  return { loudnorm: c.loudnorm, duck: c.duck, quality: c.quality, preset: c.preset, mode: c.mode, audioFormat: c.audioFormat, codec: c.codec, container: c.container, srt: c.srt };
+/** The short side of the picture a file can fill without being enlarged. A 360 file: its lens decides. */
+function sourceShort(a: Asset): number {
+  const { width, height, layout360, videos } = a.info;
+  if (is360(a)) {
+    const lens = layout360 === "dual" ? videos[0]?.width ?? width / 2 : layout360 === "dfisheye" ? height : width / 2;
+    return Math.round((lens * 9) / 16);
+  }
+  return Math.min(width, height);
+}
+
+/** What the draft's footage has, at most 4K and 60 fps: the default export never goes above it. */
+export function sourceLimits(d: Draft, assets: Map<string, Asset>): { short: number; fps: number } {
+  let short = 0, fps = 0;
+  for (const c of [...d.clips.filter((x) => !isGap(x) && !x.disabled), ...overlays(d).filter((x) => !x.disabled)]) {
+    const a = assets.get(c.asset);
+    if (!a || a.info.kind === "audio") continue;
+    short = Math.max(short, sourceShort(a));
+    if (a.info.kind === "video") fps = Math.max(fps, a.info.fps || 0);
+  }
+  return { short: short ? Math.min(2160, Math.round(short / 2) * 2) : 1080, fps: fps ? Math.min(60, fps) : d.fps || 30 };
+}
+
+/** The quality picked, with "원본 그대로" worked out for this draft. */
+export function qualityOf(d: Draft, id: string) {
+  const q = QUALITIES.find((x) => x.id === id) ?? QUALITIES.find((x) => x.id === "fhd")!;
+  if (q.id !== "auto") return q;
+  const { short } = sourceLimits(d, assetMap());
+  return { ...q, short, kbps: short >= 2160 ? 32000 : short >= 1440 ? 16000 : short >= 1080 ? 8000 : short >= 720 ? 5000 : 2000 };
+}
+
+/** The choices worth remembering between runs of the app: the sound ones. Each export starts from the default otherwise. */
+export function rememberedChoice(c: Pick<ExportChoice, "loudnorm" | "duck" | "srt">) {
+  return { loudnorm: c.loudnorm, duck: c.duck, srt: c.srt };
 }
 
 /** What an AI export of a given quality uses: the user's saved sound choices, else the dialog's defaults. */
@@ -48,12 +78,12 @@ export function aiExportSound(saved: { loudnorm?: boolean; duck?: boolean } | un
 
 /** Purpose presets: what most people pick from. */
 export const PURPOSES: { id: string; label: string; desc: string; aspect?: string; choice: Partial<ExportChoice> }[] = [
+  { id: "small", label: "작게 (기본)", desc: "원본 화질, 최대 4K·60fps · AV1/HEVC", choice: { mode: "shrink", quality: "auto", preset: "small", container: "mp4" } },
   { id: "yt-4k", label: "유튜브 4K", desc: "3840×2160 · H.264 32Mbps", aspect: "16:9", choice: { mode: "standard", quality: "4k", loudnorm: true } },
   { id: "yt-fhd", label: "유튜브 FHD", desc: "1920×1080 · H.264 8Mbps", aspect: "16:9", choice: { mode: "standard", quality: "fhd", loudnorm: true } },
   { id: "shorts", label: "쇼츠·릴스", desc: "1080×1920 세로 · H.264", aspect: "9:16", choice: { mode: "standard", quality: "fhd", loudnorm: true } },
   { id: "insta", label: "인스타 피드", desc: "1080×1350 · H.264", aspect: "4:5", choice: { mode: "standard", quality: "fhd", loudnorm: true } },
   { id: "archive", label: "보관용 고화질", desc: "원본 화질 가깝게 · 고압축 보관", choice: { mode: "shrink", quality: "fhd", preset: "archive" } },
-  { id: "small", label: "작은 파일", desc: "공유·메신저용 · AV1/HEVC", choice: { mode: "shrink", quality: "fhd", preset: "small", container: "mp4" } },
   { id: "lecture", label: "강의·CCTV", desc: "움직임 적은 화면 · 가장 작게", choice: { mode: "shrink", quality: "hd", preset: "lecture" } },
   { id: "audio", label: "소리만", desc: "WAV 무손실", choice: { mode: "audio", audioFormat: "wav" } },
   { id: "mp3", label: "소리만 MP3", desc: "MP3 320kbps · 작은 파일", choice: { mode: "audio", audioFormat: "mp3" } },
@@ -88,12 +118,12 @@ export function exportSeconds(d: Draft, c?: ExportChoice) {
 export async function startExport(d: Draft, c: ExportChoice): Promise<string> {
   if (!d.clips.length) throw new Error("편집본에 클립이 없습니다");
   if (st.exportJob?.state === "running") throw new Error("이미 내보내는 중입니다");
-  const q = QUALITIES.find((x) => x.id === c.quality) ?? QUALITIES[1];
+  const q = qualityOf(d, c.quality);
   const p = SHRINK.find((x) => x.id === c.preset) ?? SHRINK[1];
   const short = c.mode === "audio" ? 480 : q.short;
   const [w, h] = outSize(d.aspect, short);
   const range = exportRange(d, c);
-  const dd = { ...(range ? rangeDraft(d, range[0], range[1]) : d), fps: c.fps || d.fps };
+  const dd = { ...(range ? rangeDraft(d, range[0], range[1]) : d), fps: c.fps || sourceLimits(d, assetMap()).fps };
   const ass = (dd.captions || dd.texts?.length) && c.mode !== "audio" ? captionFiles(dd, w, h).ass : "";
   const srts = c.srt && dd.captions ? captionFiles(dd, w, h) : null;
   const shrink = c.mode === "shrink" ? shrinkSettings(p, pickCodec(c.codec, st.info?.hw ?? null), c.container) : null;

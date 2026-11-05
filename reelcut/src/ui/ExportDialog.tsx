@@ -4,9 +4,9 @@ import { ChevronDown, ChevronRight, ListChecks, Save, Trash2 } from "lucide-prea
 import { useState } from "preact/hooks";
 import { api, pickFolder } from "../api";
 import { draftDuration, fmtTC, fmtTCF, outSize, uid } from "../edit";
-import { DEFAULT_CHOICE, rememberedChoice, enqueue, exportRange, exportSeconds, outPath, PURPOSES, startExport, type ExportChoice } from "../exporter";
+import { DEFAULT_CHOICE, qualityOf, rememberedChoice, enqueue, exportRange, exportSeconds, outPath, PURPOSES, sourceLimits, startExport, type ExportChoice } from "../exporter";
 import { estimateBytes, pickCodec, QUALITIES, SHRINK } from "../presets";
-import { editDraft, saveSettings, set, st, toast, useStore } from "../store";
+import { assetMap, editDraft, saveSettings, set, st, toast, useStore } from "../store";
 import type { Draft } from "../types";
 import { Modal } from "./Modal";
 
@@ -17,14 +17,15 @@ let lastChoice: ExportChoice = { ...DEFAULT_CHOICE };
 
 export function ExportDialog({ draft: d, onClose }: { draft: Draft; onClose: () => void }) {
   const s = useStore();
-  const [c, setC] = useState<ExportChoice>({ ...lastChoice, ...s.settings.lastExport as Partial<ExportChoice>, name: "", range: d.inPoint != null || d.outPoint != null ? lastChoice.range : false });
+  const [c, setC] = useState<ExportChoice>({ ...lastChoice, ...rememberedChoice({ ...lastChoice, ...s.settings.lastExport }), name: "", range: d.inPoint != null || d.outPoint != null ? lastChoice.range : false });
   const [adv, setAdv] = useState(false);
   const [multi, setMulti] = useState<string[]>([]);
   const [saveName, setSaveName] = useState<string | null>(null);
   const up = (p: Partial<ExportChoice>) => { const n = { ...c, ...p }; setC(n); lastChoice = { ...n, name: "" }; saveSettings({ lastExport: rememberedChoice(n) }); };
   const job = s.exportJob && s.exportJob.draft === d.id ? s.exportJob : null;
   const secs = exportSeconds(d, c);
-  const q = QUALITIES.find((x) => x.id === c.quality)!;
+  const q = qualityOf(d, c.quality);
+  const autoFps = sourceLimits(d, assetMap()).fps;
   const preset = SHRINK.find((x) => x.id === c.preset)!;
   const codec = pickCodec(c.codec, s.info?.hw ?? null);
   const [w, h] = outSize(d.aspect, q.short);
@@ -72,7 +73,7 @@ export function ExportDialog({ draft: d, onClose }: { draft: Draft; onClose: () 
   return (
     <Modal title={<>내보내기 · {d.name} <span class="muted">({fmtTC(secs)}{range ? " 구간" : ""})</span></>} onClose={onClose} wide
       footer={<>
-        <span class="muted est">예상 크기 약 <b>{fmtBytes(est * (1 + multi.length))}</b>{c.mode !== "audio" && <> · {w}×{h} · {c.fps || d.fps}fps</>}</span>
+        <span class="muted est">예상 크기 약 <b>{fmtBytes(est * (1 + multi.length))}</b>{c.mode !== "audio" && <> · {w}×{h} · {Math.round((c.fps || autoFps) * 100) / 100}fps</>}</span>
         <span class="spacer" />
         <button onClick={onClose}>취소</button>
         <button class="primary" onClick={go}>{multi.length ? `${multi.length + 1}개 내보내기` : "내보내기"}</button>
@@ -104,7 +105,7 @@ export function ExportDialog({ draft: d, onClose }: { draft: Draft; onClose: () 
               <label class={`opt ${c.quality === x.id ? "on" : ""}`}>
                 <input type="radio" checked={c.quality === x.id} onChange={() => up({ quality: x.id })} />
                 <b>{x.label}</b>
-                <span class="muted">{outSize(d.aspect, x.short).join("×")}{c.mode === "standard" ? ` · ${x.kbps / 1000}Mbps` : ""}</span>
+                <span class="muted">{outSize(d.aspect, qualityOf(d, x.id).short).join("×")}{c.mode === "standard" ? ` · ${qualityOf(d, x.id).kbps / 1000}Mbps` : ""}</span>
               </label>
             ))}
           </div>
@@ -175,7 +176,7 @@ export function ExportDialog({ draft: d, onClose }: { draft: Draft; onClose: () 
           {c.mode !== "audio" && (
             <label>프레임 레이트
               <select value={String(c.fps || 0)} onChange={(e) => up({ fps: Number((e.target as HTMLSelectElement).value) })}>
-                <option value="0">편집본과 같게 ({d.fps}fps)</option>
+                <option value="0">원본 그대로, 최대 60fps ({Math.round(autoFps * 100) / 100}fps)</option>
                 {[23.976, 24, 25, 29.97, 30, 50, 59.94, 60].map((x) => <option value={String(x)}>{x}fps</option>)}
               </select>
             </label>

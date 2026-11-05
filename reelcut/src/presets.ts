@@ -4,6 +4,7 @@ import type { Hw, ShrinkSettings } from "./types";
 
 export type Quality = { id: string; label: string; short: number; kbps: number };
 export const QUALITIES: Quality[] = [
+  { id: "auto", label: "원본 그대로 (최대 4K)", short: 2160, kbps: 32000 },
   { id: "4k", label: "4K (2160p)", short: 2160, kbps: 32000 },
   { id: "fhd", label: "FHD (1080p)", short: 1080, kbps: 8000 },
   { id: "hd", label: "HD (720p)", short: 720, kbps: 5000 },
