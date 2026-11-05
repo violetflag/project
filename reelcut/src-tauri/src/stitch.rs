@@ -191,7 +191,8 @@ fn flat_opts(y: f64, p: f64, r: f64, hfov: f64, w: u32, h: u32) -> String {
 
 fn gain_lut(g: &[f64; 3]) -> Option<String> {
     let neutral = (g[0] - 1.0).abs() < 1e-3 && g[1].abs() < 0.05 && g[2].abs() < 0.05;
-    (!neutral).then(|| format!("lutyuv=y='clip(val*{:.4},0,255)':u='clip(val+{:.2},0,255)':v='clip(val+{:.2},0,255)'", g[0], g[1], g[2]))
+    // lutyuv cuts the fraction off: +0.5 rounds, as the export's engine does.
+    (!neutral).then(|| format!("lutyuv=y='clip(val*{:.4}+0.5,0,255)':u='clip(val+{:.2}+0.5,0,255)':v='clip(val+{:.2}+0.5,0,255)'", g[0], g[1], g[2]))
 }
 
 /// sendcmd text for the named v360s, one entry per step where something changed. `angles` turns
@@ -704,7 +705,7 @@ mod tests {
         let g = graph(0, &l, Some(1024), "", &Out::Equi { w: 2048, h: 1024 }, None, "sb");
         assert!(g.contains("[sb_l]crop=iw/2:ih:iw/2:0,scale=1024:1024:flags=area,null[sb_fa];[sb_r]crop=iw/2:ih:0:0"), "{g}");
         assert!(g.contains("output=equirect:w=2048:h=1024:yaw=180.000"), "{g}");
-        assert!(g.contains("lutyuv=y='clip(val*1.0500,0,255)':u='clip(val+1.00,0,255)':v='clip(val+-2.00,0,255)'"), "{g}");
+        assert!(g.contains("lutyuv=y='clip(val*1.0500+0.5,0,255)':u='clip(val+1.00+0.5,0,255)':v='clip(val+-2.00+0.5,0,255)'"), "{g}");
         assert!(g.contains(",scale=2048:1024:flags=bilinear[sb_M]"), "{g}");
     }
 
