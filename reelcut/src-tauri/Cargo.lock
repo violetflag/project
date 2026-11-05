@@ -3087,7 +3087,7 @@ dependencies = [
 
 [[package]]
 name = "reelcut"
-version = "2.18.1"
+version = "2.18.2"
 dependencies = [
  "base64 0.22.1",
  "flate2",
