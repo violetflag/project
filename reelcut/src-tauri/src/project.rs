@@ -1413,11 +1413,13 @@ mod tests {
 
     #[test]
     fn relative_paths_and_back() {
-        let dir = Path::new("/r/Reelcut/여행");
-        let r = relative(dir, Path::new("/r/DJI/CAM_0001.OSV")).unwrap();
+        let base = std::env::temp_dir();
+        let dir = base.join("Reelcut").join("여행");
+        let media = base.join("DJI").join("CAM_0001.OSV");
+        let r = relative(&dir, &media).unwrap();
         assert_eq!(r, "../../DJI/CAM_0001.OSV");
-        assert_eq!(normalize(&dir.join(&r)), PathBuf::from("/r/DJI/CAM_0001.OSV"));
-        assert_eq!(relative(dir, Path::new("relative.osv")), None);
+        assert_eq!(normalize(&dir.join(&r)), normalize(&media));
+        assert_eq!(relative(&dir, Path::new("relative.osv")), None);
     }
 
     #[test]
@@ -1456,7 +1458,7 @@ mod tests {
         std::fs::rename(&dir, moved.join("Reelcut").join("제주_ 여행")).unwrap();
         std::fs::rename(root.join("DJI"), moved.join("DJI")).unwrap();
         let o = read_folder(&moved.join("Reelcut/제주_ 여행").join(out.file.file_name().unwrap()), &root).unwrap();
-        assert_eq!(o.project.pointer("/assets/0/info/path").and_then(Value::as_str), Some(&*moved.join("DJI/CAM_0001.OSV").to_string_lossy()));
+        assert_eq!(o.project.pointer("/assets/0/info/path").and_then(Value::as_str), Some(&*moved.join("DJI").join("CAM_0001.OSV").to_string_lossy()));
     }
 
     #[test]
@@ -1618,7 +1620,7 @@ mod tests {
         std::fs::write(root.join("Reelcut/여행/CAM_0003.OSV"), b"y").unwrap();
         let w = |id: &str, name: &str, size: u64| Wanted { id: id.into(), name: name.into(), size };
         let found = relink_search(&root, &[w("a", "CAM_0001.OSV", 3), w("b", "CAM_0002.OSV", 0), w("c", "CAM_0003.OSV", 1), w("d", "CAM_0001.OSV", 99)]);
-        assert_eq!(found.get("a").map(String::as_str), Some(&*root.join("새 폴더/2026-10/CAM_0001.OSV").to_string_lossy()));
+        assert_eq!(found.get("a").map(String::as_str), Some(&*root.join("새 폴더").join("2026-10").join("CAM_0001.OSV").to_string_lossy()));
         assert!(found.get("b").is_some_and(|p| p.ends_with("cam_0002.osv")));
         assert!(!found.contains_key("c") && !found.contains_key("d"));
     }
