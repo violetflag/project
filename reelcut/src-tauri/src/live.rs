@@ -211,7 +211,8 @@ impl Live {
         let rate = req.rate.unwrap_or(1.0).clamp(0.25, 16.0);
         let mut a = s(&["-hide_banner", "-nostdin", "-loglevel", "error"]);
         if gpu {
-            a.extend(s(&["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"]));
+            // Depth 1: see `pano::Source::decode_args`. The stabilising turn is picked by the picture's time.
+            a.extend(s(&["-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-async_depth", "1"]));
         }
         a.extend(s(&["-ss", &format!("{:.3}", req.t.max(0.0))]));
         // Real time after a short head start, so ffmpeg works only as fast as the picture plays.

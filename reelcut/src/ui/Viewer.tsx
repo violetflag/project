@@ -155,10 +155,19 @@ class Player {
   pos() { return this.base + (this.video?.currentTime ?? 0); }
   /** The time of the frame on screen: the turn for it must not lag the picture (same frame as the export). */
   private shownAt = -1;
+  private frameCallbacks = false;
+  private drawFrame: (() => void) | null = null;
   private watchFrames(v: HTMLVideoElement) {
     const rv = v as HTMLVideoElement & { requestVideoFrameCallback?: (cb: (now: number, m: { mediaTime: number }) => void) => number };
     if (!rv.requestVideoFrameCallback) return;
-    const each = (_: number, m: { mediaTime: number }) => { this.shownAt = m.mediaTime; rv.requestVideoFrameCallback!(each); };
+    this.frameCallbacks = true;
+    const each = (_: number, m: { mediaTime: number }) => {
+      this.shownAt = m.mediaTime;
+      // Drawn here, not on the next screen refresh: by then the video may hold a newer picture than
+      // the one this turn belongs to, and a turn one frame off shakes the view.
+      this.drawFrame?.();
+      rv.requestVideoFrameCallback!(each);
+    };
     rv.requestVideoFrameCallback(each);
   }
   /** A live file whose stream has not shown its first picture yet. */
@@ -513,7 +522,15 @@ class Player {
     if (a && is360(a) && this.gl) {
       const s = this.still;
       if (this.stillOn) { if (s && s.complete && s.naturalWidth) this.gl.draw(s, this.currentView(), projOf(a), this.stabOf(a, this.stillAt)); }
-      else if (v.readyState >= 2) this.gl.draw(v, this.currentView(), projOf(a), this.stabOf(a, this.playing && this.shownAt >= 0 ? this.base + this.shownAt : this.pos()));
+      else if (v.readyState >= 2) {
+        const gl = this.gl;
+        if (this.playing && this.rate > 0 && this.frameCallbacks && this.shownAt >= 0) {
+          this.drawFrame = () => { if (this.playing && !this.stillOn) gl.draw(v, this.currentView(), projOf(a), this.stabOf(a, this.base + this.shownAt)); };
+        } else {
+          this.drawFrame = null;
+          gl.draw(v, this.currentView(), projOf(a), this.stabOf(a, this.playing && this.shownAt >= 0 ? this.base + this.shownAt : this.pos()));
+        }
+      }
     }
   }
 

@@ -963,7 +963,7 @@ pub fn motion_for(dir: &Path, ffmpeg: &Path, ffprobe: &Path, jobs: &Jobs, tag: &
 }
 
 /// Bump when the engine's picture changes, so kept clips are made again.
-pub const ENGINE_VERSION: u32 = 8;
+pub const ENGINE_VERSION: u32 = 9;
 
 /// How `render_flat` works: the lens size to decode at, the GPU, and the intermediate's quality.
 #[derive(Clone, Debug, Default)]
@@ -1317,6 +1317,52 @@ mod tests {
     /// and the stabilised flat view moves far less from frame to frame than the raw one.
     /// A real Osmo 360 original (REELCUT_REAL_OSV, read only): its gyro is found and lined up with
     /// the picture, so stabilisation does not fall back to analysing every frame.
+    /// How much a still view moves from frame to frame with each mode, on a real recording. The
+    /// pictures go to REELCUT_DIAG_DIR on this PC only (raw luma; delete them afterwards).
+    #[test]
+    fn real_stab_motion() {
+        let (Ok(path), Ok(dir), Ok(md)) = (std::env::var("REELCUT_REAL_OSV"), std::env::var("REELCUT_DIAG_DIR"), std::env::var("REELCUT_MOTION_DIR")) else { return };
+        let bin = |n: &str| std::path::PathBuf::from(std::env::var("FFDIR").unwrap_or_else(|_| "/usr/bin".into())).join(n);
+        let info = crate::media::inspect(&bin("ffprobe"), &path).unwrap();
+        let st: crate::stitch::Stitch = serde_json::from_value(serde_json::json!({ "on": true, "fov": 193.4, "yaw": 0.85, "pitch": 0.15, "roll": -0.45, "calibrated": true, "flow": false })).unwrap();
+        let key = std::env::var("REELCUT_MOTION_KEY").unwrap();
+        let t = std::fs::read_to_string(std::path::Path::new(&md).join(format!("{key}-m1.json"))).unwrap();
+        let m: Motion = serde_json::from_str(&t).unwrap();
+        println!("STAB motion source {} note {} fps {} frames {} readout {} down {:?}", m.source, m.note, m.fps, m.rot.len(), m.readout, m.down);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (w, h) = (640u32, 360u32);
+        for (start, tag) in [(30.0, "s030"), (274.0, "a"), (420.0, "b"), (700.0, "s700"), (1000.0, "s1000"), (1300.0, "s1300")] {
+            for mode in ["off", "horizon", "smooth", "lock"] {
+                let lens = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: Some(st.clone()), stab: Some(Stab { mode: mode.into(), strength: 1.0, rs: false }) };
+                let s = crate::stitch::params(&lens);
+                let stab = stab_of(&lens);
+                let tg = targets(&m, &stab);
+                let mut src = source_for(&info, &lens, start, 4.0, Some(1024), false);
+                src.gpu = true;
+                let mut st2 = Stitcher::new(&s, src.n() as f64, w as usize, h as usize, false, None);
+                let k0 = (start * src.fps).round() as usize;
+                let rot = matrix(ypr(0.0, -10.0, 0.0));
+                let view = move |_t: f64| (rot, Some((91.0, 0.3)));
+                let setup = setup_fn(Some(&m), &tg, k0, &stab, &view);
+                let mut raw: Vec<u8> = vec![];
+                let mut cb = |_k: usize, f: &Frame<u8>| raw.extend_from_slice(&f.p[0]);
+                pano::run::<u8>(&bin("ffmpeg"), &Jobs::default(), "t", 0, &src, &mut st2, &setup, Sink::Call(&mut cb), |_| {}).unwrap();
+                std::fs::write(std::path::Path::new(&dir).join(format!("{tag}-{mode}.y")), &raw).unwrap();
+                // Does the preview's turn equal the export's?
+                let q = stab_track(&m, &stab);
+                if !q.is_empty() {
+                    let i = k0 + 30;
+                    let e = mmul(&mt(&m.at(i)), &tg[i]);
+                    let [qw, qx, qy, qz] = q[i].map(|v| v as f64);
+                    let rq = |v: [f64; 3]| { let u = [qx, qy, qz]; let c = |a: [f64; 3], b: [f64; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; let t = c(u, v).map(|x| 2.0 * x); let d = c(u, t); [v[0] + qw * t[0] + d[0], v[1] + qw * t[1] + d[1], v[2] + qw * t[2] + d[2]] };
+                    let v = [0.3, 0.5, 0.8];
+                    let (a, b) = (mv(&e, v), rq(v));
+                    println!("STAB {tag} {mode}: export turn {a:?} preview quaternion {b:?}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn real_osmo_gyro() {
         let Ok(path) = std::env::var("REELCUT_REAL_OSV") else { return };

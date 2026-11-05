@@ -1234,7 +1234,9 @@ impl Source {
         };
         let mut a: Vec<String> = ["-hide_banner", "-nostdin", "-loglevel", "error"].iter().map(|x| x.to_string()).collect();
         if self.gpu {
-            a.extend(["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"].iter().map(|x| x.to_string()));
+            // Depth 1: at the default depth the decoder hands out each picture with the time of one about
+            // 3 frames later, so the view and the gyro (and the sound) would run ahead of the picture.
+            a.extend(["-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-async_depth", "1"].iter().map(|x| x.to_string()));
         }
         if first == 0 {
             if self.start > 0.0 {
