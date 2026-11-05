@@ -5,6 +5,7 @@ mod faces;
 mod ff;
 mod framing;
 mod hw;
+mod jsonl;
 mod live;
 mod media;
 mod probe;
@@ -1496,7 +1497,9 @@ pub fn run() {
             cc_setup,
             cc_run,
             cc_answer,
-            cc_stop
+            cc_stop,
+            jsonl::jsonl_append,
+            jsonl::jsonl_tail
         ])
         .run(tauri::generate_context!())
         .expect("error while running reelcut");

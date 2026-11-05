@@ -4,7 +4,8 @@ import { api, onJob, type AppInfo, type CcStatus, type ModelInfo, type QwenStatu
 import { CTX_DEFAULTS, migrateChats, newSession, promptName } from "./chats";
 export { promptName };
 import { draftDuration, newDraft, refineWords, rippleConnected, uid } from "./edit";
-import type { Asset, BadShot, ChatSession, Draft, JobEvent, Lens, Project, SavedPrompt, Settings, Skill, Word } from "./types";
+import { logAction, noteDraftChange, noteDraftsChange, stepEntry } from "./actionlog";
+import type { ActionEntry, Asset, BadShot, ChatSession, Draft, JobEvent, Lens, Project, SavedPrompt, Settings, Skill, Word } from "./types";
 
 export type Meta = { id: string; name: string; updated: number; created: number; assets: number; drafts: number; duration: number; poster?: string; clips: number; chats: number };
 export type ExportJob = { id: string; draft: string; pct: number; state: string; message: string; out: string; result?: any; left?: number; name?: string };
@@ -211,14 +212,16 @@ export function mutateChat(fn: (c: ChatSession) => ChatSession, id = activeChat(
   mutate((p) => ({ ...p, chats: (p.chats ?? []).map((c) => (c.id === id ? fn(c) : c)) }));
 }
 
-/** Changes the open project (no undo entry). */
-export function mutate(fn: (p: Project) => Project) {
+/** Changes the open project (no undo entry). With a label it is a user's change and goes in the action log. */
+export function mutate(fn: (p: Project) => Project, label?: string) {
   if (!st.project) return;
   set({ project: { ...fn(st.project), updated: Date.now() } });
   scheduleSave();
+  if (label) logAction(st.project.id, { who: "user", kind: "edit", label });
 }
-export function patchAsset(id: string, patch: Partial<Asset>) {
+export function patchAsset(id: string, patch: Partial<Asset>, label?: string) {
   mutate((p) => ({ ...p, assets: p.assets.map((a) => (a.id === id ? { ...a, ...patch } : a)) }));
+  if (label && st.project) logAction(st.project.id, { who: "user", kind: "edit", label, assets: [id], detail: Object.keys(patch).join(", ") });
 }
 
 // ---------------------------------------------------------------- drafts + undo
@@ -248,6 +251,7 @@ export function editDraft(label: string, fn: (d: Draft) => Draft, id = st.draftI
   let nd = fn(d);
   if (nd === d) return;
   if (ripple) nd = rippleConnected(d, nd);
+  nd = noteDraftChange(p.id, label, d, nd);
   checkpoint(label);
   mutate((p) => ({ ...p, drafts: p.drafts.map((x) => (x.id === id ? { ...nd, updated: Date.now() } : x)) }));
 }
@@ -273,7 +277,8 @@ export function beginUndoGroup(label: string) {
   };
 }
 
-export function setDrafts(label: string, drafts: Draft[], draftId = st.draftId) {
+export function setDrafts(label: string, drafts: Draft[], draftId = st.draftId, entry?: Partial<ActionEntry>) {
+  if (st.project) noteDraftsChange(st.project.id, label, st.project.drafts, drafts, entry);
   checkpoint(label);
   mutate((p) => ({ ...p, drafts }));
   set({ draftId });
@@ -283,6 +288,7 @@ export function undo() {
   const s = undoStack.pop();
   if (!s || !st.project) return;
   redoStack.push({ drafts: st.project.drafts, draftId: st.draftId, label: s.label });
+  logAction(st.project.id, { who: "user", kind: "undo", label: s.label, ref: stepEntry(s.label, false)?.seq });
   mutate((p) => ({ ...p, drafts: s.drafts }));
   set({ draftId: s.drafts.some((d) => d.id === s.draftId) ? s.draftId : s.drafts[0]?.id ?? null });
   toast(`되돌림: ${s.label}`);
@@ -291,6 +297,7 @@ export function redo() {
   const s = redoStack.pop();
   if (!s || !st.project) return;
   undoStack.push({ drafts: st.project.drafts, draftId: st.draftId, label: s.label });
+  logAction(st.project.id, { who: "user", kind: "redo", label: s.label, ref: stepEntry(s.label, true)?.seq });
   mutate((p) => ({ ...p, drafts: s.drafts }));
   set({ draftId: s.drafts.some((d) => d.id === s.draftId) ? s.draftId : s.drafts[0]?.id ?? null });
   toast(`다시 실행: ${s.label}`);

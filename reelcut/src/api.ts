@@ -51,6 +51,9 @@ export const api = {
   trashRestore: (file: string) => invoke<void>("trash_restore", { file }),
   logEvent: (kind: string, text: string) => invoke<void>("log_event", { kind, text }),
   storeList: (prefix: string) => invoke<string[]>("store_list", { prefix }),
+  /** Append-only logs: "actions" (per project) and "chats" (raw AI conversation archive). */
+  jsonlAppend: (kind: "actions" | "chats", name: string, lines: string[]) => invoke<void>("jsonl_append", { kind, name, lines }),
+  jsonlTail: (kind: "actions" | "chats", name: string, max: number) => invoke<string[]>("jsonl_tail", { kind, name, max }),
   expandPaths: (paths: string[]) => invoke<[string, string][]>("expand_paths", { paths }),
   inspect: (path: string) => invoke<MediaInfo>("inspect", { path }),
   analyzeMotion: (id: string, info: MediaInfo, lens: Lens) => invoke<void>("analyze_motion", { id, info, lens }),

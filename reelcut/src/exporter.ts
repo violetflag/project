@@ -1,5 +1,6 @@
 // Starts an export of a draft (used by the export dialog and the agent), runs a queue of
 // exports one after another, and tells the user when each one ends.
+import { aiActive, logAction } from "./actionlog";
 import { api } from "./api";
 import { draftCaptions, toAss, toSrt } from "./captions";
 import { draftDuration, draftWords, outSize, rangeDraft, toPlan, uid } from "./edit";
@@ -96,6 +97,8 @@ export async function startExport(d: Draft, c: ExportChoice): Promise<string> {
   const plan = toPlan(dd, assetMap(), { mode: c.mode, short, vbitrate: c.kbps || q.kbps, shrink, out: outPath(d, c), ass, loudnorm: c.loudnorm, duck: c.duck, abr: c.abr || 256 });
   const id = uid();
   set({ exportJob: { id, draft: d.id, pct: 0, state: "running", message: "", out: plan.out, name: d.name } });
+  exportStart = { at: Date.now(), draft: d.id, params: { mode: c.mode, quality: c.quality, preset: c.mode === "shrink" ? c.preset : undefined, loudnorm: !!c.loudnorm, duck: !!c.duck, fps: dd.fps, size: `${w}x${h}`, range, out: plan.out } };
+  if (st.project) logAction(st.project.id, { who: aiActive() ? "ai" : "user", kind: "export", label: "내보내기 시작", draft: d.id, params: exportStart.params, detail: `${d.name} → ${plan.out}` });
   try {
     const out = await api.export(id, plan);
     set({ exportJob: { ...st.exportJob!, out } });
@@ -124,9 +127,18 @@ async function runNext() {
   try { await startExport(d, next.choice); } catch (e) { toast(`내보내기 실패: ${d.name} (${String((e as Error)?.message ?? e)})`); runNext(); }
 }
 
+/** The running export, for its log line at the end. */
+let exportStart: { at: number; draft: string; params: Record<string, unknown> } | null = null;
+
 /** Called by the job listener when an export ends. */
 export function onExportEnd(state: string, name: string, path: string, message: string, warnings?: string[]) {
   const msg = state === "done" ? `내보내기 완료: ${name}` : state === "cancelled" ? `내보내기 취소: ${name}` : `내보내기 실패: ${name}`;
+  if (st.project) logAction(st.project.id, {
+    who: "system", kind: "export", label: msg.split(":")[0], draft: exportStart?.draft ?? null, params: exportStart?.params ?? null, ok: state === "done",
+    took: exportStart ? Date.now() - exportStart.at : 0,
+    detail: [path, warnings?.length ? `주의: ${warnings.join(" / ")}` : "", message && state !== "done" ? `오류: ${message.slice(0, 600)}` : ""].filter(Boolean).join(" · "),
+  });
+  exportStart = null;
   toast(warnings?.length ? `${msg}. 주의: ${warnings.join(" / ")}` : msg);
   // A system notification too, for when Reelcut is behind other windows.
   try {

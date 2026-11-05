@@ -120,6 +120,12 @@ export type Clip = {
   volKeys?: VolKey[];
   /** The sound was split off to track A1 (the clip itself stays silent). */
   detached?: boolean;
+  /** Stabilisation for this clip only (else the media's setting). */
+  stab?: Stab;
+  /** The 360 view preset last applied (최적/확대/광각/초광각/작은 행성). */
+  viewPreset?: ViewPreset;
+  /** When the user last set these by hand (ms); the AI leaves them unless asked. */
+  userSet?: UserSet;
 };
 
 /** A clip on track V2/V3, placed at a timeline time over the main track. */
@@ -211,6 +217,8 @@ export type Draft = {
   aspect: string;
   fps: number;
   tracks?: Partial<Record<TrackId, TrackState>>;
+  /** Whole-draft effects: even loudness on export. */
+  fx?: DraftFx;
   /** In/out range on the timeline (I/O keys), used to export a part. */
   inPoint?: number | null;
   outPoint?: number | null;
@@ -262,6 +270,8 @@ export type ChatSession = {
   activeSkills?: string[];
   /** Those whose text the AI has already been given (given again after a compaction). */
   skillsSent?: string[];
+  /** The last action-log entry (seq) the AI has been told about in this conversation. */
+  actionsSeen?: number;
   chain?: ChainRun;
   /** Context size after the last turn, in tokens. */
   ctxTokens?: number;
@@ -338,3 +348,29 @@ export type Plan = {
 };
 
 export type JobEvent = { id: string; kind: string; pct: number; state: JobState; message: string; result: any };
+
+// ---------------------------------------------------------------- 2.18: action log (what was done, by whom)
+
+export type ViewPreset = "best" | "zoom" | "wide" | "ultra" | "planet";
+export type UserSet = { view?: number; stab?: number; volume?: number };
+export type DraftFx = { loudnorm?: boolean; lufs?: number };
+export type ActionWho = "user" | "ai" | "system";
+export type ActionKind = "quick" | "edit" | "ai" | "export" | "open" | "save" | "backup" | "trash" | "restore" | "undo" | "redo";
+/** One line of the project's action log (src/actionlog.ts). */
+export type ActionEntry = {
+  /** Local time with offset, and the same as ms. */
+  t: string; ms: number;
+  /** Goes up by one per entry in a project; a coalesced edit keeps its seq. */
+  seq: number;
+  who: ActionWho; kind: ActionKind; label: string;
+  draft?: string | null; clips?: string[]; assets?: string[];
+  params?: Record<string, unknown> | null;
+  detail?: string;
+  /** AI request, conversation and tool that did it. */
+  run?: string | null; chat?: string | null; tool?: string | null;
+  took?: number; ok: boolean;
+  /** undo/redo: the entry it undid or redid. */
+  ref?: number;
+  /** The undo-step name this entry made (matches Ctrl+Z's label). */
+  step?: string;
+};

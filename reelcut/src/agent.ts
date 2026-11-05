@@ -22,6 +22,8 @@ import { activeChat, asset, assetMap, editDraft, saveSkills, syncAssets, loadWav
 import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
 import { LEVEL_VIEW_RULE, PEOPLE_360_RULE } from "./playbook";
 import { runScript, stopScript } from "./script";
+import { activityLog, aiBegin, aiEnd, archive, entries, logReady, noteAiTool, presetName, stabName, stateLine, userActionsNote, useLog } from "./actionlog";
+import { runAction } from "./actions";
 import { captionLines, draftCaptions, joinNext, moveWordPrev, setBreak, setHidden, setLineText, wordKey } from "./captions";
 import type { AnimKey, Asset, ChatBlock, Clip, ChoiceCard, ChatMsg, ChatSession, Draft, Skill, TextItem, View, ViewKey, VolKey } from "./types";
 
@@ -57,7 +59,10 @@ const SYSTEM = `당신은 Reelcut의 영상 편집 에이전트입니다. Reelcu
 - 무음 정리는 remove_silences(pacing: gentle/normal/tight/jump_cut), "음·어" 같은 군더더기 말은 remove_fillers를 쓰세요.
 - 모든 편집은 사용자가 되돌리기(Ctrl+Z)로 취소할 수 있습니다.
 - 내보내기(export_draft)는 사용자가 요청했을 때만 하세요.
-- 끝나면 무엇을 했는지 2~4문장으로 알려 주세요. 편집본 길이, 잘라 낸 양처럼 확인한 숫자를 말하세요.`;
+- 끝나면 무엇을 했는지 2~4문장으로 알려 주세요. 편집본 길이, 잘라 낸 양처럼 확인한 숫자를 말하세요.
+
+## 사용자가 직접 한 작업
+사용자가 상단 버튼이나 직접 편집으로 한 작업은 <user-actions>와 '켜져 있는 것' 줄에 나옵니다. 그 결과를 유지한 채 이어서 작업하세요. '사용자 지정' 표시가 있는 클립의 시점·흔들림·소리는 사용자가 분명히 요청하지 않으면 바꾸지 마세요. 꼭 바꿔야 하면 override_user: true와 이유를 함께 보내세요. 360 시점은 pitch를 -30~+30 안에서 고르고 수평선이 화면에 보이게 하세요. 더 넓게 보여야 하면 hfov를 직접 키우지 말고 quick_action의 view.wide나 view.ultra를 쓰세요. 컷이 바뀔 때 같은 녹화의 방향을 45도 넘게 갑자기 바꾸지 마세요. 버튼과 같은 작업은 quick_action으로 하세요. 사용자가 전에 무엇을 했는지 물으면 get_activity_log를 보세요.`;
 
 const num = { type: "number" };
 const str = { type: "string" };
@@ -106,10 +111,11 @@ export const TOOLS = [
 - {op:"split", time}: 타임라인 시간에서 자르기
 - {op:"remove_range", from, to}: 타임라인 구간 지우기
 - {op:"cut_source", clip_id, ranges:[[s,e],…]}: 클립 안의 원본 구간들 지우기
-- {op:"set", clip_id, speed?, volume?, view?, fit?("fit"|"fill"), fade_in?, fade_out?, denoise?, transform?:{x,y,scale,rotation,crop_l,crop_r,crop_t,crop_b,opacity}, color?:{exposure,contrast,saturation,temperature}}
+- {op:"set", clip_id, speed?, volume?, view?, fit?("fit"|"fill"), fade_in?, fade_out?, denoise?, transform?:{x,y,scale,rotation,crop_l,crop_r,crop_t,crop_b,opacity}, color?:{exposure,contrast,saturation,temperature}, override_user?}
   (x/y: 화면 대비 중심 이동 -1~1, scale 1=원래, exposure 스톱 -2~2, contrast/saturation 1=그대로, temperature 6500=그대로)
 - {op:"set_view_keys", clip_id, keys:[{t,yaw,pitch,roll,hfov},…], merge?}: 360 클립의 시점 키프레임 (t=원본 초, 키 사이는 부드럽게). merge=true면 기존 키에 더하고 같은 시각은 바꿈. 사람 따라가기는 frame_subject가 더 쉽습니다
 - {op:"clear_view_keys", clip_id}: 시점 키프레임 지우기
+  ('사용자 지정' 클립의 시점(view·view_keys)·음량은 사용자가 직접 정한 것이라 override_user:true 없이는 바꿀 수 없습니다)
 - {op:"transition", clip_id, seconds, type}: 이 클립과 앞 클립 사이 전환 (0이면 컷). type: fade(디졸브), dissolve, fadeblack, fadewhite, fadegrays, distance, wipeleft/right/up/down, slideleft/right/up/down, smoothleft/right, circleopen, circleclose, circlecrop, rectcrop, vertopen, horzopen, radial, diagtl, diagbr, squeezeh, zoomin, pixelize
 - {op:"set_enabled", item_id, enabled}: 클립·V2/V3·소리를 끄고 켭니다. 끈 클립은 자리를 차지한 채 검은 화면과 무음이 됩니다
 - {op:"gap", index, seconds}: 빈칸(검은 화면·무음) 넣기
@@ -320,6 +326,28 @@ export const TOOLS = [
     name: "export_draft", description: "편집본을 파일로 내보냅니다 (끝날 때까지 기다림). preset: fhd/4k/hd/sd는 일반 H.264 MP4, shrink_balanced/shrink_small/shrink_archive/shrink_lecture는 크기를 많이 줄이는 고압축(AV1/HEVC), audio는 WAV 소리만.",
     input_schema: { type: "object", properties: { srt: { type: "boolean", description: "자막 파일(SRT)도 같이 저장" }, draft_id: draftId, preset: { type: "string", enum: ["4k", "fhd", "hd", "sd", "shrink_archive", "shrink_balanced", "shrink_small", "shrink_lecture", "audio"] }, file_name: { ...str, description: "파일 이름이나 전체 경로. 전체 경로의 폴더가 있으면 거기에, 없으면 내보내기 폴더에 저장합니다. 같은 이름이 있으면 덮어쓰지 않고 번호를 붙입니다." } }, required: ["preset"] },
   },
+  {
+    name: "quick_action", description: `상단 버튼과 똑같은 작업을 합니다. 사용자가 누른 것처럼 작업 기록에 남고 Ctrl+Z 한 번으로 되돌아갑니다. 이미 된 것이면 '이미 적용됨'을 돌려줍니다.
+action: level(수평 맞추기), stab(흔들림 줄이기, params.strength 0.5/1/2 또는 params.mode "lock"/"off"), loud(소리 고르게), view.best(최적 화각), view.zoom(확대), view.wide(광각), view.ultra(초광각), view.planet(작은 행성), undistort(왜곡 보정), reframe(시점 다시 맞추기), smooth.dir(컷 사이 방향 이어 붙이기). 없는 버튼이면 쓸 수 있는 목록을 오류로 알려 줍니다.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        action: str,
+        scope: { description: "\"selection\"(선택한 클립, 없으면 편집본 전체, 기본) | \"draft\"(편집본 전체) | {clips:[클립 id…]}" },
+        params: { type: "object", description: "버튼별 설정 (예: stab의 strength)" },
+        draft_id: draftId,
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "get_activity_log", description: "프로젝트 작업 기록(사용자가 누른 버튼, 직접 편집, AI 작업, 되돌리기, 내보내기)을 시간순으로 봅니다. 줄마다 #번호, 시각, [누가/종류]가 붙습니다.",
+    input_schema: { type: "object", properties: { since_seq: { ...num, description: "이 번호 다음부터" }, limit: { ...num, description: "최대 줄 수 (기본 30, 최대 100)" }, who: { type: "string", enum: ["user", "ai", "system"] } } },
+  },
+  {
+    name: "get_export_log", description: "최근 내보내기 기록을 봅니다: 설정(화질·압축·소리 고르게 등), 걸린 시간, 경고와 오류.",
+    input_schema: { type: "object", properties: { n: { ...num, description: "최근 몇 번 (1~5, 기본 1)" } } },
+  },
 ];
 
 // ---------------------------------------------------------------- tool implementations
@@ -346,7 +374,7 @@ function overview(): string {
     lines.push(`- ${a.id} | ${i.name} | ${i.kind} | ${fmtTC(i.duration)} (${r3(i.duration)}초)${i.kind === "video" ? ` | ${i.width}x${i.height} ${Math.round(i.fps)}fps` : ""}${is360(a) ? ` | 360(${i.layout360})` : ""} | 받아쓰기 ${tState(a)}${a.folder ? ` | 폴더 ${a.folder}` : ""}${i.recorded ? ` | 촬영 ${i.recorded}` : ""}`);
   }
   lines.push("", "편집본:");
-  for (const d of p.drafts) lines.push(`- ${d.id} | ${d.name} | 클립 ${d.clips.length}개 | ${fmtTC(draftDuration(d))} | ${d.aspect}`);
+  for (const d of p.drafts) lines.push(`- ${d.id} | ${d.name} | 클립 ${d.clips.length}개 | ${fmtTC(draftDuration(d))} | ${d.aspect}${d.fx?.loudnorm ? ` | 소리 고르게 ${d.fx.lufs ?? -16} LUFS` : ""}`);
   return lines.join("\n");
 }
 
@@ -369,7 +397,7 @@ function draftInfo(d: Draft): string {
   d.clips.forEach((c, i) => {
     if (isGap(c)) { lines.push(`${i} | ${c.id} | (빈칸) | - | ${r3(stt[i])}–${r3(stt[i] + clipDur(c))} | - | - | -`); return; }
     const a = am.get(c.asset);
-    const extra = [c.xin ? `전환 ${c.xtype ?? "fade"} ${c.xin}초` : "", c.disabled ? "꺼짐" : "", c.transform && !isDefaultTransform(c.transform) ? `변형 ${JSON.stringify(c.transform)}` : "", c.color && !isDefaultColor(c.color) ? `색 ${JSON.stringify(c.color)}` : "", c.detached ? "소리 분리됨" : "", c.viewKeys?.length ? `시점 키프레임 ${c.viewKeys.length}개(원본 ${c.viewKeys[0].t}–${c.viewKeys[c.viewKeys.length - 1].t}초)` : ""].filter(Boolean).join(", ");
+    const extra = [c.xin ? `전환 ${c.xtype ?? "fade"} ${c.xin}초` : "", c.disabled ? "꺼짐" : "", c.transform && !isDefaultTransform(c.transform) ? `변형 ${JSON.stringify(c.transform)}` : "", c.color && !isDefaultColor(c.color) ? `색 ${JSON.stringify(c.color)}` : "", c.detached ? "소리 분리됨" : "", c.viewKeys?.length ? `시점 키프레임 ${c.viewKeys.length}개(원본 ${c.viewKeys[0].t}–${c.viewKeys[c.viewKeys.length - 1].t}초)` : "", c.stab ? `흔들림 ${stabName(c.stab)}` : "", c.viewPreset ? `화각 ${presetName(c.viewPreset)}` : "", (c.view as any)?.dist ? `왜곡 보정 ${(c.view as any).dist}` : "", userSetNote(c)].filter(Boolean).join(", ");
     lines.push(`${i} | ${c.id} | ${a?.info.name ?? "?"}(${c.asset}) | ${r3(c.start)}–${r3(c.end)} | ${r3(stt[i])}–${r3(stt[i] + clipDur(c))} | ${c.speed}x | ${c.volume} | ${c.view ? `yaw ${c.view.yaw} pitch ${c.view.pitch} hfov ${c.view.hfov}` : "-"}${extra ? ` | ${extra}` : ""}`);
   });
   const ov = d.overlays ?? [];
@@ -394,7 +422,18 @@ function speechRuns(words: Asset["words"], wave: ArrayLike<number> | undefined, 
   return wave ? speechFromWave(wave, s0, s1) : null;
 }
 
-function applyOps(d: Draft, ops: any[]): Draft {
+const USER_FIELD = { view: "시점", stab: "흔들림", volume: "소리" } as const;
+/** "사용자 지정: 시점, 소리" for fields the user set by hand. */
+function userSetNote(c: Clip): string {
+  const f = (Object.keys(USER_FIELD) as (keyof typeof USER_FIELD)[]).filter((k) => c.userSet?.[k]);
+  return f.length ? `사용자 지정: ${f.map((k) => USER_FIELD[k]).join("·")}` : "";
+}
+/** The AI may change what the user set by hand only when it says so (override_user). */
+function guardUser(c: Clip, field: keyof typeof USER_FIELD, o: any) {
+  if (c.userSet?.[field] && !o.override_user) throw new Error(`클립 ${c.id}의 ${USER_FIELD[field]}은(는) 사용자 지정 항목입니다: override_user와 이유가 필요합니다`);
+}
+
+export function applyOps(d: Draft, ops: any[]): Draft {
   for (const o of ops) {
     switch (o.op) {
       case "insert": {
@@ -423,6 +462,8 @@ function applyOps(d: Draft, ops: any[]): Draft {
       case "set": {
         const c = d.clips.find((x) => x.id === o.clip_id);
         if (!c) throw new Error(`클립 없음: ${o.clip_id}`);
+        if (o.view) guardUser(c, "view", o);
+        if (o.volume != null) guardUser(c, "volume", o);
         d = updateClip(d, c.id, {
           ...(o.speed != null ? { speed: Math.min(16, Math.max(0.1, Number(o.speed))) } : {}),
           ...(o.volume != null ? { volume: Math.min(4, Math.max(0, Number(o.volume))) } : {}),
@@ -440,11 +481,17 @@ function applyOps(d: Draft, ops: any[]): Draft {
         const c = d.clips.find((x) => x.id === o.clip_id);
         if (!c) throw new Error(`클립 없음: ${o.clip_id}`);
         if (!is360(getAsset(c.asset))) throw new Error("360 영상 클립이 아닙니다");
+        guardUser(c, "view", o);
         const ks = parseKeys(o.keys, c.view);
         d = updateClip(d, c.id, { viewKeys: cleanKeys(o.merge ? [...(c.viewKeys ?? []).filter((k) => !ks.some((n) => Math.abs(n.t - k.t) < 0.001)), ...ks] : ks) });
         break;
       }
-      case "clear_view_keys": d = updateClip(d, o.clip_id, { viewKeys: undefined }); break;
+      case "clear_view_keys": {
+        const c = d.clips.find((x) => x.id === o.clip_id);
+        if (c) guardUser(c, "view", o);
+        d = updateClip(d, o.clip_id, { viewKeys: undefined });
+        break;
+      }
       case "set_enabled": {
         const flip = <T extends { id: string; disabled?: boolean }>(x: T) => (x.id === o.item_id ? { ...x, disabled: o.enabled === false } : x);
         d = { ...d, clips: d.clips.map(flip), overlays: (d.overlays ?? []).map(flip), music: d.music.map(flip) };
@@ -489,7 +536,22 @@ function applyOps(d: Draft, ops: any[]): Draft {
   return d;
 }
 
+/** Runs one AI tool; its edits are logged as the AI's, under this request and conversation. */
 async function run(name: string, inp: any): Promise<Out> {
+  const p = st.project;
+  if (!p) throw new Error("열린 프로젝트가 없습니다");
+  const before = p.drafts;
+  const prev = aiBegin(curRun, curChat, name);
+  try {
+    return await runTool(name, inp);
+  } finally {
+    const ctx = aiEnd(prev);
+    // Tools that write the project directly (scripts) still get one line.
+    if (st.project?.id === p.id && !ctx?.logged) noteAiTool(p.id, TOOL_LABEL[name] ?? name, before, st.project.drafts, st.draftId);
+  }
+}
+
+async function runTool(name: string, inp: any): Promise<Out> {
   const p = st.project;
   if (!p) throw new Error("열린 프로젝트가 없습니다");
   if (name === "find_faces" || name === "equirect_sheet" || name === "track_people") sawPanorama = true;
@@ -1100,6 +1162,20 @@ async function run(name: string, inp: any): Promise<Out> {
       const warned: string[] = e.result.warnings ?? [];
       return `${warned.length ? `주의: ${warned.join(" / ")}\n` : ""}${noFolder ? `폴더 ${noFolder}이 없어 내보내기 폴더에 저장했습니다. ` : ""}내보냈습니다: ${e.result.path} (${(e.result.size / 1048576).toFixed(1)}MB, ${r3(e.result.duration)}초)${inp.srt ? ` 자막 파일: ${String(e.result.path).replace(/\.[^.\/]+$/, ".srt")}` : ""}${e.message ? " 경고: " + e.message : ""}`;
     }
+    case "quick_action": {
+      const id = String(inp.action ?? "");
+      const d = getDraft(inp.draft_id);
+      const r = await runAction(id, { scope: inp.scope ?? "selection", params: inp.params ?? {}, by: "ai", run: curRun, chat: curChat, draftId: d.id });
+      return `${r.detail}${r.skipped.length ? ` (건너뜀: ${r.skipped.join(", ")})` : ""}`;
+    }
+    case "get_activity_log": return activityLog({ since_seq: inp.since_seq, limit: inp.limit, who: inp.who });
+    case "get_export_log": {
+      const n = Math.min(5, Math.max(1, Number(inp.n ?? 1)));
+      const ex = entries().filter((e) => e.kind === "export");
+      const ends = ex.filter((e) => e.label !== "내보내기 시작").slice(-n);
+      if (!ends.length) return ex.length ? "내보내는 중입니다 (끝난 기록 없음)." : "내보내기 기록이 없습니다.";
+      return ends.map((e) => `${e.t.slice(0, 16).replace("T", " ")} ${e.label} | ${Math.round((e.took ?? 0) / 1000)}초 | 설정 ${JSON.stringify(e.params ?? {})}${e.detail ? ` | ${e.detail}` : ""}`).join("\n");
+    }
   }
   throw new Error(`알 수 없는 도구: ${name}`);
 }
@@ -1139,6 +1215,11 @@ export const stopAgent = () => {
 /** Said to the AI with the next request only, and not shown in the conversation. */
 let nextNote = "";
 let turnNote = "";
+/** The AI request and conversation now running (for the action log). */
+let curRun: string | null = null;
+let curChat: string | null = null;
+/** The last action-log line the AI has been told about during this request. */
+let runSeen = 0;
 let chainRunning = false;
 let stepReport: StepResult | null = null;
 /** The step of a merged skill now running; tools belonging to later steps wait. */
@@ -1227,7 +1308,15 @@ async function lookAtClip(d: Draft, c: Clip): Promise<SubjectLook[]> {
 
 function stateNote(): string {
   const d = st.project?.drafts.find((x) => x.id === st.draftId);
-  return `<project-state>열린 편집본: ${d ? `${d.id} "${d.name}" (클립 ${d.clips.length}개, ${r3(draftDuration(d))}초)` : "없음"} | 미디어 ${st.project?.assets.length ?? 0}개 | 재생 위치 ${r3(st.playhead)}초${st.selClip ? ` | 선택한 클립 ${st.selClip}` : ""}</project-state>` + (turnNote ? `\n\n${turnNote}` : "");
+  const on = d ? stateLine(d, assetMap()) : "";
+  return `<project-state>열린 편집본: ${d ? `${d.id} "${d.name}" (클립 ${d.clips.length}개, ${r3(draftDuration(d))}초)` : "없음"} | 미디어 ${st.project?.assets.length ?? 0}개 | 재생 위치 ${r3(st.playhead)}초${st.selClip ? ` | 선택한 클립 ${st.selClip}` : ""}${on ? `\n${on}` : ""}</project-state>` + (turnNote ? `\n\n${turnNote}` : "");
+}
+
+/** What the user did while the AI was working, for the next tool results ("" when nothing). */
+function midRunNote(): string {
+  const n = userActionsNote(runSeen);
+  runSeen = n.last;
+  return n.text ? `${n.text}\n(방금 사용자가 한 작업입니다. 이 결과를 유지한 채 이어서 하세요.)` : "";
 }
 
 const chatById = (sid: string) => st.project?.chats?.find((c) => c.id === sid) ?? null;
@@ -1272,17 +1361,24 @@ export async function ask(text: string) {
   // Remember the drafts before this request, so its changes can be listed and undone as one.
   const run = { id: uid(), chat: sid, at: Date.now(), prompt: text, before: st.project.drafts, draftId: st.draftId, done: false };
   set({ aiRuns: [...st.aiRuns, run], agentBusy: true, agentStatus: "생각하는 중…" });
+  const pid = st.project.id;
+  curRun = run.id; curChat = sid;
   try {
     await compactIfNeeded(sid, mode);
     // Skills are told after any compaction above, which forgets what was told before.
     const cur = chatById(sid)!;
     const skills = activeNote(st.skills, cur.activeSkills, cur.skillsSent);
-    turnNote = [skills.note, nextNote].filter(Boolean).join("\n");
+    // What the user did since this conversation last heard (toolbar, hand edits, undo, export).
+    await useLog(pid); await logReady();
+    const acts = userActionsNote(cur.actionsSeen ?? 0);
+    runSeen = acts.last;
+    turnNote = [acts.text, skills.note, nextNote].filter(Boolean).join("\n");
     nextNote = "";
     if (mode === "account") await askAccount(sid, text);
     else await askApi(sid, text);
-    mutateChat((x) => ({ ...x, skillsSent: skills.sent }), sid);
+    mutateChat((x) => ({ ...x, skillsSent: skills.sent, actionsSeen: runSeen }), sid);
   } finally {
+    curRun = null; curChat = null;
     turnNote = "";
     set({ agentBusy: false, agentStatus: "", aiRuns: st.aiRuns.map((r) => (r.id === run.id ? { ...r, done: true, after: st.project?.drafts } : r)) });
     await saveNow();
@@ -1296,7 +1392,10 @@ async function askApi(sid: string, text: string) {
   const s = st.settings;
   if (!s.apiKey) throw new Error("설정에서 Anthropic API 키를 먼저 넣어 주세요.");
   stopFlag = false;
-  pushMsg(sid, { role: "user", content: [{ type: "text", text: stateNote() }, { type: "text", text }] });
+  const pid = st.project!.id;
+  const first: ChatMsg = { role: "user", content: [{ type: "text", text: stateNote() }, { type: "text", text }] };
+  pushMsg(sid, first);
+  archive(pid, sid, { kind: "user", model: s.model, effort: s.effort, message: first });
   const sent = () => { const c = chatById(sid)!; return c.context ?? c.messages; };
   for (let turn = 0; turn < 40; turn++) {
     if (stopFlag) break;
@@ -1321,6 +1420,7 @@ async function askApi(sid: string, text: string) {
     setCtx(sid, usageTokens(res.usage), s.model);
     if (first && turn === 0) noteBase("api", usageTokens(res.usage), JSON.stringify(sent()));
     const content: ChatBlock[] = res.content ?? [];
+    archive(pid, sid, { kind: "response", id: res.id, model: res.model, stop_reason: res.stop_reason, usage: res.usage, content });
     pushMsg(sid, { role: "assistant", content });
     if (res.stop_reason === "refusal") { pushMsg(sid, { role: "user", content: [{ type: "text", text: "(요청이 거절되었습니다)" }] }); break; }
     const uses = content.filter((b) => b.type === "tool_use") as any[];
@@ -1339,6 +1439,9 @@ async function askApi(sid: string, text: string) {
         results.push({ type: "tool_result", tool_use_id: u.id, content: String((e as Error)?.message ?? e), is_error: true });
       }
     }
+    const mid = midRunNote();
+    if (mid) results.push({ type: "text", text: mid });
+    archive(pid, sid, { kind: "tool_results", content: results });
     pushMsg(sid, { role: "user", content: results });
     set({ agentStatus: "생각하는 중…" });
   }
@@ -1431,6 +1534,7 @@ export const TOOL_LABEL: Record<string, string> = {
   remove_silences: "무음 정리 중", remove_fillers: "군더더기 말 정리 중", add_markers: "마커 다는 중", set_captions: "자막 설정 중",
   run_script: "스크립트 실행 중", get_sdk_types: "스크립트 API 읽는 중", measure_loudness: "소리 크기 재는 중", find_beats: "박자 찾는 중", find_scene_cuts: "장면 바뀌는 곳 찾는 중", find_audio_events: "소리 구간 찾는 중", scan_gaze: "카메라 보는 구간 찾는 중", organize_media: "미디어 정리하는 중", trim_to_subjects: "사람이 없는 부분 빼는 중", merge_skills: "스킬 합치는 중", run_merged_skill: "병합 스킬 준비 중", finish_step: "단계 마치는 중", get_captions: "자막 읽는 중", edit_captions: "자막 고치는 중", fix_words: "받아쓰기 고치는 중", set_translation: "번역 넣는 중", paste_attributes: "속성 붙여넣는 중", sync_media: "소리로 시간 맞추는 중", multicam_draft: "멀티캠 편집본 만드는 중", auto_color: "색 맞추는 중", set_look: "색 입히는 중", save_skill: "스킬 저장 중", delete_skill: "스킬 지우는 중", ask_options: "선택지 보여 주는 중", run_steps: "여러 작업 실행 중", set_motion: "움직임 넣는 중", set_volume_keys: "음량 조절 중", fit_music: "음악 길이 맞추는 중", add_text: "글자 올리는 중", remove_text: "글자 지우는 중", save_scene_notes: "장면 설명 저장 중", search_scenes: "장면 찾는 중", scan_bad_shots: "흔들림·흐림 찾는 중", find_faces: "얼굴 찾는 중", track_people: "사람 추적하는 중", get_playbook: "작업 순서 읽는 중", equirect_sheet: "파노라마 보는 중", frame_subject: "사람 따라가기 만드는 중", get_view_keys: "시점 키 확인 중", check_framing: "화면 구도 확인 중", snap_cuts: "컷을 말 틈으로 옮기는 중", delete_draft: "편집본 지우는 중",
   transcribe: "받아쓰는 중", export_draft: "내보내는 중",
+  quick_action: "버튼 작업 하는 중", get_activity_log: "작업 기록 읽는 중", get_export_log: "내보내기 기록 읽는 중",
 };
 
 // ---------------------------------------------------------------- "Claude 계정" mode (Claude Code)
@@ -1483,6 +1587,8 @@ async function askAccount(sid: string, text: string) {
   // A fresh Claude Code conversation after a compaction starts from the summary and the latest turns.
   const fresh = !c0.ccSession;
   const prompt = `${fresh && c0.seed ? c0.seed + "\n\n" : ""}${stateNote()}\n\n${text}`;
+  const pid = st.project!.id;
+  archive(pid, sid, { kind: "prompt", model: s.model, effort: s.effort, session: c0.ccSession ?? null, prompt });
   const offs: (() => void)[] = [];
   let resultErr = "";
   let gotResult = false;
@@ -1491,8 +1597,9 @@ async function askAccount(sid: string, text: string) {
     let resolve!: (v: { ok: boolean; err: string }) => void;
     const done = new Promise<{ ok: boolean; err: string }>((r) => { resolve = r; });
     offs.push(await onEvent("cc", (e) => {
-        if (e.kind === "exit") { resolve({ ok: e.ok, err: e.err }); return; }
+        if (e.kind === "exit") { archive(pid, sid, { kind: "cc_exit", ok: e.ok, err: e.err }); resolve({ ok: e.ok, err: e.err }); return; }
         const v = e.data ?? {};
+        archive(pid, sid, { kind: "cc", event: v });
         if (v.session_id && chatById(sid)?.ccSession !== v.session_id) mutateChat((x) => ({ ...x, ccSession: v.session_id, seed: undefined }), sid);
         if (v.parent_tool_use_id) return;
         if (v.type === "assistant") {
@@ -1520,7 +1627,10 @@ async function askAccount(sid: string, text: string) {
         else {
           try { result = { content: mcpContent(await run(name, e.input ?? {})), isError: false }; }
           catch (err) { result = { content: [{ type: "text", text: String((err as Error)?.message ?? err) }], isError: true }; }
+          const mid = midRunNote();
+          if (mid) result.content.push({ type: "text", text: mid });
         }
+        archive(pid, sid, { kind: "tool", name, input: e.input ?? {}, result });
         await api.ccAnswer(e.id, result);
         if (ccRunning) set({ agentStatus: "생각하는 중…" });
     }));

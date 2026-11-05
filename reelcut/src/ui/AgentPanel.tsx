@@ -18,7 +18,7 @@ const SUGGEST = [
 
 function textOf(c: ChatBlock[] | string): string {
   if (typeof c === "string") return c;
-  return c.filter((b) => b.type === "text" && !String(b.text).startsWith("<project-state>")).map((b) => String(b.text)).join("\n");
+  return c.filter((b) => b.type === "text" && !/^<(project-state|user-actions)>/.test(String(b.text))).map((b) => String(b.text)).join("\n");
 }
 
 /** Inline **bold** and `code` (the model writes Markdown; shown as styled text, never as HTML). */
@@ -70,7 +70,7 @@ function RunCard({ r, last }: { r: AiRun; last: boolean }) {
   if (!r.done) return null;
   const undoRun = () => {
     if (!last && !confirm("이 AI 편집 뒤에 한 편집도 함께 되돌아갑니다. 계속할까요?")) return;
-    setDrafts("AI 편집 되돌리기", r.before, r.before.some((d) => d.id === st.draftId) ? st.draftId : r.draftId);
+    setDrafts("AI 편집 되돌리기", r.before, r.before.some((d) => d.id === st.draftId) ? st.draftId : r.draftId, { kind: "undo", label: "AI 작업 되돌리기", run: r.id, chat: r.chat });
     set({ aiRuns: st.aiRuns.map((x) => (x.id === r.id ? { ...x, undone: true } : x)) });
     player.refresh();
     toast("이번 AI 편집을 되돌렸습니다");
