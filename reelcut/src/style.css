@@ -535,3 +535,10 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
 .trash-row { align-items: center; gap: 8px; padding: 4px 0; }
 .trash-row .grow { flex: 1; min-width: 0; }
+.backup-list { display: flex; flex-direction: column; gap: 2px; max-height: 50vh; overflow: auto; margin-top: 8px; }
+.backup-row { display: grid; grid-template-columns: 9.5em 1fr auto; gap: 12px; align-items: center; text-align: left; background: transparent; border: 1px solid transparent; border-radius: var(--r); padding: 6px 10px; min-height: 36px; color: var(--text); }
+.backup-row:hover { background: var(--hover); }
+.backup-row.on { border-color: var(--accent); background: var(--accent-bg); }
+.backup-row .b-when { font-variant-numeric: tabular-nums; }
+.project-root { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.project-root code { flex: 1; min-width: 12em; overflow-wrap: anywhere; }

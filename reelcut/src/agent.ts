@@ -18,7 +18,7 @@ import { CAPTION_PRESETS, TEXT_KINDS } from "./graphics";
 import { applyVerdicts, badSpans, capView, cleanKeys, closeShortPieces, easePitch, frameGroup, frameSubject, lookSummary, normView, percentOk, sampleKeys, saneMarks, snapRanges, subjectLooks, thinMarks, type Mark, type Subject, type SubjectLook } from "./framing";
 import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSkillName, cleanSummary, findSkill, isChain, laterStepOf, looksForPeople, mergeSkills, NOT_IN_BATCH, panoramaTimes, parseSkillCommand, rangeFromText, runChainSteps, skillCatalog, stepLabel, upsertSkill, type Step, type StepResult } from "./skills";
 import { compactBudget, ctxLimit, estTokens, fmtK, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
-import { activeChat, asset, assetMap, editDraft, saveSkills, syncAssets, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
+import { activeChat, asset, assetMap, editDraft, saveSkills, syncAssets, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves, backupProject } from "./store";
 import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
 import { LEVEL_VIEW_RULE, PEOPLE_360_RULE } from "./playbook";
 import { runScript, stopScript } from "./script";
@@ -1373,6 +1373,8 @@ export async function ask(text: string) {
   const run = { id: uid(), chat: sid, at: Date.now(), prompt: text, before: st.project.drafts, draftId: st.draftId, done: false };
   set({ aiRuns: [...st.aiRuns, run], agentBusy: true, agentStatus: "생각하는 중…" });
   const pid = st.project.id;
+  // A dated copy in the project's 백업 folder, so any AI request can be undone from the files too.
+  void backupProject("AI 작업 전");
   curRun = run.id; curChat = sid;
   try {
     await compactIfNeeded(sid, mode);

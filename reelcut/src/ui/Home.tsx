@@ -1,9 +1,10 @@
-import { FolderOpen, Pencil, Plus, Trash2 } from "lucide-preact";
+import { FolderInput, FolderOpen, Pencil, Plus, Trash2 } from "lucide-preact";
 import { useEffect, useState } from "preact/hooks";
 import { api, fileSrc, pickFiles } from "../api";
 import { fmtTC } from "../edit";
 import { createProject, deleteProject, importPaths, isEmptyProject, loadProjects, openProject, renameProject, set, toast, useStore } from "../store";
 import { Modal } from "./Modal";
+import { openProjectDialog, revealProjectFolder } from "../project";
 
 const when = (ms: number) => {
   const d = new Date(ms), p = (n: number) => String(n).padStart(2, "0");
@@ -76,6 +77,7 @@ export function Home() {
         <span class="spacer" />
         {empty.length > 0 && <button onClick={() => Promise.all(empty.map((p) => deleteProject(p.id, "cleanup"))).then(loadTrash)} title="미디어도 편집도 대화도 없는 프로젝트를 휴지통으로 옮깁니다">빈 프로젝트 {empty.length}개 정리</button>}
         <button onClick={() => setShowTrash(true)} title="지운 프로젝트를 되살립니다"><Trash2 size={15} aria-hidden="true" /> 휴지통{trash.length ? ` ${trash.length}` : ""}</button>
+        <button onClick={openProjectDialog} title="프로젝트 파일(.reelcut) 열기 (Ctrl+O)"><FolderInput size={15} aria-hidden="true" /> 열기</button>
         <button class="primary" onClick={() => set({ dialog: "newProject" })}><Plus size={15} aria-hidden="true" /> 새 프로젝트</button>
       </div>
       {s.brokenProjects.length > 0 && <p class="muted">읽을 수 없는 프로젝트 {s.brokenProjects.length}개: {s.brokenProjects.join(", ")}. 파일은 그대로 있습니다.</p>}
@@ -117,6 +119,7 @@ export function Home() {
               <span class="muted">{when(p.updated)} · 미디어 {p.assets} · 편집본 {p.drafts}</span>
               <div class="row card-actions">
                 <button class="icon-btn" onClick={() => setEditing(p.id)} aria-label="이름 바꾸기" title="이름 바꾸기"><Pencil size={14} /></button>
+                <button class="icon-btn" onClick={() => revealProjectFolder(p.id)} aria-label="프로젝트 폴더 열기" title="프로젝트 폴더 열기 (.reelcut 파일, AI 대화, 작업 기록, 백업)"><FolderOpen size={14} /></button>
                 {confirmDel === p.id ? (
                   <>
                     <button class="small danger" onClick={() => { deleteProject(p.id).then(loadTrash); setConfirmDel(null); toast("휴지통으로 옮겼습니다. 언제든 되살릴 수 있습니다"); }}>휴지통으로</button>

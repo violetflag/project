@@ -93,6 +93,35 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
     case "store_list": return ls.keys().filter((k) => k.startsWith(a.prefix));
     case "jsonl_append": { const k = `jsonl:${a.kind}:${a.name}`; const v = ls.get(k); ls.set(k, (v ? v + "\n" : "") + a.lines.join("\n")); return; }
     case "jsonl_tail": { const v = ls.get(`jsonl:${a.kind}:${a.name}`); return v ? String(v).split("\n").filter(Boolean).slice(-a.max) : []; }
+    case "project_save": {
+      ls.set("project-" + a.id, a.json);
+      const name = JSON.parse(a.json).name;
+      ls.set(`folder:${a.id}`, `C:/Users/me/Documents/Reelcut/${name}`);
+      return { file: `C:/Users/me/Documents/Reelcut/${name}/${name}.reelcut`, folder: `C:/Users/me/Documents/Reelcut/${name}` };
+    }
+    case "project_open": {
+      const files = (window as any).__mockProjectFiles ?? {};
+      const doc = files[a.path];
+      if (!doc) throw new Error(`${a.path}: 파일이 없습니다`);
+      return { project: doc, folder: a.path.replace(/[\\/][^\\/]+$/, ""), from: "file", warnings: [], conflict: false };
+    }
+    case "project_info": { const f = ls.get(`folder:${a.id}`); return f ? { folder: f, file: `${f}/${f.split("/").pop()}.reelcut` } : null; }
+    case "project_root": return { root: ls.get("mock-root") || "C:/Users/me/Documents/Reelcut", default: "C:/Users/me/Documents/Reelcut", custom: !!ls.get("mock-root"), docsSyncedBy: null, rootSyncedBy: null };
+    case "project_set_root": ls.set("mock-root", a.path); return;
+    case "project_backup": {
+      const k = `backups:${a.id}`, list = JSON.parse(ls.get(k) || "[]");
+      const proj = ls.get("project-" + a.id);
+      if (!proj) return null;
+      const file = `${a.time} ${a.reason}.reelcut`;
+      list.unshift({ file, time: Date.now(), reason: a.reason, size: proj.length, project: JSON.parse(proj) });
+      ls.set(k, JSON.stringify(list));
+      return file;
+    }
+    case "project_backups": return JSON.parse(ls.get(`backups:${a.id}`) || "[]").map(({ project: _p, ...b }: any) => b);
+    case "project_backup_read": return JSON.parse(ls.get(`backups:${a.id}`) || "[]").find((b: any) => b.file === a.file)?.project;
+    case "project_migrate": return { saved: 0, skipped: ls.keys().filter((k) => k.startsWith("project-")).length, failed: [] };
+    case "project_trash": ls.del(`folder:${a.id}`); return;
+    case "project_copy_logs": { const v = ls.get(`jsonl:actions:${a.from}`); if (v) ls.set(`jsonl:actions:${a.to}`, v); return; }
     case "loudness": return { i: -20 - (String(a.path).length % 7) };
     case "expand_paths": return a.paths.map((p: string) => [p, ""]);
     case "inspect": return info(a.path);

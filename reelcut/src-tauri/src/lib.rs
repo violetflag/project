@@ -12,6 +12,7 @@ mod live;
 mod media;
 mod probe;
 mod proj;
+mod project;
 mod qwen;
 mod render;
 mod shots;
@@ -1514,6 +1515,17 @@ fn set_data_dir(handle: tauri::AppHandle, path: String) -> Result<(), String> {
 
 pub fn run() {
     tauri::Builder::default()
+        // A second start (a .reelcut or video opened from Explorer) hands its files to this window.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+            let files: Vec<String> = argv.into_iter().skip(1).filter(|a| !a.starts_with('-') && Path::new(a).exists()).collect();
+            if !files.is_empty() {
+                let _ = app.emit("open-files", files);
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -1603,7 +1615,18 @@ pub fn run() {
             cc_answer,
             cc_stop,
             jsonl::jsonl_append,
-            jsonl::jsonl_tail
+            jsonl::jsonl_tail,
+            project::project_save,
+            project::project_open,
+            project::project_info,
+            project::project_root,
+            project::project_set_root,
+            project::project_backup,
+            project::project_backups,
+            project::project_backup_read,
+            project::project_migrate,
+            project::project_trash,
+            project::project_copy_logs
         ])
         .run(tauri::generate_context!())
         .expect("error while running reelcut");

@@ -62,7 +62,10 @@ pub fn tail(p: &Path, max: usize) -> Result<Vec<String>, String> {
 
 #[tauri::command]
 pub fn jsonl_append(app: super::St<'_>, kind: String, name: String, lines: Vec<String>) -> Result<(), String> {
-    append(&path(&app.data_dir, &kind, &name)?, &lines)
+    append(&path(&app.data_dir, &kind, &name)?, &lines)?;
+    // The same lines in the project's folder (기록\작업.jsonl, 대화\원본\<sid>.jsonl).
+    super::project::mirror(&app.data_dir, &kind, &name, &lines);
+    Ok(())
 }
 
 #[tauri::command]

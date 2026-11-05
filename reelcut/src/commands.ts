@@ -9,6 +9,7 @@ import type { Clip } from "./types";
 import { player } from "./ui/Viewer";
 import { applyWorkspace, togglePanel } from "./ui/layout";
 import { actionList, runAction } from "./actions";
+import { backupNow, openProjectDialog, revealProjectFolder } from "./project";
 import "./quick";
 import "./quick360";
 
@@ -138,10 +139,15 @@ const QUICK_CMDS: Cmd[] = actionList().filter((a) => a.key).map((a, i) => ({
 export const COMMANDS: Cmd[] = [
   // 파일
   { id: "new", label: "새 프로젝트…", menu: "파일", keys: "Ctrl+N", global: true, run: () => set({ dialog: "newProject" }) },
-  { id: "import", label: "미디어 가져오기…", menu: "파일", keys: "Ctrl+I", enabled: inProject, run: async () => importPaths(await pickFiles()) },
+  { id: "open", label: "열기…", menu: "파일", keys: "Ctrl+O", term: "Open Project (.reelcut)", global: true, run: openProjectDialog },
+  { id: "import", label: "미디어 가져오기…", menu: "파일", keys: "Ctrl+I", sep: true, enabled: inProject, run: async () => importPaths(await pickFiles()) },
   { id: "importFolder", label: "폴더 가져오기…", menu: "파일", enabled: inProject, run: async () => importPaths(await pickFiles(true)) },
-  { id: "save", label: "저장", menu: "파일", keys: "Ctrl+S", sep: true, enabled: inProject, run: async () => { await saveNow(); toast("저장했습니다"); } },
-  { id: "export", label: "내보내기…", menu: "파일", keys: "Ctrl+E", term: "Export / Render", enabled: hasClips, run: () => set({ dialog: "export" }) },
+  { id: "save", label: "저장", menu: "파일", keys: "Ctrl+S", sep: true, enabled: inProject, run: async () => { await saveNow(); toast(st.projectFile ? `저장했습니다: ${st.projectFile}` : "저장했습니다"); } },
+  { id: "saveAs", label: "다른 이름으로 저장…", menu: "파일", keys: "Ctrl+Shift+S", term: "Save As", enabled: inProject, run: () => set({ dialog: "saveAs" }) },
+  { id: "revealProject", label: "프로젝트 폴더 열기", menu: "파일", term: "Show in Explorer", enabled: inProject, run: () => revealProjectFolder() },
+  { id: "backupNow", label: "백업 만들기", menu: "파일", enabled: inProject, run: backupNow },
+  { id: "restoreBackup", label: "백업에서 되살리기…", menu: "파일", term: "Revert to Backup", enabled: inProject, run: () => set({ dialog: "backups" }) },
+  { id: "export", label: "내보내기…", menu: "파일", keys: "Ctrl+E", sep: true, term: "Export / Render", enabled: hasClips, run: () => set({ dialog: "export" }) },
   { id: "home", label: "홈으로", menu: "파일", sep: true, global: true, run: () => { saveNow(); set({ route: "home" }); } },
 
   // 편집

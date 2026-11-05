@@ -57,7 +57,9 @@ type S = {
   exportQueue: { draftId: string; choice: any }[];
   aiRuns: AiRun[];
   savedAt: number;
-  dialog: "" | "shortcuts" | "export" | "newProject" | "pasteAttrs";
+  /** The open project's file in its folder (Documents\Reelcut\<이름>\<이름>.reelcut). */
+  projectFile: string;
+  dialog: "" | "shortcuts" | "export" | "newProject" | "pasteAttrs" | "saveAs" | "backups";
   showSafe: boolean;
   /** Timeline shows where silence removal would cut. */
   showSilence: boolean;
@@ -77,7 +79,7 @@ export const st: S = {
   route: "home", projects: [], project: null, draftId: null, sourceId: null, folder: "", playhead: 0, selClip: null,
   settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, ccConnect: null, qwenSetup: null, downloads: {}, exportJob: null, brokenProjects: [], toast: "",
   agentBusy: false, agentStatus: "", rightTab: "inspect", leftTab: "media",
-  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, dialog: "", showSafe: false, showSilence: false, motion: {}, scans: {}, motionRev: 0, prompts: [], skills: [],
+  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, projectFile: "", dialog: "", showSafe: false, showSilence: false, motion: {}, scans: {}, motionRev: 0, prompts: [], skills: [],
 };
 
 const subs = new Set<() => void>();
@@ -109,19 +111,55 @@ export const asset = (id: string | null | undefined) => (id ? st.project?.assets
 
 // ---------------------------------------------------------------- persistence
 
+/** Autosave waits this long after the last change, but never longer than SAVE_MAX after the first. */
+export const SAVE_DEBOUNCE = 1500;
+export const SAVE_MAX = 10_000;
 let saveT: any;
+let firstUnsaved = 0;
 function scheduleSave() {
   clearTimeout(saveT);
-  saveT = setTimeout(saveNow, 400);
+  const now = Date.now();
+  if (!firstUnsaved) firstUnsaved = now;
+  saveT = setTimeout(saveNow, Math.max(0, Math.min(SAVE_DEBOUNCE, firstUnsaved + SAVE_MAX - now)));
 }
+/** A local time for file names, "YYYY-MM-DD HHmm". */
+export function localStamp(d = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}${p(d.getMinutes())}`;
+}
+/** A local time with its offset, "2026-11-05T10:03:12+09:00". */
+export function localIso(d = new Date()): string {
+  const p = (n: number) => String(Math.abs(n)).padStart(2, "0");
+  const off = -d.getTimezoneOffset();
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}${off >= 0 ? "+" : "-"}${p(Math.trunc(off / 60))}:${p(off % 60)}`;
+}
+/** What is saved: no running-job flags. */
+export const cleanProject = (p: Project): Project => ({ ...p, assets: p.assets.map((a) => ({ ...a, stitching: false, tState: a.tState === "running" ? "idle" : a.tState })) });
+let folderError = "";
+/** Saves to the app store and to the project's folder (Documents\Reelcut\<이름>). */
 export async function saveNow() {
   clearTimeout(saveT);
+  firstUnsaved = 0;
   const p = st.project;
   if (!p) return;
-  const clean: Project = { ...p, assets: p.assets.map((a) => ({ ...a, stitching: false, tState: a.tState === "running" ? "idle" : a.tState })) };
-  await api.storeSet("project-" + p.id, JSON.stringify(clean));
+  const r = await api.projectSave(p.id, JSON.stringify(cleanProject(p)), localIso());
+  // The store copy is saved even when the folder cannot be written; say so once per problem.
+  if (r?.error && r.error !== folderError) toast(`프로젝트 폴더에 저장하지 못했습니다 (앱 안에는 저장됨): ${r.error}`);
+  folderError = r?.error ?? "";
   const meta = metaOf(p);
-  set({ projects: [meta, ...st.projects.filter((m) => m.id !== p.id)].sort((a, b) => b.updated - a.updated), savedAt: Date.now() });
+  set({ projects: [meta, ...st.projects.filter((m) => m.id !== p.id)].sort((a, b) => b.updated - a.updated), savedAt: Date.now(), projectFile: r?.file ?? st.projectFile });
+}
+/** A dated copy in the project's 백업 folder ("AI 작업 전", "수동", …); never fails the caller. */
+export async function backupProject(reason: string): Promise<string | null> {
+  const p = st.project;
+  if (!p) return null;
+  try {
+    if (firstUnsaved) await saveNow();
+    return await api.projectBackup(p.id, reason, localStamp());
+  } catch (e) {
+    api.logEvent("backup", `${p.id} ${reason}: ${String(e)}`).catch(() => {});
+    return null;
+  }
 }
 
 function metaOf(p: Project): Meta {
@@ -175,7 +213,10 @@ export async function openProject(id: string) {
   p.assets = p.assets.map(({ proxy: _p, proxyState: _s, proxyPct: _c, proxyError: _e, proxyStage: _g, ...a }: any) => a);
   if (!p.drafts.length) p.drafts.push(newDraft("첫 편집본"));
   undoStack.length = 0; redoStack.length = 0;
-  set({ project: p, draftId: p.drafts[0].id, route: "project", sourceId: null, playhead: 0, selClip: null, selItem: null, folder: "", aiRuns: [] });
+  set({ project: p, draftId: p.drafts[0].id, route: "project", sourceId: null, playhead: 0, selClip: null, selItem: null, folder: "", aiRuns: [], projectFile: "" });
+  // The folder's file, and the first backup of the day ("열기").
+  api.projectInfo(p.id).then((f) => { if (st.project?.id === p.id) set({ projectFile: f?.file ?? "" }); }).catch(() => {});
+  void backupProject("열기");
   // Resume work that was cut off when the app closed.
   for (const a of p.assets) {
     prepare360(a.id);
@@ -191,6 +232,8 @@ export const isEmptyProject = (p: Meta) => !p.assets && !p.clips && !p.chats;
 /** Moves the project to the trash; Home can bring it back. */
 export async function deleteProject(id: string, by: "user" | "cleanup" = "user") {
   await api.storeDelete("project-" + id, by, by === "cleanup" ? "빈 프로젝트 정리" : "홈에서 삭제");
+  // Its folder goes to Reelcut\_휴지통 too (nothing is erased).
+  await api.projectTrash(id, localStamp()).catch((e) => api.logEvent("delete", `${id} folder: ${String(e)}`).catch(() => {}));
   set({ projects: st.projects.filter((m) => m.id !== id) });
 }
 
@@ -199,7 +242,8 @@ export async function renameProject(id: string, name: string) {
   const raw = await api.storeGet("project-" + id);
   if (!raw) return;
   const p: Project = { ...JSON.parse(raw), name, updated: Date.now() };
-  await api.storeSet("project-" + id, JSON.stringify(p));
+  // Through the folder save, so the folder and its file take the new name too.
+  await api.projectSave(id, JSON.stringify(p), localIso());
   await loadProjects();
 }
 

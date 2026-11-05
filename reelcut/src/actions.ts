@@ -2,7 +2,7 @@
 // quick_action tool, so a click and an AI request do exactly the same thing. Every run is one undo
 // step and one action-log line; running it again when nothing is left to do says "이미 적용됨".
 import { logAction, quickBegin, quickEnd } from "./actionlog";
-import { beginUndoGroup, editDraft, st, toast } from "./store";
+import { backupProject, beginUndoGroup, editDraft, st, toast } from "./store";
 import type { Clip, Draft } from "./types";
 
 export type Scope = { kind: "clips"; ids: string[] } | { kind: "draft" };
@@ -70,6 +70,8 @@ export async function runAction(id: string, o: RunOpts = {}): Promise<ActionResu
     return { changed: 0, detail, skipped: [] };
   }
   const label = by === "ai" ? `AI: ${def.label}` : def.label;
+  // A whole-draft click by hand is kept as a backup first (the AI's runs already have one).
+  if (by === "user" && scope.kind === "draft") await backupProject("전체 적용 전");
   const t0 = Date.now();
   const g = beginUndoGroup(label);
   quickBegin();

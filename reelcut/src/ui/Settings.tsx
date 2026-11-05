@@ -4,6 +4,46 @@ import { EFFORTS, MODELS } from "../agent";
 import { CTX_DEFAULTS } from "../chats";
 import { connectClaude, refreshCc, refreshModels, refreshQwen, saveNow, saveSettings, set, st, toast, useStore } from "../store";
 import { SkillsSection } from "./SkillsSection";
+import { localIso } from "../store";
+import type { ProjectRoot } from "../api";
+
+/** Where project folders go (Documents\Reelcut by default) and the copy of every project there. */
+function ProjectFolderSection() {
+  const [r, setR] = useState<ProjectRoot | null>(null);
+  const [busy, setBusy] = useState("");
+  const load = () => api.projectRoot().then(setR).catch(() => setR(null));
+  useEffect(() => { load(); }, []);
+  const change = async (path: string) => {
+    try { await api.projectSetRoot(path); await load(); toast(path ? "새 프로젝트는 이 폴더에 만들어집니다" : "기본 폴더로 돌렸습니다"); } catch (e) { toast(String(e)); }
+  };
+  const again = async () => {
+    setBusy("저장하는 중…");
+    try {
+      await saveNow();
+      const x = await api.projectMigrate(localIso(), true);
+      setBusy(`프로젝트 ${x.saved}개를 다시 저장했습니다${x.failed.length ? `, ${x.failed.length}개 실패: ${x.failed[0]}` : ""}`);
+    } catch (e) { setBusy(String(e)); }
+  };
+  return (
+    <section>
+      <h2>프로젝트 파일</h2>
+      <p class="muted">프로젝트마다 폴더가 하나씩 생기고, 그 안에 두 번 눌러 여는 .reelcut 파일, AI 대화, 작업 기록, 날짜별 백업이 함께 저장됩니다. 원본 영상은 옮기지 않습니다.</p>
+      <div class="project-root">
+        <code>{r?.root ?? "확인 중…"}</code>
+        <button class="small" disabled={!r} onClick={() => r && api.reveal(r.root)}>폴더 열기</button>
+        <button class="small" onClick={async () => { const d = await pickFolder(); if (d) change(d); }}>바꾸기</button>
+        {r?.custom && <button class="small" onClick={() => change("")}>기본으로</button>}
+      </div>
+      {r?.docsSyncedBy && !r.custom && <p class="muted">문서 폴더가 {r.docsSyncedBy}와 동기화되고 있어서, 가족이 나오는 장면이 인터넷에 올라가지 않도록 사용자 폴더 아래 Reelcut에 저장합니다.</p>}
+      {r?.rootSyncedBy && <p class="warn">이 폴더는 {r.rootSyncedBy}와 동기화됩니다. AI가 본 장면(사진)은 이 폴더가 아니라 앱 데이터 폴더에만 저장합니다.</p>}
+      <p class="muted">바꾸면 새로 만드는 프로젝트부터 그 폴더에 저장됩니다. 이미 있는 프로젝트 폴더는 그대로 둡니다.</p>
+      <div class="row">
+        <button class="small" disabled={busy === "저장하는 중…"} onClick={again} title="앱 안의 모든 프로젝트를 각자의 폴더에 다시 씁니다 (지우는 것은 없습니다)">모든 프로젝트 다시 저장</button>
+        {busy && <span class="muted">{busy}</span>}
+      </div>
+    </section>
+  );
+}
 
 export function SettingsView() {
   const s = useStore();
@@ -184,6 +224,8 @@ export function SettingsView() {
         </>}
         <label class="check"><input type="checkbox" checked={cfg.autoTranscribe} onChange={(e) => saveSettings({ autoTranscribe: (e.target as HTMLInputElement).checked })} /> 가져온 영상은 자동으로 받아쓰기</label>
       </section>
+
+      <ProjectFolderSection />
 
       <section>
         <h2>미디어와 내보내기</h2>

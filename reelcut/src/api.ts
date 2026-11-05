@@ -36,6 +36,8 @@ export type AppInfo = {
   dataDir: string; cacheDir: string; hw: Hw; platform: string; videosDir: string;
 };
 export type QwenStatus = { env: boolean; package: boolean; models: boolean; ready: boolean; cuda: boolean; gpu: string; vram_gb: number; torch: string; error: string };
+export type ProjectRoot = { root: string; default: string; custom: boolean; docsSyncedBy: string | null; rootSyncedBy: string | null };
+export type ProjectBackup = { file: string; time: number; reason: string; size: number };
 /** Claude Code on this PC (the "Claude 계정" connection). */
 export type CcStatus = { found: boolean; path: string; version: string; logged_in: boolean; method: string; account: string; plan: string; error: string };
 export type CcRun = { model: string; effort: string; system: string; prompt: string; session: string | null; tools: unknown };
@@ -54,6 +56,18 @@ export const api = {
   /** Append-only logs: "actions" (per project) and "chats" (raw AI conversation archive). */
   jsonlAppend: (kind: "actions" | "chats", name: string, lines: string[]) => invoke<void>("jsonl_append", { kind, name, lines }),
   jsonlTail: (kind: "actions" | "chats", name: string, max: number) => invoke<string[]>("jsonl_tail", { kind, name, max }),
+  // Project folders (2.18): Documents\Reelcut\<이름>\<이름>.reelcut with chats, logs and backups.
+  projectSave: (id: string, json: string, savedAt: string) => invoke<{ file?: string; folder?: string; error?: string }>("project_save", { id, json, savedAt }),
+  projectOpen: (path: string) => invoke<{ project: any; folder: string; from: string; warnings: string[]; conflict: boolean }>("project_open", { path }),
+  projectInfo: (id: string) => invoke<{ folder: string; file?: string } | null>("project_info", { id }),
+  projectRoot: () => invoke<ProjectRoot>("project_root"),
+  projectSetRoot: (path: string) => invoke<void>("project_set_root", { path }),
+  projectBackup: (id: string, reason: string, time: string) => invoke<string | null>("project_backup", { id, reason, time }),
+  projectBackups: (id: string) => invoke<ProjectBackup[]>("project_backups", { id }),
+  projectBackupRead: (id: string, file: string) => invoke<any>("project_backup_read", { id, file }),
+  projectMigrate: (savedAt: string, force = false) => invoke<{ saved: number; skipped: number; failed: string[] }>("project_migrate", { savedAt, force }),
+  projectTrash: (id: string, time: string) => invoke<void>("project_trash", { id, time }),
+  projectCopyLogs: (from: string, to: string) => invoke<void>("project_copy_logs", { from, to }),
   /** Integrated loudness (LUFS, ffmpeg ebur128) of a stretch of a file; i is -70 or lower for silence. */
   loudness: (path: string, start: number, dur: number) => invoke<{ i: number }>("loudness", { path, start, dur }),
   expandPaths: (paths: string[]) => invoke<[string, string][]>("expand_paths", { paths }),
@@ -116,6 +130,27 @@ export async function pickFiles(folder = false): Promise<string[]> {
 }
 
 /** A colour lookup table (.cube) for the colour section. */
+/** A Reelcut project file. */
+export async function pickProject(): Promise<string | null> {
+  if (!inTauri) return (window as any).__mockPickProject?.() ?? null;
+  const d = await import("@tauri-apps/plugin-dialog");
+  const r = await d.open({ multiple: false, filters: [{ name: "Reelcut 프로젝트", extensions: ["reelcut"] }] });
+  return typeof r === "string" ? r : null;
+}
+
+/** Files handed over by a second start of the app (a .reelcut or video opened from Explorer). */
+export const onOpenFiles = (cb: (paths: string[]) => void) => onEvent("open-files", cb);
+
+/** Runs `fn` before the window closes (Alt+F4, the taskbar, the X button), then closes it. */
+export async function beforeClose(fn: () => Promise<void>) {
+  if (!inTauri) return;
+  const w = await import("@tauri-apps/api/window");
+  await w.getCurrentWindow().onCloseRequested(async () => {
+    // At most a few seconds: a stuck save must not keep the window open.
+    try { await Promise.race([fn(), new Promise((r) => setTimeout(r, 5000))]); } catch { /* closing anyway */ }
+  });
+}
+
 export async function pickLut(): Promise<string | null> {
   if (!inTauri) return null;
   const d = await import("@tauri-apps/plugin-dialog");

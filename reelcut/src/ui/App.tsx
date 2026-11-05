@@ -1,8 +1,11 @@
 import { Film, Home as HomeIcon, Minus, Settings as Gear, Square, X } from "lucide-preact";
 import { useEffect } from "preact/hooks";
-import { api, onFileDrop, windowCmd } from "../api";
+import { api, beforeClose, onFileDrop, onOpenFiles, windowCmd } from "../api";
+import { flush, flushArchive } from "../actionlog";
+import { openPaths, startProjectFiles } from "../project";
+import { BackupsDialog, SaveAsDialog } from "./ProjectDialogs";
 import { handleKey } from "../commands";
-import { createProject, importPaths, initJobs, loadProjects, loadPrompts, loadSettings, loadSkills, refreshModels, refreshCc, refreshQwen, saveNow, set, st, useStore } from "../store";
+import { initJobs, loadProjects, loadPrompts, loadSettings, loadSkills, refreshModels, refreshCc, refreshQwen, saveNow, set, st, useStore } from "../store";
 import { ExportDialog } from "./ExportDialog";
 import { Home, NewProjectDialog } from "./Home";
 import { MenuBar } from "./MenuBar";
@@ -29,16 +32,16 @@ async function boot() {
   refreshQwen(false);
   refreshCc();
   api.appInfo().then((info) => set({ info })).catch(() => {});
-  onFileDrop(async (paths) => {
-    if (!st.project) await createProject(paths[0].split(/[\\/]/).pop()!.replace(/\.[^.]+$/, ""));
-    await importPaths(paths);
-  });
-  // Opened with files (double-click on an .osv / .lrf).
+  // A .reelcut opens its project; videos are imported (into a new project when none is open).
+  onFileDrop(openPaths);
+  // Opened with files (double-click on a .reelcut, .osv or .lrf), or handed over by a second start.
   const files = await api.initialFiles().catch(() => [] as string[]);
-  if (files.length) {
-    await createProject(files[0].split(/[\\/]/).pop()!.replace(/\.[^.]+$/, ""));
-    await importPaths(files);
-  }
+  if (files.length) await openPaths(files);
+  onOpenFiles(openPaths);
+  // Every project gets its folder in Documents\Reelcut (once), and the hourly backup starts.
+  void startProjectFiles();
+  // Closing (X, Alt+F4, the taskbar) waits for the last save and log lines.
+  beforeClose(async () => { flush(); flushArchive(); await saveNow(); });
   window.addEventListener("beforeunload", () => { saveNow(); });
   window.addEventListener("keydown", (e) => { if (!st.dialog || e.key === "Escape") handleKey(e); });
 }
@@ -89,6 +92,8 @@ export function App() {
       {s.dialog === "shortcuts" && <ShortcutsDialog onClose={() => set({ dialog: "" })} />}
       {s.dialog === "pasteAttrs" && <PasteAttrsDialog onClose={() => set({ dialog: "" })} />}
       {s.dialog === "newProject" && <NewProjectDialog onClose={() => set({ dialog: "" })} />}
+      {s.dialog === "saveAs" && s.project && <SaveAsDialog onClose={() => set({ dialog: "" })} />}
+      {s.dialog === "backups" && s.project && <BackupsDialog onClose={() => set({ dialog: "" })} />}
       {s.dialog === "export" && d && <ExportDialog draft={d} onClose={() => set({ dialog: "" })} />}
       {s.toast && <div class="toast" role="status">{s.toast}</div>}
     </div>

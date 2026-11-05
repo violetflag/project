@@ -21,6 +21,12 @@ pub fn is_media(path: &Path) -> bool {
     VIDEO_EXT.contains(&e.as_str()) || AUDIO_EXT.contains(&e.as_str()) || IMAGE_EXT.contains(&e.as_str())
 }
 
+/// A Reelcut project folder (it holds a `.reelcut` file) or the project trash.
+pub fn is_project_dir(p: &Path) -> bool {
+    p.file_name().is_some_and(|n| n == "_휴지통")
+        || std::fs::read_dir(p).into_iter().flatten().flatten().any(|e| e.path().extension().is_some_and(|x| x == "reelcut"))
+}
+
 /// Files under `paths` (files kept as they are, folders walked) that look like media, skipping
 /// hidden entries. Sorted by path inside each folder.
 pub fn expand(paths: &[String]) -> Vec<(String, String)> {
@@ -40,6 +46,11 @@ pub fn expand(paths: &[String]) -> Vec<(String, String)> {
             }
             let p = e.path();
             if p.is_dir() {
+                // Reelcut's own project folders and their trash hold backups and the AI's pictures,
+                // never footage to import.
+                if is_project_dir(&p) {
+                    continue;
+                }
                 let r = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
                 walk(&p, &r, out, depth + 1);
             } else if is_media(&p) {
@@ -49,6 +60,9 @@ pub fn expand(paths: &[String]) -> Vec<(String, String)> {
     }
     for p in paths {
         let pb = PathBuf::from(p);
+        if pb.is_dir() && is_project_dir(&pb) {
+            continue;
+        }
         if pb.is_dir() {
             let name = pb.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             walk(&pb, &name, &mut out, 0);
