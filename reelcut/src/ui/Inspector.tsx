@@ -13,8 +13,14 @@ import {
 } from "../edit";
 import { CAPTION_PRESETS, STICKERS, TEXT_KINDS, textLook } from "../graphics";
 import { asset, draft, editDraft, patchAsset, prepare360, set, st, toast, useStore } from "../store";
-import type { Clip, ColorAdj, Draft, MusicClip, Overlay, TextItem, Transform, View, VolKey } from "../types";
+import type { Clip, ColorAdj, Draft, MusicClip, Overlay, TextItem, Transform, View, ViewPreset, VolKey } from "../types";
 import { player } from "./Viewer";
+import { runAction } from "../actions";
+import { fovMax, presetView, PRESET_LABEL, viewStats } from "../proj";
+import "../quick360";
+
+/** Runs a toolbar button on one main-track clip (same undo step and log line as the toolbar). */
+const quick = (id: string, clip: string) => { runAction(id, { scope: { clips: [clip] } }).then(() => player.refresh()).catch((e) => toast(String((e as Error)?.message ?? e))); };
 import { Stab360 } from "./Stab360";
 import { Stitch360 } from "./Stitch360";
 
@@ -128,8 +134,16 @@ function ColorSec({ c, onChange, onAuto }: { c: ColorAdj; onChange: (p: Partial<
   );
 }
 
-function ViewSec({ view, keys, src, onView, onKeys }: { view?: View; keys?: { t: number; view: View }[]; src: number | null; onView: (v: View) => void; onKeys: (k: { t: number; view: View }[] | undefined) => void }) {
-  const cur = src != null ? viewAt(view, keys, src) : view ?? DEFAULT_VIEW;
+function ViewSec({ view, keys, src, onView, onKeys, preset, onPreset, onUndistort }: {
+  view?: View; keys?: { t: number; view: View }[]; src: number | null; onView: (v: View) => void; onKeys: (k: { t: number; view: View }[] | undefined) => void;
+  /** The preset last applied (clips on the main track), and how to apply one / fix distortion. */
+  preset?: ViewPreset; onPreset?: (p: ViewPreset) => void; onUndistort?: () => void;
+}) {
+  const at = src != null ? viewAt(view, keys, src) : view ?? DEFAULT_VIEW;
+  // Interpolated views do not carry the projection; the clip's own setting holds.
+  const cur: View = { ...at, dist: at.dist ?? view?.dist ?? 0 };
+  const aspect = draft()?.aspect ?? "16:9";
+  const stats = viewStats(cur.hfov, cur.dist, aspect);
   const animated = !!keys?.length;
   const setVal = (p: Partial<View>) => {
     const v = { ...cur, ...p };
@@ -145,7 +159,18 @@ function ViewSec({ view, keys, src, onView, onKeys }: { view?: View; keys?: { t:
       <Num label="좌우" value={cur.yaw} min={-180} max={180} step={1} def={0} unit="°" onChange={(v) => setVal({ yaw: v })} />
       <Num label="위아래" value={cur.pitch} min={-90} max={90} step={1} def={0} unit="°" onChange={(v) => setVal({ pitch: v })} />
       <Num label="기울기" value={cur.roll} min={-180} max={180} step={1} def={0} unit="°" onChange={(v) => setVal({ roll: v })} />
-      <Num label="화각" value={cur.hfov} min={20} max={160} step={1} def={100} unit="°" onChange={(v) => setVal({ hfov: v })} />
+      <Num label="화각" value={cur.hfov} min={20} max={Math.round(fovMax(cur.dist ?? 0))} step={1} def={100} unit="°" onChange={(v) => setVal({ hfov: v })} />
+      <Num label="왜곡 보정" value={cur.dist ?? 0} min={0} max={1} step={0.05} def={0} onChange={(v) => setVal({ dist: Math.round(v * 1000) / 1000, hfov: Math.min(cur.hfov, Math.round(fovMax(v))) })} />
+      <p class="muted tip" title="세로 화각, 대각선 화각, 화면 모서리에서 둥근 것이 늘어나는 정도 (1 = 그대로)">세로 {stats.vfov}° · 대각선 {stats.dfov}° · 모서리 ×{stats.stretch}
+        {stats.stretch > 1.4 && onUndistort && <> · <a onClick={onUndistort} title="짧은 변의 화각은 그대로 두고 모서리 늘어짐을 줄입니다">모서리 늘어짐 바로잡기</a></>}
+      </p>
+      {onPreset && (
+        <div class="chips" role="group" aria-label="화각 프리셋">
+          {(["best", "zoom", "wide", "ultra", "planet"] as ViewPreset[]).map((p) => (
+            <button class={`chip ${preset === p ? "on" : ""}`} aria-pressed={preset === p} onClick={() => onPreset(p)} title={`${PRESET_LABEL[p]}: 화각 ${presetView(aspect, p).hfov}°, 왜곡 보정 ${presetView(aspect, p).dist}`}>{PRESET_LABEL[p]}</button>
+          ))}
+        </div>
+      )}
       {animated && (
         <div class="keys-list">
           {keys!.map((k) => (
@@ -266,7 +291,8 @@ function ClipView({ d, c }: { d: Draft; c: Clip }) {
       )}
       {a && is360(a) && (
         <>
-          <ViewSec view={c.view} keys={c.viewKeys} src={src} onView={(v) => set1("시점 바꾸기", { view: v })} onKeys={(k) => set1("360 키프레임", { viewKeys: k })} />
+          <ViewSec view={c.view} keys={c.viewKeys} src={src} onView={(v) => set1("시점 바꾸기", { view: v, viewPreset: undefined })} onKeys={(k) => set1("360 키프레임", { viewKeys: k, viewPreset: undefined })}
+            preset={c.viewPreset} onPreset={(p) => quick(`view.${p}`, c.id)} onUndistort={() => quick("undistort", c.id)} />
           <Section id="lens" title={`렌즈 (${a.info.layout360 === "dual" ? "OSV 두 렌즈" : a.info.layout360 === "dfisheye" ? "두 어안 나란히" : "펼친 360"})`} defaultOpen={false}>
             {a.info.layout360 !== "equirect" ? (
               <>

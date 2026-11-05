@@ -131,6 +131,8 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .qb-split { position: relative; display: inline-flex; align-items: center; }
 .qb-split .qb-arrow { width: 16px; margin-left: -2px; }
 .qb-pop { min-width: 200px; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 2px; }
+.chips .chip { cursor: pointer; }
 .seg { display: flex; gap: 1px; background: var(--sunk); border: 1px solid var(--line); border-radius: 7px; padding: 1px; }
 .seg .icon-btn { width: 30px; height: 26px; }
 .workspace { min-height: 0; min-width: 0; display: grid; }
