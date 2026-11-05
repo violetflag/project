@@ -2,7 +2,7 @@
 // pictures placed over it, A1 split-off sound, A2 music, A3 effects, C1 shows the captions.
 // Tools: select (move/trim), blade (cut where clicked), roll (move a cut), slip (show another part),
 // rate (an edge changes the speed, the same part of the source plays).
-import { Captions, Eye, EyeOff, Headphones, Lock, LockOpen, Volume2, VolumeX } from "lucide-preact";
+import { Captions, Check, Ellipsis, Eye, EyeOff, Flag, Gauge, Headphones, Keyboard, Lock, LockOpen, Magnet, MousePointer2, MoveHorizontal, Redo2, Scissors, SplitSquareHorizontal, Undo2, Volume2, VolumeX } from "lucide-preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { fileSrc } from "../api";
 import { draftCaptions } from "../captions";
@@ -11,9 +11,10 @@ import {
   audioTrack, clipDur, deleteClip, detachAudio, draftDuration, draftWords, fmtTCF, insertClips, is360, isGap, liftClip, moveClip, newClip, newOverlay, overlays, PACING,
   r3, rateForLength, rollEdit, setTransition, silenceCuts, slipClip, speechFromWave, speechFromWords, splitAt, splitItem, starts, timedDur, trackState, uid, updateAudio, updateClip, updateOverlay, xinOf, type Pacing,
 } from "../edit";
-import { asset, assetMap, draft, editDraft, ensureStrip, loadWave, set, st, toast, useStore, waves } from "../store";
+import { asset, assetMap, canRedo, canUndo, draft, editDraft, ensureStrip, loadWave, redo, set, st, toast, undo, undoLabel, useStore, waves, type Tool } from "../store";
 import type { Clip, Draft, MusicClip, Overlay, TrackId } from "../types";
 import { setLayout } from "./layout";
+import { useDismiss } from "./QuickBar";
 import { player } from "./Viewer";
 
 const H: Record<TrackId, number> = { V3: 46, V2: 46, V1: 66, A1: 40, A2: 40, A3: 40, C1: 26 };
@@ -49,10 +50,20 @@ type Drag = {
 };
 type Ghost = { id: string; dx: number; to?: number; patch?: Partial<Clip>; ipatch?: Partial<Overlay & MusicClip>; draft?: Draft };
 
+const TOOLS: { id: Tool; label: string; key: string; term: string; main?: boolean; Icon: any }[] = [
+  { id: "select", label: "선택", key: "V", term: "Selection", main: true, Icon: MousePointer2 },
+  { id: "blade", label: "자르기", key: "C", term: "Razor", main: true, Icon: Scissors },
+  { id: "roll", label: "편집점 굴리기", key: "N", term: "Rolling Edit", Icon: SplitSquareHorizontal },
+  { id: "slip", label: "내용 밀기", key: "Y", term: "Slip", Icon: MoveHorizontal },
+  { id: "rate", label: "길이로 속도 바꾸기", key: "R", term: "Rate Stretch", Icon: Gauge },
+];
+
 export function Timeline() {
   const s = useStore();
   const d = draft();
   const [zoom, setZoom] = useState(40); // px per second
+  const [more, setMore] = useState(false);
+  const moreRef = useDismiss(more, () => setMore(false));
   const [pacing, setPac] = useState<Pacing>(getPacing());
   const [silPad, setSilPad] = useState<number | null>(getSilencePad());
   const [menu, setMenu] = useState<{ id: string; x: number; y: number; item?: boolean } | null>(null);
@@ -431,32 +442,7 @@ export function Timeline() {
 
   return (
     <div class="timeline" onClick={() => setMenu(null)}>
-      <div class="tl-tools">
-        <label class="inline" title="무음 정리의 세기">
-          <span class="muted">무음</span>
-          <select value={pacing} onChange={(e) => { const p = (e.target as HTMLSelectElement).value as Pacing; setPac(p); setPacing(p); }} aria-label="무음 정리 세기">
-            {(Object.keys(PACING) as Pacing[]).map((k) => <option value={k}>{PACING[k].label}</option>)}
-          </select>
-        </label>
-        <label class="inline" title="말 앞뒤로 남겨 둘 시간. 말끝이 잘리면 늘리세요">
-          <span class="muted">여백</span>
-          <select value={silPad == null ? "" : String(silPad)} aria-label="무음 정리 말 앞뒤 여백" onChange={(e) => { const v = (e.target as HTMLSelectElement).value; const p = v === "" ? null : Number(v); setSilPad(p); setSilencePad(p); }}>
-            <option value="">기본</option>
-            {[0, 0.05, 0.1, 0.2, 0.3, 0.5].map((x) => <option value={String(x)}>{x}초</option>)}
-          </select>
-        </label>
-        <button class="small" disabled={!d.clips.length} onClick={doSilence} title="말 없는 구간 잘라 내기">무음 정리</button>
-        <button class={`small ${s.showSilence ? "on" : ""}`} aria-pressed={s.showSilence} onClick={() => set({ showSilence: !s.showSilence })} title="무음 정리로 잘릴 곳을 회색으로 미리 보기">잘릴 곳 보기</button>
-        <button class="small" disabled={!d.clips.length} onClick={doFillers} title="'음', '어' 같은 말 잘라 내기 (받아쓰기 필요)">군더더기 말 정리</button>
-        <span class="sep" />
-        <button class={`small ${d.captions ? "on" : ""}`} aria-pressed={d.captions} onClick={() => editDraft("자막", (x) => ({ ...x, captions: !x.captions }), st.draftId, false)} title="받아쓰기로 자막 켜기/끄기"><Captions size={13} aria-hidden="true" /> 자막</button>
-        <button class="small" onClick={() => editDraft("마커", (x) => ({ ...x, markers: [...x.markers, { id: uid(), t: st.playhead, label: `마커 ${x.markers.length + 1}`, color: "#FFB020" }] }), st.draftId, false)} title="재생 위치에 마커 (M)">마커</button>
-        {(d.inPoint != null || d.outPoint != null) && <span class="io-badge" title="I/O로 정한 구간 (내보내기에서 이 구간만 고를 수 있습니다)">인·아웃 {fmtTCF(d.inPoint ?? 0, fps)}–{fmtTCF(d.outPoint ?? total, fps)}</span>}
-        <span class="spacer" />
-        <span class="muted tc">{d.clips.length}개 · {fmtTCF(total, fps)}</span>
-        <input class="zoom" type="range" min={0} max={100} value={pct(zoom)} onInput={(e) => setZoom(fromPct(Number((e.target as HTMLInputElement).value)))} aria-label="타임라인 확대" title="확대·축소 (Ctrl+휠, +/−)" />
-        <button class="small" onClick={() => { const el = scroller.current; if (el && total) setZoom(Math.max(2, (el.clientWidth - 60) / total)); }} title="전체 맞춤 (Shift+Z)">맞춤</button>
-      </div>
+      {(d.inPoint != null || d.outPoint != null) && <span class="io-badge tl-io" title="I/O로 정한 구간 (내보내기에서 이 구간만 고를 수 있습니다)">인·아웃 {fmtTCF(d.inPoint ?? 0, fps)}–{fmtTCF(d.outPoint ?? total, fps)}</span>}
       <div class="tl-body">
         <div class="tl-heads">
           <div class="th ruler-h" />
@@ -476,6 +462,48 @@ export function Timeline() {
             <div class="playhead" style={{ left: `${s.playhead * zoom}px` }}><span class="ph-time">{fmtTCF(s.playhead, fps)}</span></div>
           </div>
         </div>
+      </div>
+      <div class="tl-island" ref={moreRef} role="toolbar" aria-label="편집 도구" onClick={(e) => e.stopPropagation()}>
+        {TOOLS.filter((t) => t.main || s.tool === t.id).map((t) => (
+          <button class={`isl-btn ${s.tool === t.id ? "on" : ""}`} aria-pressed={s.tool === t.id} aria-label={`${t.label} 도구`} title={`${t.label} (${t.key}) · ${t.term}`} onClick={() => set({ tool: t.id })}><t.Icon size={16} aria-hidden="true" /></button>
+        ))}
+        <button class={`isl-btn ${more ? "on" : ""}`} aria-label="도구 더 보기" aria-haspopup="menu" aria-expanded={more} title="도구 더 보기" onClick={() => setMore(!more)}><Ellipsis size={16} aria-hidden="true" /></button>
+        {more && (
+          <div class="menu-pop tl-more" role="menu">
+            <div class="more-head muted">클립 {d.clips.length}개 · {fmtTCF(total, fps)}</div>
+            {TOOLS.filter((t) => !t.main).map((t) => (
+              <button role="menuitemradio" aria-checked={s.tool === t.id} onClick={() => { set({ tool: t.id }); setMore(false); }}><span class="mk"><t.Icon size={14} aria-hidden="true" /></span><span class="ml">{t.label}</span><span class="mkey">{t.key}</span></button>
+            ))}
+            <button role="menuitemcheckbox" aria-checked={s.snap} onClick={() => set({ snap: !s.snap })}><span class="mk">{s.snap ? <Check size={14} aria-hidden="true" /> : <Magnet size={14} aria-hidden="true" />}</span><span class="ml">자석 붙이기</span><span class="mkey">Shift+S</span></button>
+            <button role="menuitem" onClick={() => { editDraft("마커", (x) => ({ ...x, markers: [...x.markers, { id: uid(), t: st.playhead, label: `마커 ${x.markers.length + 1}`, color: "#FFB020" }] }), st.draftId, false); setMore(false); }} title="재생 위치에 마커"><span class="mk"><Flag size={14} aria-hidden="true" /></span><span class="ml">마커 넣기</span><span class="mkey">M</span></button>
+            <div class="menu-sep" role="separator" />
+            <button role="menuitem" disabled={!canUndo()} onClick={undo} title={undoLabel() ? `되돌리기: ${undoLabel()}` : "되돌리기"}><span class="mk"><Undo2 size={14} aria-hidden="true" /></span><span class="ml">되돌리기</span><span class="mkey">Ctrl+Z</span></button>
+            <button role="menuitem" disabled={!canRedo()} onClick={redo}><span class="mk"><Redo2 size={14} aria-hidden="true" /></span><span class="ml">다시 실행</span><span class="mkey">Ctrl+Y</span></button>
+            <div class="menu-sep" role="separator" />
+            <button role="menuitem" disabled={!d.clips.length} onClick={() => { doSilence(); setMore(false); }} title="말 없는 구간 잘라 내기"><span class="mk" /><span class="ml">무음 정리</span><span class="mkey" /></button>
+            <label class="more-row" title="무음 정리의 세기"><span class="muted">세기</span>
+              <select value={pacing} aria-label="무음 정리 세기" onChange={(e) => { const p = (e.target as HTMLSelectElement).value as Pacing; setPac(p); setPacing(p); }}>
+                {(Object.keys(PACING) as Pacing[]).map((k) => <option value={k}>{PACING[k].label}</option>)}
+              </select>
+            </label>
+            <label class="more-row" title="말 앞뒤로 남겨 둘 시간. 말끝이 잘리면 늘리세요"><span class="muted">여백</span>
+              <select value={silPad == null ? "" : String(silPad)} aria-label="무음 정리 말 앞뒤 여백" onChange={(e) => { const v = (e.target as HTMLSelectElement).value; const p = v === "" ? null : Number(v); setSilPad(p); setSilencePad(p); }}>
+                <option value="">기본</option>
+                {[0, 0.05, 0.1, 0.2, 0.3, 0.5].map((x) => <option value={String(x)}>{x}초</option>)}
+              </select>
+            </label>
+            <button role="menuitemcheckbox" aria-checked={s.showSilence} onClick={() => set({ showSilence: !s.showSilence })} title="무음 정리로 잘릴 곳을 회색으로 미리 보기"><span class="mk">{s.showSilence && <Check size={14} aria-hidden="true" />}</span><span class="ml">잘릴 곳 보기</span><span class="mkey" /></button>
+            <button role="menuitem" disabled={!d.clips.length} onClick={() => { doFillers(); setMore(false); }} title="'음', '어' 같은 말 잘라 내기 (받아쓰기 필요)"><span class="mk" /><span class="ml">군더더기 말 정리</span><span class="mkey" /></button>
+            <button role="menuitemcheckbox" aria-checked={d.captions} onClick={() => editDraft("자막", (x) => ({ ...x, captions: !x.captions }), st.draftId, false)} title="받아쓰기로 자막 켜기/끄기"><span class="mk">{d.captions ? <Check size={14} aria-hidden="true" /> : <Captions size={14} aria-hidden="true" />}</span><span class="ml">자막</span><span class="mkey" /></button>
+            <div class="menu-sep" role="separator" />
+            <div class="more-row" title="확대·축소 (Ctrl+휠, +/−)"><span class="muted">확대</span>
+              <input class="zoom" type="range" min={0} max={100} value={pct(zoom)} onInput={(e) => setZoom(fromPct(Number((e.target as HTMLInputElement).value)))} aria-label="타임라인 확대" />
+              <button class="small" onClick={() => { const el = scroller.current; if (el && total) setZoom(Math.max(2, (el.clientWidth - 60) / total)); }} title="전체 맞춤 (Shift+Z)">맞춤</button>
+            </div>
+            <div class="menu-sep" role="separator" />
+            <button role="menuitem" onClick={() => { set({ dialog: "shortcuts" }); setMore(false); }}><span class="mk"><Keyboard size={14} aria-hidden="true" /></span><span class="ml">단축키 목록</span><span class="mkey">Ctrl+/</span></button>
+          </div>
+        )}
       </div>
       {menu && (
         <div class="ctx" style={{ left: `${menu.x}px`, top: `${Math.max(8, menu.y - 220)}px` }} role="menu" onClick={(e) => e.stopPropagation()}>

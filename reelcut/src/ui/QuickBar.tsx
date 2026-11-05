@@ -29,7 +29,7 @@ function useWidth() {
 }
 
 /** Closes a popup on a click outside it or Escape. */
-function useDismiss(open: boolean, close: () => void) {
+export function useDismiss(open: boolean, close: () => void) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;

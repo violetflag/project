@@ -1,12 +1,14 @@
 // Media bin: grid or list, sort, smart filters (360 / with transcript / picks / 3★+), star
 // ratings (1–5 keys), pick / reject (P / X), tags, and hover scrubbing over the thumbnails.
-import { Check, Flag, FolderPlus, LayoutGrid, List, Music, Plus, Star, Unlink, X as XIcon } from "lucide-preact";
+import { Check, FilePlus, Flag, FolderInput, FolderPlus, LayoutGrid, List, Music, Plus, Star, Unlink, X as XIcon } from "lucide-preact";
+import type { ComponentChildren } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { api, fileSrc, pickFiles } from "../api";
 import { draftDuration, fmtTC, insertClips, is360, newClip, overlays, searchScenes, uid } from "../edit";
 import { draft, editDraft, ensureStrip, importPaths, mutate, patchAsset, scanShots, set, st, startTranscribe, syncAssets, toast, useStore } from "../store";
 import type { Asset } from "../types";
 import { player } from "./Viewer";
+import { useDismiss } from "./QuickBar";
 
 const fmtSize = (b: number) => (b >= 1024 ** 3 ? (b / 1024 ** 3).toFixed(1) + " GB" : (b / 1024 ** 2).toFixed(0) + " MB");
 type Sort = "added" | "name" | "duration" | "recorded" | "rating";
@@ -63,7 +65,9 @@ function Thumb({ a }: { a: Asset }) {
   );
 }
 
-export function MediaBin() {
+export function MediaBin({ head }: { head?: ComponentChildren }) {
+  const [addOpen, setAddOpen] = useState(false);
+  const addRef = useDismiss(addOpen, () => setAddOpen(false));
   const s = useStore();
   const p = s.project!;
   const [q, setQ] = useState("");
@@ -157,25 +161,30 @@ export function MediaBin() {
   return (
     <div class="bin" onClick={() => setMenu(null)}>
       <div class="bin-tools">
-        <button class="small primary" onClick={async () => importPaths(await pickFiles())} title="미디어 가져오기 (Ctrl+I)"><Plus size={13} aria-hidden="true" /> 가져오기</button>
-        <button class="small" onClick={async () => importPaths(await pickFiles(true))} title="폴더째 가져오기">폴더</button>
-        <button class="icon-btn" onClick={() => setNewFolder("")} aria-label="새 폴더" title="새 폴더"><FolderPlus size={15} /></button>
-        <span class="spacer" />
+        <div class="qb-split" ref={addRef}>
+          <button class="icon-btn" aria-label="미디어 추가" aria-haspopup="menu" aria-expanded={addOpen} title="미디어 추가" onClick={() => setAddOpen(!addOpen)}><Plus size={16} aria-hidden="true" /></button>
+          {addOpen && (
+            <div class="menu-pop qb-pop" role="menu">
+              <button role="menuitem" onClick={async () => { setAddOpen(false); importPaths(await pickFiles()); }}><span class="mk"><FilePlus size={14} aria-hidden="true" /></span><span class="ml">미디어 가져오기</span><span class="mkey">Ctrl+I</span></button>
+              <button role="menuitem" onClick={async () => { setAddOpen(false); importPaths(await pickFiles(true)); }}><span class="mk"><FolderInput size={14} aria-hidden="true" /></span><span class="ml">폴더째 가져오기</span><span class="mkey" /></button>
+              <button role="menuitem" onClick={() => { setAddOpen(false); setNewFolder(""); }}><span class="mk"><FolderPlus size={14} aria-hidden="true" /></span><span class="ml">새 폴더</span><span class="mkey" /></button>
+            </div>
+          )}
+        </div>
+        <input class="search" placeholder="찾기" aria-label="미디어 찾기" title="이름·대사·#태그로 찾기" value={q} onInput={(e) => setQ((e.target as HTMLInputElement).value)} />
         <div class="seg">
           <button class={`icon-btn ${view === "grid" ? "on" : ""}`} aria-pressed={view === "grid"} onClick={() => setV("grid")} aria-label="썸네일 보기" title="썸네일 보기"><LayoutGrid size={15} /></button>
           <button class={`icon-btn ${view === "list" ? "on" : ""}`} aria-pressed={view === "list"} onClick={() => setV("list")} aria-label="목록 보기" title="목록 보기"><List size={15} /></button>
         </div>
-      </div>
-      <div class="bin-filter">
-        <input class="search" placeholder="이름·대사·#태그로 찾기" aria-label="미디어 찾기" value={q} onInput={(e) => setQ((e.target as HTMLInputElement).value)} />
-        <select value={sort} onChange={(e) => setSort((e.target as HTMLSelectElement).value as Sort)} aria-label="정렬">
-          <option value="added">가져온 순</option><option value="name">이름</option><option value="duration">길이</option><option value="recorded">촬영일</option><option value="rating">별점</option>
-        </select>
+        {head}
       </div>
       <div class="smart" role="tablist" aria-label="스마트 폴더">
         {([["", "전체"], ["picks", "고른 컷"], ["stars", "3★ 이상"], ["360", "360"], ["words", "대본 있음"], ["unused", "안 쓴 것"]] as [Smart, string][]).map(([k, l]) => (
           <button role="tab" aria-selected={smart === k} class={`chip ${smart === k ? "on" : ""}`} onClick={() => setSmart(k)}>{l}</button>
         ))}
+        <select class="bin-sort" value={sort} onChange={(e) => setSort((e.target as HTMLSelectElement).value as Sort)} aria-label="정렬">
+          <option value="added">가져온 순</option><option value="name">이름</option><option value="duration">길이</option><option value="recorded">촬영일</option><option value="rating">별점</option>
+        </select>
       </div>
       {!filtering && (
         <div class="crumbs">
@@ -234,7 +243,7 @@ export function MediaBin() {
             </tbody>
           </table>
         )}
-        {!p.assets.length && <div class="muted pad">가져오기를 누르거나 파일을 창에 끌어다 놓으세요. Osmo 360의 .osv·.lrf도 됩니다.</div>}
+        {!p.assets.length && <div class="muted pad">+를 누르거나 파일을 창에 끌어다 놓으세요. Osmo 360의 .osv·.lrf도 됩니다.</div>}
         {p.assets.length > 0 && !list.length && !sub.length && <div class="muted pad">조건에 맞는 미디어가 없습니다.</div>}
       </div>
       {sel.length > 0 && (

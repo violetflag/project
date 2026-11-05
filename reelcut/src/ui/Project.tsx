@@ -1,6 +1,6 @@
-import { Bot, Gauge, Magnet, MousePointer2, MoveHorizontal, PanelLeftClose, PanelRightClose, Redo2, Scissors, SplitSquareHorizontal, Undo2 } from "lucide-preact";
+import { Bot, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-preact";
 import type { ComponentChildren } from "preact";
-import { canRedo, canUndo, redo, set, undo, undoLabel, useStore, type Tool } from "../store";
+import { set, useStore } from "../store";
 import { AgentPanel } from "./AgentPanel";
 import { CaptionsPanel } from "./CaptionsPanel";
 import { DraftTabs } from "./DraftTabs";
@@ -11,14 +11,6 @@ import { QuickBar } from "./QuickBar";
 import { Timeline } from "./Timeline";
 import { Transcript } from "./Transcript";
 import { Viewer } from "./Viewer";
-
-const TOOLS: { id: Tool; label: string; key: string; term: string; Icon: any }[] = [
-  { id: "select", label: "선택", key: "V", term: "Selection", Icon: MousePointer2 },
-  { id: "blade", label: "자르기", key: "C", term: "Razor", Icon: Scissors },
-  { id: "roll", label: "편집점 굴리기", key: "N", term: "Rolling Edit", Icon: SplitSquareHorizontal },
-  { id: "slip", label: "내용 밀기", key: "Y", term: "Slip", Icon: MoveHorizontal },
-  { id: "rate", label: "길이로 속도 바꾸기", key: "R", term: "Rate Stretch", Icon: Gauge },
-];
 
 const DEFAULT_CHAT = 22;
 
@@ -35,24 +27,23 @@ function FoldButton({ label, side, onClick }: { label: string; side: "left" | "r
 
 /** A folded panel's button, in the preview's corner. */
 function Unfold({ side, label, onClick }: { side: "left" | "right"; label: string; onClick: () => void }) {
-  return <button class={`unfold ${side}`} onClick={onClick} title={`${label} 펼치기`}>{label}</button>;
+  const Icon = side === "left" ? PanelLeftOpen : PanelRightOpen;
+  return <button class={`unfold ${side}`} onClick={onClick} title={`${label} 펼치기`}><Icon size={16} aria-hidden="true" /> {label}</button>;
 }
 
 function ChatPanel() {
   const l = layout();
   return (
-    <aside class="p-chat" aria-label="AI 편집" style={{ width: `${l.chat}%` }}>
-      <div class="panel-head"><b>AI 편집</b><span class="spacer" /><FoldButton label="AI 편집" side="left" onClick={() => togglePanel("chat")} /></div>
-      <AgentPanel />
+    <aside class="p-chat" data-panel="chat" aria-label="AI 편집" style={{ width: `${l.chat}%` }}>
+      <AgentPanel head={<FoldButton label="AI 편집" side="left" onClick={() => togglePanel("chat")} />} />
     </aside>
   );
 }
 
 function SourcePanel({ style }: { style?: Record<string, string> }) {
   return (
-    <aside class="p-source" aria-label="미디어" style={style}>
-      <div class="panel-head"><b>미디어</b><span class="spacer" /><FoldButton label="미디어" side="left" onClick={() => togglePanel("source")} /></div>
-      <MediaBin />
+    <aside class="p-source" data-panel="source" aria-label="미디어" style={style}>
+      <MediaBin head={<FoldButton label="미디어" side="left" onClick={() => togglePanel("source")} />} />
     </aside>
   );
 }
@@ -60,7 +51,7 @@ function SourcePanel({ style }: { style?: Record<string, string> }) {
 function SidePanel({ style }: { style?: Record<string, string> }) {
   const s = useStore();
   return (
-    <aside class="p-side" aria-label="대본, 자막과 속성" style={style}>
+    <aside class="p-side" data-panel="side" aria-label="대본, 자막과 속성" style={style}>
       <div class="tabs" role="tablist">
         {SIDE_TABS.map((t) => (
           <button role="tab" aria-selected={s.sideTab === t.id} class={s.sideTab === t.id ? "on" : ""} title={t.title} onClick={() => set({ sideTab: t.id })}>{t.label}</button>
@@ -74,7 +65,7 @@ function SidePanel({ style }: { style?: Record<string, string> }) {
 
 function PreviewPanel({ children, style }: { children?: ComponentChildren; style?: Record<string, string> }) {
   return (
-    <section class="p-preview" aria-label="미리보기" style={style}>
+    <section class="p-preview" data-panel="preview" aria-label="미리보기" style={style}>
       <div class="preview-bar" role="toolbar" aria-label="빠른 작업"><QuickBar /></div>
       <div class="preview-body"><Viewer />{children}</div>
     </section>
@@ -82,29 +73,19 @@ function PreviewPanel({ children, style }: { children?: ComponentChildren; style
 }
 
 function TimelinePanel() {
-  const s = useStore();
   return (
-    <div class="p-timeline">
-      <div class="tl-head">
-        <DraftTabs />
-        <div class="tl-head-tools" role="toolbar" aria-label="편집 도구">
-          <div class="seg" role="radiogroup" aria-label="타임라인 도구">
-            {TOOLS.map((t) => (
-              <button role="radio" aria-checked={s.tool === t.id} class={`icon-btn ${s.tool === t.id ? "on" : ""}`} onClick={() => set({ tool: t.id })} title={`${t.label} (${t.key}) · ${t.term}`} aria-label={`${t.label} 도구`}>
-                <t.Icon size={16} />
-              </button>
-            ))}
-          </div>
-          <button class={`icon-btn ${s.snap ? "on" : ""}`} aria-pressed={s.snap} onClick={() => set({ snap: !s.snap })} title="자석 붙이기 (Shift+S) · Snapping" aria-label="자석 붙이기"><Magnet size={16} /></button>
-          <span class="sep" />
-          <button class="icon-btn" disabled={!canUndo()} onClick={undo} title={undoLabel() ? `되돌리기: ${undoLabel()} (Ctrl+Z)` : "되돌리기 (Ctrl+Z)"} aria-label="되돌리기"><Undo2 size={16} /></button>
-          <button class="icon-btn" disabled={!canRedo()} onClick={redo} title="다시 실행 (Ctrl+Y)" aria-label="다시 실행"><Redo2 size={16} /></button>
-        </div>
-      </div>
+    <div class="p-timeline" data-panel="timeline">
+      <div class="tl-head"><DraftTabs /></div>
       <Timeline />
     </div>
   );
 }
+
+/** The panel last clicked shows a border. Kept on the element, so a click does not redraw the screen. */
+const pickPanel = (e: PointerEvent) => {
+  const p = (e.target as HTMLElement).closest?.("[data-panel]") as HTMLElement | null;
+  if (p) (e.currentTarget as HTMLElement).dataset.active = p.dataset.panel;
+};
 
 export function ProjectView() {
   useStore();
@@ -120,12 +101,12 @@ export function ProjectView() {
     : <div class="rail"><button class="icon-btn" aria-label="AI 편집 열기" title="AI 편집 열기" onClick={() => togglePanel("chat")}><Bot size={16} /></button></div>;
 
   if (l.view === "preview") {
-    return <div class="project">{chat}<PreviewPanel /></div>;
+    return <div class="project" onPointerDownCapture={pickPanel as any}>{chat}<PreviewPanel /></div>;
   }
   if (l.view === "vertical") {
     // A tall picture gets a full-height column; the rest shares the middle.
     return (
-      <div class="project">
+      <div class="project" onPointerDownCapture={pickPanel as any}>
         {chat}
         <div class="p-editor">
           <div class="p-upper" style={{ height: `${l.upper}%` }}>
@@ -142,7 +123,7 @@ export function ProjectView() {
     );
   }
   return (
-    <div class="project">
+    <div class="project" onPointerDownCapture={pickPanel as any}>
       {chat}
       <div class="p-editor">
         <div class="p-upper" style={{ height: `${l.upper}%` }}>

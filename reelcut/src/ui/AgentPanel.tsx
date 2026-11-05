@@ -1,4 +1,5 @@
 import { Bookmark, BookmarkPlus, LoaderCircle, Pencil, Plus, Send, Sparkles, Trash2, Undo2 } from "lucide-preact";
+import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { BUILTIN_SKILLS, isChain, findSkill } from "../skills";
 import { addActiveSkill, answerCard, answerCardText, askWithSkills, EFFORTS, isWaitingCard, MODELS, newChat, pendingSkillTokens, removeActiveSkill, stopAgent, TOOL_LABEL, waitingCardOf } from "../agent";
@@ -237,7 +238,7 @@ function PromptLibrary({ text, busy, onInsert, onSend, onClose }: { text: string
   );
 }
 
-export function AgentPanel() {
+export function AgentPanel({ head }: { head?: ComponentChildren }) {
   const s = useStore();
   const p = s.project!;
   const c = activeChat();
@@ -313,7 +314,8 @@ export function AgentPanel() {
         )}
         <button class="icon-btn" disabled={!c || s.agentBusy} onClick={() => setRenaming(true)} aria-label="대화 이름 바꾸기" title="대화 이름 바꾸기"><Pencil size={14} /></button>
         <button class="icon-btn" disabled={!c || s.agentBusy} onClick={remove} aria-label="대화 보관" title="대화 보관 (보관함에서 다시 꺼낼 수 있습니다)"><Trash2 size={14} /></button>
-        <button class="small" disabled={s.agentBusy || !chat.length} onClick={() => { newChat(); toast("새 대화를 시작합니다. 이전 대화는 목록에 남아 있습니다"); }} title="새 대화 (이전 대화는 목록에 남음)"><Plus size={13} aria-hidden="true" /> 새 대화</button>
+        <button class="icon-btn" disabled={s.agentBusy || !chat.length} onClick={() => { newChat(); toast("새 대화를 시작합니다. 이전 대화는 목록에 남아 있습니다"); }} aria-label="새 대화" title="새 대화 (이전 대화는 목록에 남음)"><Plus size={16} aria-hidden="true" /></button>
+        {head}
       </div>
       <div class="agent-sub">
         <button class="chip" onClick={() => set({ route: "settings" })} title="모델과 생각 깊이는 설정에서 바꿉니다">{model} · 생각 {effort}</button>
