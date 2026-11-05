@@ -7,7 +7,7 @@ import {
 import { flatToEquirect } from "../src/gl360";
 import { pickCodec, SHRINK, shrinkSettings } from "../src/presets";
 import type { Asset, Clip, Draft } from "../src/types";
-import { DEFAULT_TRANSFORM as DT_, isDefaultTransform, outSize, parseAspect, silenceCuts, trimClipTo } from "../src/edit";
+import { DEFAULT_TRANSFORM as DT_, isDefaultTransform, outSize, parseAspect, rateForLength, silenceCuts, trimClipTo } from "../src/edit";
 const DEFAULT_TRANSFORM = DT_;
 
 const asset = (id: string, extra: Partial<Asset["info"]> = {}, words?: Asset["words"]): Asset => ({
@@ -177,5 +177,14 @@ describe("화면 비율과 잘라 당기기", () => {
     expect(isDefaultTransform({ ...DEFAULT_TRANSFORM })).toBe(true);
     expect(isDefaultTransform({ ...DEFAULT_TRANSFORM, flip_h: true })).toBe(false);
     expect(isDefaultTransform({ ...DEFAULT_TRANSFORM, flip_v: true })).toBe(false);
+  });
+});
+
+describe("길이로 속도 바꾸기", () => {
+  it("gives the speed that fills the length, within the limits", () => {
+    expect(rateForLength({ start: 10, end: 20 }, 20)).toBe(0.5);
+    expect(rateForLength({ start: 10, end: 20 }, 5)).toBe(2);
+    expect(rateForLength({ start: 10, end: 20 }, 0.001)).toBe(16);
+    expect(rateForLength({ start: 10, end: 20 }, 1000)).toBe(0.1);
   });
 });

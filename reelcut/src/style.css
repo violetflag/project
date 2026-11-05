@@ -363,6 +363,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .clip.dragging { opacity: .7; z-index: 3; }
 .clip.blade, .item.blade { cursor: crosshair; }
 .clip.slip { cursor: ew-resize; }
+.rate .trim { cursor: ew-resize; }
 .clip .name, .item .name { position: absolute; left: 4px; top: 2px; font-size: 10px; background: #000b; padding: 0 4px; border-radius: 3px; white-space: nowrap; max-width: calc(100% - 8px); overflow: hidden; text-overflow: ellipsis; z-index: 1; }
 .clip .wave, .item .wave { position: absolute; left: 0; bottom: 0; pointer-events: none; }
 .xfade { position: absolute; left: 0; top: 0; bottom: 0; background: linear-gradient(90deg, #ffffff55, transparent); pointer-events: none; }

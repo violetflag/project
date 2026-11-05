@@ -768,6 +768,11 @@ export function parseAspect(a: string): [number, number] | null {
   return w > 0 && h > 0 && w / h <= 3 && h / w <= 3 ? [w, h] : null;
 }
 
+/** Rate stretch: the speed that makes a clip last `seconds`, showing the same part of the source. */
+export function rateForLength(c: Pick<Clip, "start" | "end">, seconds: number): number {
+  return r3(Math.min(16, Math.max(0.1, (c.end - c.start) / Math.max(0.01, seconds))));
+}
+
 /** Ripple trim at a source time: the part before (`start`) or after (`end`) goes; null if too little would stay. */
 export function trimClipTo(d: Draft, id: string, side: "start" | "end", src: number): Draft | null {
   const c = d.clips.find((x) => x.id === id);
@@ -846,6 +851,8 @@ export type ExportOpts = {
   loudnorm?: boolean;
   duck?: boolean;
   abr?: number;
+  /** Sound only: wav (default) or mp3. */
+  audioFormat?: string;
   /** Export only this timeline range. */
   range?: [number, number] | null;
 };
@@ -876,7 +883,7 @@ export function toPlan(d0: Draft, assets: Map<string, Asset>, o: ExportOpts): Pl
       const dur = Math.min(m.end - m.start, total - m.at);
       return a && dur > 0.05 && !muted(m) && !m.disabled ? [{ path: a.info.path, start: r3(m.start), dur: r3(dur), at: r3(m.at), volume: m.volume, vol_keys: planTimed(m.volKeys, m.start, 1), fade_in: m.fadeIn, fade_out: m.fadeOut, denoise: !!m.denoise }] : [];
     }),
-    width, height, fps: d.fps || 30, ass: o.ass, mode: o.mode, vbitrate: o.vbitrate, settings: o.shrink, out: o.out,
+    width, height, fps: d.fps || 30, ass: o.ass, mode: o.mode, audio_format: o.audioFormat ?? "", vbitrate: o.vbitrate, settings: o.shrink, out: o.out,
     // 소리 고르게 on the draft (toolbar) evens the loudness on export too.
     loudnorm: !!o.loudnorm || !!d.fx?.loudnorm, duck: !!o.duck, abr: o.abr ?? 256,
   };

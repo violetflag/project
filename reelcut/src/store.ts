@@ -10,7 +10,7 @@ import type { ActionEntry, Asset, BadShot, ChatSession, Draft, JobEvent, Lens, P
 export type Meta = { id: string; name: string; updated: number; created: number; assets: number; drafts: number; duration: number; poster?: string; clips: number; chats: number };
 export type ExportJob = { id: string; draft: string; pct: number; state: string; message: string; out: string; result?: any; left?: number; name?: string };
 /** Timeline tools: select (V), blade (C), roll (R), slip (Y). */
-export type Tool = "select" | "blade" | "roll" | "slip";
+export type Tool = "select" | "blade" | "roll" | "slip" | "rate";
 /** Panel arrangement: the editing page, the transcript page, the 360 page. */
 export type Workspace = "edit" | "transcript" | "r360";
 /** One AI request: the drafts before it, so its changes can be listed and undone as one. */

@@ -1,6 +1,7 @@
 // Multi-track timeline. V1 is the magnetic main track (clips follow each other); V2/V3 hold
 // pictures placed over it, A1 split-off sound, A2 music, A3 effects, C1 shows the captions.
-// Tools: select (move/trim), blade (cut where clicked), roll (move a cut), slip (show another part).
+// Tools: select (move/trim), blade (cut where clicked), roll (move a cut), slip (show another part),
+// rate (an edge changes the speed, the same part of the source plays).
 import { Captions, Eye, EyeOff, Headphones, Lock, LockOpen, Volume2, VolumeX } from "lucide-preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { fileSrc } from "../api";
@@ -8,7 +9,7 @@ import { draftCaptions } from "../captions";
 import { doFillers, doSilence, getPacing, getSilencePad, setPacing, setSilencePad } from "../commands";
 import {
   audioTrack, clipDur, deleteClip, detachAudio, draftDuration, draftWords, fmtTCF, insertClips, is360, isGap, liftClip, moveClip, newClip, newOverlay, overlays, PACING,
-  r3, rollEdit, setTransition, silenceCuts, slipClip, speechFromWave, speechFromWords, splitAt, splitItem, starts, timedDur, trackState, uid, updateAudio, updateClip, updateOverlay, xinOf, type Pacing,
+  r3, rateForLength, rollEdit, setTransition, silenceCuts, slipClip, speechFromWave, speechFromWords, splitAt, splitItem, starts, timedDur, trackState, uid, updateAudio, updateClip, updateOverlay, xinOf, type Pacing,
 } from "../edit";
 import { asset, assetMap, draft, editDraft, ensureStrip, loadWave, set, st, toast, useStore, waves } from "../store";
 import type { Clip, Draft, MusicClip, Overlay, TrackId } from "../types";
@@ -42,7 +43,7 @@ function Wave({ asset: id, start, end, w, h = 22 }: { asset: string; start: numb
 }
 
 type Drag = {
-  kind: "move" | "trimL" | "trimR" | "scrub" | "imove" | "itrimL" | "itrimR" | "roll" | "slip";
+  kind: "move" | "trimL" | "trimR" | "scrub" | "imove" | "itrimL" | "itrimR" | "roll" | "slip" | "rateL" | "rateR";
   id?: string; x0: number; moved: boolean; clip?: Clip; item?: Overlay | MusicClip; index?: number; to?: number;
 };
 type Ghost = { id: string; dx: number; to?: number; patch?: Partial<Clip>; ipatch?: Partial<Overlay & MusicClip>; draft?: Draft };
@@ -156,6 +157,7 @@ export function Timeline() {
       return;
     }
     if (st.tool === "slip" && kind === "move") kind = "slip";
+    if (st.tool === "rate" && (kind === "trimL" || kind === "trimR") && !(clip && isGap(clip))) kind = kind === "trimL" ? "rateL" : "rateR";
     if (st.tool === "roll" && (kind === "trimL" || kind === "trimR") && index != null) {
       // The cut left of clip i is between i-1 and i; the cut right of it is between i and i+1.
       index = kind === "trimL" ? index : index + 1;
@@ -189,6 +191,13 @@ export function Timeline() {
         const patch = g.kind === "trimL" ? { start: r3(Math.max(0, Math.min(c.end - 0.1, c.start + ds))) } : { end: r3(Math.min(dur, Math.max(c.start + 0.1, c.end + ds))) };
         if (isGap(c) && g.kind === "trimL") { setGhost({ id: g.id!, dx, patch: { end: r3(Math.max(0.1, c.end - ds)) } }); break; }
         setGhost({ id: g.id!, dx, patch });
+        break;
+      }
+      case "rateL": case "rateR": {
+        if (locked("V1") || !g.clip) return;
+        // Dragging an edge outward makes the clip last longer: the same part, slower.
+        const c = g.clip, len = (c.end - c.start) / (c.speed || 1);
+        setGhost({ id: g.id!, dx: 0, patch: { speed: rateForLength(c, len + (g.kind === "rateR" ? dt : -dt)) } });
         break;
       }
       case "slip": {
@@ -246,8 +255,8 @@ export function Timeline() {
         player.pause();
         player.seek(Math.max(st0[i], Math.min(st0[i] + clipDur(d.clips[i]) - 0.01, xToT(e.clientX))));
       }
-    } else if ((g.kind === "trimL" || g.kind === "trimR" || g.kind === "slip") && g.id && gh?.patch) {
-      editDraft(g.kind === "slip" ? "내용 밀기" : "다듬기", (x) => updateClip(x, g.id!, gh.patch!));
+    } else if ((g.kind === "trimL" || g.kind === "trimR" || g.kind === "slip" || g.kind === "rateL" || g.kind === "rateR") && g.id && gh?.patch) {
+      editDraft(g.kind === "slip" ? "내용 밀기" : g.kind === "rateL" || g.kind === "rateR" ? "재생 속도" : "다듬기", (x) => updateClip(x, g.id!, gh.patch!));
       player.refresh();
     } else if (g.kind === "roll" && gh?.draft) {
       editDraft("편집점 굴리기", () => gh.draft!);

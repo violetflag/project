@@ -1292,6 +1292,15 @@ fn engine_prepass(app: &App, tag: &str, gen: u64, plan: &render::Plan, work: &Pa
             let first = motion::render_flat(&app.bins.ffmpeg, &app.jobs, tag, gen, info, &j.lens, m.as_ref(), j.start, j.dur, j.speed, w, h, &how, &view_at, &tmp, &report);
             let run = match first {
                 Err(e) if how.gpu && e != CANCELLED => {
+                    // The chip refuses now and then when it is busy: once more before giving it up.
+                    app.log("export", &format!("{n}번 360 클립을 그래픽 칩으로 다시 시도합니다: {}", logs::tail_lines(&e, 1)));
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    motion::render_flat(&app.bins.ffmpeg, &app.jobs, tag, gen, info, &j.lens, m.as_ref(), j.start, j.dur, j.speed, w, h, &how, &view_at, &tmp, &report)
+                }
+                other => other,
+            };
+            let run = match run {
+                Err(e) if how.gpu && e != CANCELLED => {
                     let w0 = format!("{n}번 360 클립을 그래픽 칩으로 풀지 못해 CPU로 다시 처리했습니다: {}", logs::tail_lines(&e, 2));
                     app.log("export", &w0);
                     warnings.lock().push(w0);

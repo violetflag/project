@@ -963,7 +963,7 @@ pub fn motion_for(dir: &Path, ffmpeg: &Path, ffprobe: &Path, jobs: &Jobs, tag: &
 }
 
 /// Bump when the engine's picture changes, so kept clips are made again.
-pub const ENGINE_VERSION: u32 = 7;
+pub const ENGINE_VERSION: u32 = 8;
 
 /// How `render_flat` works: the lens size to decode at, the GPU, and the intermediate's quality.
 #[derive(Clone, Debug, Default)]
@@ -1010,9 +1010,10 @@ pub fn render_flat(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &Media
     let setup = setup_fn(m, &tg, k0, &stab, &view);
     let mut args: Vec<String> = vec!["-ss".into(), format!("{:.3}", start.max(0.0)), "-t".into(), format!("{dur:.3}"), "-i".into(), info.path.clone(), "-map".into(), "0:v".into(), "-map".into(), "1:a:0?".into()];
     // Only a stepping stone to the final encode: fast, and lossless when there is room for it.
-    let quality: &[&str] = if how.lossless { &["-qp", "0"] } else { &["-crf", "10"] };
-    args.extend(["-c:v", "libx264", "-preset", "ultrafast"].iter().map(|x| x.to_string()));
-    args.extend(quality.iter().map(|x| x.to_string()));
+    // Ut Video costs a third of lossless x264 to write and to read, at about the same size (measured
+    // on John's recordings: 9 and 8 ms of CPU a frame against 25 and 27).
+    let encoder: &[&str] = if how.lossless { &["-c:v", "utvideo", "-pred", "left"] } else { &["-c:v", "libx264", "-preset", "ultrafast", "-crf", "10"] };
+    args.extend(encoder.iter().map(|x| x.to_string()));
     args.extend(["-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", "-f", "matroska"].iter().map(|x| x.to_string()));
     args.push(out.to_string_lossy().into_owned());
     let total = (dur * fps).max(1.0);

@@ -166,28 +166,33 @@ mod tests {
         let st: stitch::Stitch = serde_json::from_value(json!({ "on": true, "fov": 193.4, "yaw": 0.85, "pitch": 0.15, "roll": -0.45, "gain_a": [0.976, 0.431, -0.267], "gain_b": [1.025, -0.431, 0.267], "calibrated": true, "before": 21.17, "after": 8.58, "flow": false })).unwrap();
         let lens = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: Some(st), stab: None };
         let s = stitch::params(&lens);
-        for (start, yaw0, hfov) in [(270.0, 70.0, 91.0), (600.0, 180.0, 91.0), (290.0, 0.0, 118.0)] {
+        for (start, dur, yaw0, turn, hfov) in [(270.0, 2.0, 70.0, 0.3, 91.0), (600.0, 2.0, 180.0, 0.3, 91.0), (290.0, 2.0, 0.0, 0.3, 118.0), (400.0, 21.0, 0.0, 0.6, 91.0)] {
             let run = |crop: bool| {
-                let mut src = motion::source_for(&info, &lens, start, 2.0, None, false);
+                let mut src = motion::source_for(&info, &lens, start, dur, None, false);
                 src.gpu = true;
                 src.crop = crop;
                 let mut pics: Vec<Vec<f32>> = vec![];
+                let mut count = 0usize;
                 let mut stitcher = crate::pano::Stitcher::new(&s, src.n() as f64, 1920, 1080, false, None);
-                let setup = move |k: usize, _t: f64| crate::pano::FrameSetup { rot: stitch::matrix(stitch::ypr(yaw0 + k as f64 * 0.3, -15.0, 0.0)), hfov: Some((hfov, 0.3)), omega: None };
+                let setup = move |k: usize, _t: f64| crate::pano::FrameSetup { rot: stitch::matrix(stitch::ypr(yaw0 + k as f64 * turn, -15.0, 0.0)), hfov: Some((hfov, 0.3)), omega: None };
                 let t = std::time::Instant::now();
                 let mut cb = |k: usize, f: &crate::pano::Frame<u8>| {
-                    if k % 20 == 0 {
+                    count += 1;
+                    // Around the joins too (240, 480).
+                    if k % 20 == 0 || (235..245).contains(&k) || (475..485).contains(&k) {
                         pics.push(f.p[0].iter().map(|v| *v as f32).collect());
                     }
                 };
                 crate::pano::run::<u8>(&bin("ffmpeg"), &ff::Jobs::default(), "t", 0, &src, &mut stitcher, &setup, crate::pano::Sink::Call(&mut cb), |_| {}).unwrap();
-                (pics, t.elapsed().as_secs_f64())
+                (pics, count, t.elapsed().as_secs_f64())
             };
-            let (a, ta) = run(false);
-            let (b, tb) = run(true);
-            assert_eq!(a.len(), b.len());
+            let (a, na, ta) = run(false);
+            let (b, nb, tb) = run(true);
+            // The final pass cuts to length: a spare frame is harmless, a missing one is not.
+            assert!(nb == na || nb == na + 1, "{na} {nb}");
+            assert!(b.len() >= a.len());
             let worst = a.iter().zip(&b).map(|(x, y)| psnr(x, y, 1920, 0, 1920)).fold(99.0, f64::min);
-            println!("CROP start {start} yaw {yaw0} hfov {hfov}: full {ta:.1}s, cropped {tb:.1}s, worst {worst:.1} dB");
+            println!("CROP start {start} yaw {yaw0} hfov {hfov}: {na} frames, full {ta:.1}s, cropped {tb:.1}s, worst {worst:.1} dB");
             assert!(worst >= 50.0, "{worst}");
         }
     }

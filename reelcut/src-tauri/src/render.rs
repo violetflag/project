@@ -305,6 +305,9 @@ pub struct Plan {
     pub ass: String,
     /// standard | shrink | audio
     pub mode: String,
+    /// For "audio": wav (default) | mp3.
+    #[serde(default)]
+    pub audio_format: String,
     /// For "standard": video bitrate in kbit/s (4K 32000, FHD 8000, HD 5000, SD 2000).
     #[serde(default = "fhd_rate")]
     pub vbitrate: u32,
@@ -329,6 +332,7 @@ pub struct Plan {
 impl Default for Plan {
     fn default() -> Self {
         Plan {
+            audio_format: String::new(),
             segs: vec![],
             music: vec![],
             width: 1920,
@@ -1082,7 +1086,11 @@ pub fn build(p: &Plan, hw: &Hw, graph_file: &str, new_syntax: bool, has_ass: boo
     a.extend(v(&["-map", &alabel, "-filter_threads", &threads.to_string()]));
     match p.mode.as_str() {
         "audio" => {
-            a.extend(v(&["-c:a", "pcm_s16le", "-f", "wav"]));
+            if p.audio_format == "mp3" {
+                a.extend(v(&["-c:a", "libmp3lame", "-b:a", "320k", "-f", "mp3"]));
+            } else {
+                a.extend(v(&["-c:a", "pcm_s16le", "-f", "wav"]));
+            }
         }
         "shrink" => {
             let s = p.settings.clone().ok_or("압축 설정이 없습니다")?;

@@ -349,7 +349,7 @@ export type PlanOverlay = {
 export type PlanMusic = { path: string; start: number; dur: number; at: number; volume: number; fade_in: number; fade_out: number; denoise?: boolean };
 export type Plan = {
   segs: Seg[]; music: PlanMusic[]; overlays?: PlanOverlay[]; width: number; height: number; fps: number; ass: string;
-  mode: "standard" | "shrink" | "audio"; vbitrate: number; settings: ShrinkSettings | null; out: string;
+  mode: "standard" | "shrink" | "audio"; vbitrate: number; settings: ShrinkSettings | null; out: string; audio_format?: string;
   loudnorm?: boolean; duck?: boolean; abr?: number;
 };
 

@@ -27,6 +27,8 @@ export type ExportChoice = {
   duck?: boolean;
   /** Only the I/O range of the draft. */
   range?: boolean;
+  /** Sound only: wav (default) or mp3. */
+  audioFormat?: "wav" | "mp3";
   /** Purpose preset that filled this choice (shown as selected). */
   purpose?: string;
 };
@@ -36,7 +38,7 @@ export const DEFAULT_CHOICE: ExportChoice = { mode: "standard", quality: "fhd", 
 
 /** The choices worth remembering between exports (not the name, folder or range of one export). */
 export function rememberedChoice(c: ExportChoice) {
-  return { loudnorm: c.loudnorm, duck: c.duck, quality: c.quality, preset: c.preset, mode: c.mode, codec: c.codec, container: c.container, srt: c.srt };
+  return { loudnorm: c.loudnorm, duck: c.duck, quality: c.quality, preset: c.preset, mode: c.mode, audioFormat: c.audioFormat, codec: c.codec, container: c.container, srt: c.srt };
 }
 
 /** What an AI export of a given quality uses: the user's saved sound choices, else the dialog's defaults. */
@@ -53,7 +55,8 @@ export const PURPOSES: { id: string; label: string; desc: string; aspect?: strin
   { id: "archive", label: "보관용 고화질", desc: "원본 화질 가깝게 · 고압축 보관", choice: { mode: "shrink", quality: "fhd", preset: "archive" } },
   { id: "small", label: "작은 파일", desc: "공유·메신저용 · AV1/HEVC", choice: { mode: "shrink", quality: "fhd", preset: "small", container: "mp4" } },
   { id: "lecture", label: "강의·CCTV", desc: "움직임 적은 화면 · 가장 작게", choice: { mode: "shrink", quality: "hd", preset: "lecture" } },
-  { id: "audio", label: "소리만", desc: "WAV 무손실", choice: { mode: "audio" } },
+  { id: "audio", label: "소리만", desc: "WAV 무손실", choice: { mode: "audio", audioFormat: "wav" } },
+  { id: "mp3", label: "소리만 MP3", desc: "MP3 320kbps · 작은 파일", choice: { mode: "audio", audioFormat: "mp3" } },
 ];
 
 const sep = () => (st.info?.platform === "windows" ? "\\" : "/");
@@ -61,7 +64,7 @@ const cleanName = (s: string) => s.replace(/[\\/:*?"<>|]+/g, " ").trim() || "편
 
 export function outPath(d: Draft, c: ExportChoice): string {
   const dir = c.dir || st.settings.exportDir || st.info?.videosDir || ".";
-  const ext = c.mode === "audio" ? "wav" : c.mode === "shrink" ? c.container : "mp4";
+  const ext = c.mode === "audio" ? (c.audioFormat === "mp3" ? "mp3" : "wav") : c.mode === "shrink" ? c.container : "mp4";
   return dir.replace(/[\\/]+$/, "") + sep() + cleanName(c.name || `${st.project?.name ?? ""} ${d.name}`) + "." + ext;
 }
 
@@ -94,7 +97,7 @@ export async function startExport(d: Draft, c: ExportChoice): Promise<string> {
   const ass = (dd.captions || dd.texts?.length) && c.mode !== "audio" ? captionFiles(dd, w, h).ass : "";
   const srts = c.srt && dd.captions ? captionFiles(dd, w, h) : null;
   const shrink = c.mode === "shrink" ? shrinkSettings(p, pickCodec(c.codec, st.info?.hw ?? null), c.container) : null;
-  const plan = toPlan(dd, assetMap(), { mode: c.mode, short, vbitrate: c.kbps || q.kbps, shrink, out: outPath(d, c), ass, loudnorm: c.loudnorm, duck: c.duck, abr: c.abr || 256 });
+  const plan = toPlan(dd, assetMap(), { mode: c.mode, short, vbitrate: c.kbps || q.kbps, shrink, out: outPath(d, c), audioFormat: c.mode === "audio" ? c.audioFormat : undefined, ass, loudnorm: c.loudnorm, duck: c.duck, abr: c.abr || 256 });
   const id = uid();
   set({ exportJob: { id, draft: d.id, pct: 0, state: "running", message: "", out: plan.out, name: d.name } });
   exportStart = { at: Date.now(), draft: d.id, params: { mode: c.mode, quality: c.quality, preset: c.mode === "shrink" ? c.preset : undefined, loudnorm: !!c.loudnorm, duck: !!c.duck, fps: dd.fps, size: `${w}x${h}`, range, out: plan.out } };

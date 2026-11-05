@@ -247,6 +247,7 @@ export const COMMANDS: Cmd[] = [
   { id: "toolSelect", label: "선택 도구", menu: "타임라인", keys: "V", term: "Selection Tool", checked: () => st.tool === "select", enabled: inProject, run: () => setTool("select") },
   { id: "toolBlade", label: "자르기 도구", menu: "타임라인", keys: "C", term: "Razor / Blade", checked: () => st.tool === "blade", enabled: inProject, run: () => setTool("blade") },
   { id: "toolRoll", label: "편집점 굴리기 도구", menu: "타임라인", keys: "N", term: "Rolling Edit", checked: () => st.tool === "roll", enabled: inProject, run: () => setTool("roll") },
+  { id: "toolRate", label: "길이로 속도 바꾸기 도구", menu: "타임라인", keys: "R", term: "Rate Stretch", checked: () => st.tool === "rate", enabled: inProject, run: () => setTool("rate") },
   { id: "toolSlip", label: "내용 밀기 도구", menu: "타임라인", keys: "Y", term: "Slip", checked: () => st.tool === "slip", enabled: inProject, run: () => setTool("slip") },
   { id: "snap", label: "자석 붙이기", menu: "타임라인", keys: "Shift+S", term: "Snapping", sep: true, checked: () => st.snap, enabled: inProject, run: () => set({ snap: !st.snap }) },
   { id: "markIn", label: "인 점", menu: "타임라인", keys: "I", term: "Mark In", sep: true, enabled: hasDraft, run: () => setMark("in") },

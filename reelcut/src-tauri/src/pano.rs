@@ -621,6 +621,23 @@ pub struct LensRect {
     pub h: u32,
 }
 
+/// Frames one decoder reads when a clip is split (8 s; starting a decoder takes about a second, and
+/// it starts ahead of its turn).
+const PART_FRAMES: usize = 240;
+/// How many frames before its turn the next decoder starts.
+const PART_LEAD: usize = 45;
+/// Decoders running at once across clips: each holds the chip's memory for a whole lens picture, and
+/// too many make it refuse new ones. A start ahead of its turn waits below this; a turn does not.
+const MAX_DECODERS: usize = 4;
+static LIVE_DECODERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One decoder's stretch of a run: from frame `first`, `frames` of them (None: to the end).
+struct Part {
+    first: usize,
+    frames: Option<usize>,
+    rects: Option<[LensRect; 2]>,
+}
+
 pub struct Stitcher {
     pub geo: Geo,
     strip: Strip,
@@ -902,7 +919,7 @@ impl Stitcher {
     /// Which part of each lens this run looks at, so only that comes off the graphics chip: a view
     /// sees a small part of the sphere, and reading the pictures back is the slowest step of an
     /// export. Both rects have one height (they go side by side). None: most of the lenses anyway.
-    pub fn lens_rects(&mut self, setup: &dyn Fn(usize, f64) -> FrameSetup, frames: usize, fps: f64) -> Option<[LensRect; 2]> {
+    pub fn lens_rects(&mut self, setup: &dyn Fn(usize, f64) -> FrameSetup, first: usize, frames: usize, fps: f64) -> Option<[LensRect; 2]> {
         let n = self.geo.n as u32;
         // Lens pixels: what may move between the sampled frames, and more than the sampling reads.
         let pad = (self.geo.n * 0.02) as f32 + 16.0;
@@ -910,7 +927,8 @@ impl Stitcher {
         let reach = self.blend / 2.0 + 2f32.to_radians();
         let mut lo = [[f32::MAX; 2]; 2];
         let mut hi = [[f32::MIN; 2]; 2];
-        let mut k = 0;
+        let last = first + frames.max(1) - 1;
+        let mut k = first;
         loop {
             self.build_mesh(&setup(k, k as f64 / fps.max(1.0)));
             for m in &self.mesh {
@@ -924,10 +942,10 @@ impl Stitcher {
                     }
                 }
             }
-            if k + 1 >= frames {
+            if k >= last {
                 break;
             }
-            k = (k + 3).min(frames - 1);
+            k = (k + 5).min(last);
         }
         let span = |lens: usize, a: usize| -> (u32, u32) {
             if lo[lens][a] > hi[lens][a] {
@@ -946,6 +964,26 @@ impl Stitcher {
         ];
         let kept = (rects[0].w + rects[1].w) as f64 * h as f64 / (2.0 * n as f64 * n as f64);
         (kept < 0.85).then_some(rects)
+    }
+
+    /// The decoders of a run. A view that wanders over a clip needs most of the lenses in all but
+    /// needs little at any moment, so a long clip is read in stretches, each with its own rects.
+    fn parts(&mut self, setup: &dyn Fn(usize, f64) -> FrameSetup, total: usize, fps: f64) -> Vec<Part> {
+        let whole = self.lens_rects(setup, 0, total, fps);
+        let n = self.geo.n;
+        let share = |r: &[LensRect; 2]| (r[0].w + r[1].w) as f64 * r[0].h as f64 / (2.0 * n * n);
+        if total < 2 * PART_FRAMES || whole.as_ref().is_some_and(|r| share(r) < 0.3) {
+            return vec![Part { first: 0, frames: None, rects: whole }];
+        }
+        let mut v = Vec::new();
+        let mut first = 0;
+        while first < total {
+            // The tail joins the stretch before it rather than start a decoder for a moment.
+            let frames = if total - first < PART_FRAMES * 3 / 2 { None } else { Some(PART_FRAMES) };
+            v.push(Part { first, frames, rects: self.lens_rects(setup, first, frames.unwrap_or(total - first), fps) });
+            first += frames.unwrap_or(total - first);
+        }
+        v
     }
 
     /// One output frame from one side-by-side input frame.
@@ -1174,7 +1212,7 @@ impl Source {
         let n = self.scale_to.unwrap_or(self.lens_px).max(16);
         n - n % 2
     }
-    fn decode_args(&self, fmt: &str, rects: Option<&[LensRect; 2]>) -> Vec<String> {
+    fn decode_args(&self, fmt: &str, rects: Option<&[LensRect; 2]>, first: usize, frames: Option<usize>) -> Vec<String> {
         let n = self.n();
         let sc = |l: &str| format!("[{l}]scale={n}:{n}:flags=area[{l}s]");
         let pick = if self.every > 1 { format!("select='not(mod(n\\,{}))',", self.every) } else { String::new() };
@@ -1198,13 +1236,26 @@ impl Source {
         if self.gpu {
             a.extend(["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"].iter().map(|x| x.to_string()));
         }
-        if self.start > 0.0 {
-            a.extend(["-ss".to_string(), format!("{:.3}", self.start)]);
-        }
-        if self.dur > 0.0 {
-            a.extend(["-t".to_string(), format!("{:.3}", self.dur)]);
+        if first == 0 {
+            if self.start > 0.0 {
+                a.extend(["-ss".to_string(), format!("{:.3}", self.start)]);
+            }
+            if self.dur > 0.0 && frames.is_none() {
+                a.extend(["-t".to_string(), format!("{:.3}", self.dur)]);
+            }
+        } else {
+            // A seek lands on the frame nearest its time (measured on real files, as `k0` of the run).
+            let fps = self.fps.max(1.0);
+            let at = ((self.start * fps).round().max(0.0) + first as f64) / fps;
+            a.extend(["-ss".to_string(), format!("{at:.6}")]);
+            if frames.is_none() {
+                a.extend(["-t".to_string(), format!("{:.6}", self.start + self.dur + 1.5 / fps - at)]);
+            }
         }
         a.extend(["-i".to_string(), self.path.clone(), "-filter_complex".into(), g, "-map".into(), "[o]".into()]);
+        if let Some(k) = frames {
+            a.extend(["-frames:v".to_string(), k.to_string()]);
+        }
         if self.every > 1 {
             a.extend(["-fps_mode".to_string(), "passthrough".to_string()]);
         }
@@ -1265,48 +1316,82 @@ pub fn run<T: Px>(
     let n = src.n() as usize;
     let (iw, ih) = (2 * n, n);
     // Only at the file's own size: shrinking and cropping as two passes loses the last frame.
-    let rects = if src.crop && src.gpu && src.layout == "dual" && src.n() == src.lens_px && src.every == 1 && src.dur > 0.0 && !st.flow && st.rs.is_none() {
-        st.lens_rects(setup, ((src.dur * src.fps).ceil() as usize + 1).max(1), src.fps)
+    let parts = if src.crop && src.gpu && src.layout == "dual" && src.n() == src.lens_px && src.every == 1 && src.dur > 0.0 && !st.flow && st.rs.is_none() {
+        st.parts(setup, ((src.dur * src.fps).ceil() as usize + 1).max(1), src.fps)
     } else {
-        None
+        vec![Part { first: 0, frames: None, rects: None }]
     };
-    let in_len = match &rects {
+    let part_len = |p: &Part| match &p.rects {
         Some(r) => Frame::<T>::byte_len((r[0].w + r[1].w) as usize, r[0].h as usize),
         None => Frame::<T>::byte_len(iw, ih),
     };
-    let mut dec_args = src.decode_args(T::FMT, rects.as_ref());
-    let big = big_pipe::create();
-    if let (Some((name, _)), Some(last)) = (&big, dec_args.last_mut()) {
-        *last = "-y".to_string();
-        dec_args.push(name.clone());
-    }
-    let dec = spawn_tracked(jobs, tag, ffmpeg, &dec_args, false)?;
-    let dec_err = stderr_text(&dec);
-    let mut stdout: Box<dyn Read + Send> = match big {
-        Some((name, pipe)) => {
-            big_pipe::unblock_when_gone(dec.clone(), name);
-            pipe
+    // Starts a part's decoder; the reader takes its pipe when its turn comes.
+    let start_part = |i: usize| -> Result<(Arc<Mutex<std::process::Child>>, std::thread::JoinHandle<String>, Box<dyn Read + Send>), String> {
+        let p = &parts[i];
+        let mut args = src.decode_args(T::FMT, p.rects.as_ref(), p.first, p.frames);
+        let big = big_pipe::create();
+        if let (Some((name, _)), Some(last)) = (&big, args.last_mut()) {
+            *last = "-y".to_string();
+            args.push(name.clone());
         }
-        None => Box::new(dec.lock().stdout.take().ok_or("ffmpeg 출력 없음")?),
+        let dec = spawn_tracked(jobs, tag, ffmpeg, &args, false)?;
+        LIVE_DECODERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let err = stderr_text(&dec);
+        let pipe: Box<dyn Read + Send> = match big {
+            Some((name, pipe)) => {
+                big_pipe::unblock_when_gone(dec.clone(), name);
+                pipe
+            }
+            None => Box::new(dec.lock().stdout.take().ok_or("ffmpeg 출력 없음")?),
+        };
+        Ok((dec, err, pipe))
     };
-    let (tx_in, rx_in) = sync_channel::<Vec<u8>>(2);
+    enum In {
+        Picture(Vec<u8>, usize),
+        PartDone(usize),
+    }
+    let (tx_in, rx_in) = sync_channel::<In>(2);
     // Used buffers come back: one input frame is tens of MB, too much to allocate for every picture.
     let (tx_back, rx_back) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (tx_part, rx_part) = std::sync::mpsc::channel::<(usize, usize, Option<usize>, Box<dyn Read + Send>)>();
     let reader = std::thread::spawn(move || {
-        loop {
-            let mut buf = rx_back.try_recv().unwrap_or_else(|_| vec![0u8; in_len]);
-            let mut got = 0;
-            while got < in_len {
-                match stdout.read(&mut buf[got..]) {
-                    Ok(0) | Err(_) => break,
-                    Ok(k) => got += k,
+        for (i, in_len, frames, mut pipe) in rx_part {
+            let mut done = 0usize;
+            while frames.is_none_or(|n| done < n) {
+                let mut buf = rx_back.try_recv().unwrap_or_default();
+                buf.resize(in_len, 0);
+                let mut got = 0;
+                while got < in_len {
+                    match pipe.read(&mut buf[got..]) {
+                        Ok(0) | Err(_) => break,
+                        Ok(k) => got += k,
+                    }
                 }
+                if got < in_len {
+                    break;
+                }
+                if tx_in.send(In::Picture(buf, i)).is_err() {
+                    return;
+                }
+                done += 1;
             }
-            if got < in_len || tx_in.send(buf).is_err() {
-                break;
+            drop(pipe);
+            if tx_in.send(In::PartDone(i)).is_err() {
+                return;
             }
         }
     });
+    let mut decs = Vec::with_capacity(parts.len());
+    let mut ended = 0usize;
+    let mut tx_part = Some(tx_part);
+    let first = start_part(0)?;
+    decs.push((first.0, first.1));
+    if let Some(t) = &tx_part {
+        let _ = t.send((0, part_len(&parts[0]), parts[0].frames, first.2));
+    }
+    if parts.len() == 1 {
+        tx_part = None;
+    }
     let (ow, oh) = (st.out_w, st.out_h);
     let mut enc: Option<(Arc<Mutex<std::process::Child>>, std::thread::JoinHandle<String>, std::sync::mpsc::SyncSender<Vec<u8>>, std::thread::JoinHandle<Result<(), String>>)> = None;
     let mut call = None;
@@ -1337,18 +1422,64 @@ pub fn run<T: Px>(
     let (mut waited, mut stitched, mut written) = (0f64, 0f64, 0f64);
     loop {
         let t0 = std::time::Instant::now();
-        let Ok(buf) = rx_in.recv() else { break };
+        let Ok(got) = rx_in.recv() else { break };
+        let (buf, part) = match got {
+            In::Picture(b, i) => (b, i),
+            In::PartDone(_) => {
+                LIVE_DECODERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                ended += 1;
+                // Started already, unless the part just ended came up short or the chip was full.
+                if decs.len() < parts.len() {
+                    match start_part(decs.len()) {
+                        Ok((d, e, pipe)) => {
+                            let i = decs.len();
+                            decs.push((d, e));
+                            if let Some(t) = &tx_part {
+                                let _ = t.send((i, part_len(&parts[i]), parts[i].frames, pipe));
+                            }
+                            if decs.len() == parts.len() {
+                                tx_part = None;
+                            }
+                        }
+                        Err(e) => {
+                            failed = Some(e);
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+        };
         waited += t0.elapsed().as_secs_f64();
         if jobs.generation(tag) != gen {
             failed = Some(CANCELLED.into());
             break;
         }
         let t1 = std::time::Instant::now();
-        match &rects {
+        match &parts[part].rects {
             Some(r) => input.fill_rects(&buf, r),
             None => input.fill(&buf),
         }
         let _ = tx_back.send(buf);
+        // The next decoder starts ahead of its turn, so its start-up is not waited for.
+        if decs.len() < parts.len() && k + PART_LEAD >= parts[decs.len()].first && LIVE_DECODERS.load(std::sync::atomic::Ordering::Relaxed) < MAX_DECODERS {
+            match start_part(decs.len()) {
+                Ok((d, e, pipe)) => {
+                    let i = decs.len();
+                    decs.push((d, e));
+                    if let Some(t) = &tx_part {
+                        let _ = t.send((i, part_len(&parts[i]), parts[i].frames, pipe));
+                    }
+                    if decs.len() == parts.len() {
+                        tx_part = None;
+                    }
+                }
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
         let fs = setup(k, k as f64 / src.fps.max(1.0));
         let out = st.frame(&input, &fs);
         stitched += t1.elapsed().as_secs_f64();
@@ -1366,17 +1497,33 @@ pub fn run<T: Px>(
         on(k);
     }
     drop(rx_in);
+    drop(tx_part);
     if k > 30 {
-        let part = rects.as_ref().map(|r| format!(", read back {:.0}% of the lenses", (r[0].w + r[1].w) as f64 * r[0].h as f64 / (2.0 * (n * n) as f64) * 100.0)).unwrap_or_default();
+        let part = if src.crop {
+            let total: f64 = parts.iter().map(|p| part_len(p) as f64 * p.frames.unwrap_or(k.saturating_sub(p.first)) as f64).sum();
+            format!(", {} part(s), read back {:.0}% of the lenses", parts.len(), total / (Frame::<T>::byte_len(iw, ih) as f64 * k as f64) * 100.0)
+        } else {
+            String::new()
+        };
         crate::logs::log("stage", &format!("{} frames, {}px per lens, gpu {}{part}: waiting for decode {waited:.1}s, stitching {stitched:.1}s, waiting for encoder {written:.1}s", k, n, src.gpu));
     }
     if failed.is_some() {
-        let _ = dec.lock().kill();
+        for (d, _) in &decs {
+            let _ = d.lock().kill();
+        }
     }
     let _ = reader.join();
-    let dstat = dec.lock().wait();
-    jobs.remove(tag, &dec);
-    let derr = dec_err.join().unwrap_or_default();
+    // In-flight notices of ended parts may never have been read.
+    LIVE_DECODERS.fetch_sub(decs.len().saturating_sub(ended), std::sync::atomic::Ordering::Relaxed);
+    let mut dec_failed: Option<String> = None;
+    for (d, e) in decs.drain(..) {
+        let stat = d.lock().wait();
+        jobs.remove(tag, &d);
+        let text = e.join().unwrap_or_default();
+        if !matches!(&stat, Ok(s) if s.success()) && dec_failed.is_none() {
+            dec_failed = Some(text);
+        }
+    }
     if let Some((e, e_err, tx, writer)) = enc {
         drop(tx);
         let wres = writer.join().unwrap_or(Err("쓰기 실패".into()));
@@ -1398,9 +1545,10 @@ pub fn run<T: Px>(
     if let Some(e) = failed {
         return Err(e);
     }
-    if k == 0 {
-        let ok = matches!(&dstat, Ok(s) if s.success());
-        return Err(format!("360 영상을 읽지 못했습니다{}", if ok { String::new() } else { format!(": {}", derr.lines().next().unwrap_or("")) }));
+    // Stretches must add up, or the picture would drift from the sound.
+    let short = parts.len() > 1 && parts.last().is_some_and(|p| k < p.first + 2);
+    if k == 0 || (parts.len() > 1 && (short || dec_failed.is_some())) {
+        return Err(format!("360 영상을 읽지 못했습니다{}", dec_failed.map(|t| format!(": {}", t.lines().next().unwrap_or(""))).unwrap_or_default()));
     }
     Ok(k)
 }
@@ -1408,6 +1556,42 @@ pub fn run<T: Px>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wandering_view_is_read_in_stretches_that_add_up() {
+        let st = Stitch { fov: 193.4, ..Default::default() };
+        let mut s = Stitcher::new(&st, 1024.0, 1920, 1080, false, None);
+        let wander = |k: usize, _t: f64| FrameSetup { rot: crate::stitch::matrix(crate::stitch::ypr(k as f64 * 0.4, -15.0, 0.0)), hfov: Some((91.0, 0.3)), omega: None };
+        let parts = s.parts(&wander, 901, 30.0);
+        assert!(parts.len() >= 3, "{}", parts.len());
+        assert_eq!(parts[0].first, 0);
+        for w in parts.windows(2) {
+            assert_eq!(w[0].first + w[0].frames.unwrap(), w[1].first);
+        }
+        let last = parts.last().unwrap();
+        assert!(last.frames.is_none() && 901 - last.first >= PART_FRAMES / 2);
+        // A steady view stays one decoder.
+        let steady = |_: usize, _t: f64| FrameSetup { rot: crate::stitch::matrix(crate::stitch::ypr(30.0, -15.0, 0.0)), hfov: Some((91.0, 0.3)), omega: None };
+        assert_eq!(s.parts(&steady, 901, 30.0).len(), 1);
+        // Short clips too.
+        assert_eq!(s.parts(&wander, 300, 30.0).len(), 1);
+    }
+
+    #[test]
+    fn a_later_part_seeks_to_its_own_frame() {
+        let src = Source { path: "x".into(), layout: "dual".into(), swap: false, start: 10.0, dur: 20.0, lens_px: 3840, scale_to: None, fps: 30.0, every: 1, gpu: true, crop: true };
+        let a = src.decode_args("yuv420p", None, 0, Some(240));
+        let at = |v: &Vec<String>, f: &str| v.iter().position(|x| x == f).map(|i| v[i + 1].clone());
+        assert_eq!(at(&a, "-ss").as_deref(), Some("10.000"));
+        assert_eq!(at(&a, "-t"), None);
+        assert_eq!(at(&a, "-frames:v").as_deref(), Some("240"));
+        let b = src.decode_args("yuv420p", None, 240, None);
+        let ss: f64 = at(&b, "-ss").unwrap().parse().unwrap();
+        assert!((ss - 540.0 / 30.0).abs() < 1e-5, "{ss}");
+        let t: f64 = at(&b, "-t").unwrap().parse().unwrap();
+        assert!((ss + t - 30.0 - 1.5 / 30.0).abs() < 1e-5, "{t}");
+        assert_eq!(at(&b, "-frames:v"), None);
+    }
 
     #[test]
     fn a_cropped_picture_lands_where_the_full_one_was() {
@@ -1432,7 +1616,7 @@ mod tests {
         let n = 1024usize;
         let mut s = Stitcher::new(&st, n as f64, 1920, 1080, false, None);
         let setup = |k: usize, _t: f64| FrameSetup { rot: crate::stitch::matrix(crate::stitch::ypr(20.0 + k as f64 * 0.2, -15.0, 0.0)), hfov: Some((91.0, 0.3)), omega: None };
-        let r = s.lens_rects(&setup, 150, 30.0).expect("a view needs part of the lenses");
+        let r = s.lens_rects(&setup, 0, 150, 30.0).expect("a view needs part of the lenses");
         assert_eq!(r[0].h, r[1].h);
         for q in &r {
             assert!(q.x % 2 == 0 && q.y % 2 == 0 && q.w % 2 == 0 && q.h % 2 == 0, "{q:?}");
@@ -1455,7 +1639,7 @@ mod tests {
         }
         // A whole-sphere picture needs everything.
         let mut all = Stitcher::new(&st, n as f64, 2048, 1024, false, None);
-        assert!(all.lens_rects(&|_, _| FrameSetup { rot: I3, hfov: None, omega: None }, 10, 30.0).is_none());
+        assert!(all.lens_rects(&|_, _| FrameSetup { rot: I3, hfov: None, omega: None }, 0, 10, 30.0).is_none());
     }
 
     /// How long a moving 1080p view takes (REELCUT_BENCH=1 cargo test --release --lib bench_frame -- --nocapture).

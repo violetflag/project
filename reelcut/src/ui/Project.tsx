@@ -1,4 +1,4 @@
-import { Magnet, MousePointer2, MoveHorizontal, PanelLeft, PanelRight, Redo2, Scissors, SplitSquareHorizontal, Undo2, Upload } from "lucide-preact";
+import { Gauge, Magnet, MousePointer2, MoveHorizontal, PanelLeft, PanelRight, Redo2, Scissors, SplitSquareHorizontal, Undo2, Upload } from "lucide-preact";
 import { draftDuration } from "../edit";
 import { canRedo, canUndo, draft, redo, set, undo, undoLabel, useStore, type Tool } from "../store";
 import { AgentPanel } from "./AgentPanel";
@@ -17,6 +17,7 @@ const TOOLS: { id: Tool; label: string; key: string; term: string; Icon: any }[]
   { id: "blade", label: "자르기", key: "C", term: "Razor", Icon: Scissors },
   { id: "roll", label: "편집점 굴리기", key: "N", term: "Rolling Edit", Icon: SplitSquareHorizontal },
   { id: "slip", label: "내용 밀기", key: "Y", term: "Slip", Icon: MoveHorizontal },
+  { id: "rate", label: "길이로 속도 바꾸기", key: "R", term: "Rate Stretch", Icon: Gauge },
 ];
 
 export function ProjectView() {
