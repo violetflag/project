@@ -276,7 +276,7 @@ export function defaultLens(a: Asset): Lens {
 export const stabFor = (c: Pick<Clip, "stab">, a: Asset | undefined): Stab | null => c.stab ?? a?.lens?.stab ?? null;
 /** The lens a clip renders with: the media's, with the clip's own stabilisation when it has one. */
 export const lensFor = (c: Pick<Clip, "stab">, a: Asset): Lens => (c.stab ? { ...defaultLens(a), stab: c.stab } : defaultLens(a));
-export const DEFAULT_VIEW: View = { yaw: 0, pitch: 0, roll: 0, hfov: 100 };
+export const DEFAULT_VIEW: View = { yaw: 0, pitch: 0, roll: 0, hfov: 91, dist: 0.3 };
 
 export function newClip(a: Asset, start = 0, end = a.info.duration || 5): Clip {
   return { id: uid(), asset: a.id, start: r3(start), end: r3(Math.max(start + 0.05, end)), speed: 1, volume: 1, view: is360(a) ? { ...DEFAULT_VIEW } : undefined, fit: "fit" };

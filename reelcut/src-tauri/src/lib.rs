@@ -1,5 +1,6 @@
 mod analysis;
 mod args;
+mod diag;
 mod logs;
 mod cc;
 mod faces;
@@ -625,6 +626,17 @@ async fn loudness(app: St<'_>, path: String, start: f64, dur: f64) -> Result<Val
     let app = app.inner().clone();
     blocking(move || {
         analysis::integrated(&app.bins.ffmpeg, &path, start, start + dur)
+    })
+    .await
+}
+
+/// A developer's check: how close the export's picture is to the live preview's, in numbers.
+#[tauri::command]
+async fn diag_parity(app: St<'_>, path: String, lens: Lens, times: Vec<f64>, yaws: Vec<f64>) -> Result<Vec<Value>, String> {
+    let app = app.inner().clone();
+    blocking(move || {
+        let info = media::inspect(&app.bins.ffprobe, &path)?;
+        diag::parity(&app.bins.ffmpeg, &app.jobs, &info, &lens, &times, &yaws, &app.data_dir.join("diag"))
     })
     .await
 }
@@ -1562,6 +1574,7 @@ pub fn run() {
             find_faces,
             scan_gaze,
             measure,
+            diag_parity,
             loudness,
             script_files,
             dir_exists,

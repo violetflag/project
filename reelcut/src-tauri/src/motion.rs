@@ -1177,7 +1177,7 @@ mod tests {
             }
             // Flat views: the centre shows the direction they look along.
             for (yaw, pitch) in [(60.0, 20.0), (-100.0, -15.0), (150.0, 35.0), (10.0, -40.0)] {
-                let flat = move |_t: f64| (matrix(ypr(yaw, pitch, 0.0)), Some(20.0));
+                let flat = move |_t: f64| (matrix(ypr(yaw, pitch, 0.0)), Some((20.0, 0.0)));
                 let d2 = dir.join(format!("v{yaw}_{pitch}"));
                 std::fs::create_dir_all(&d2).unwrap();
                 let g = gray(&stills(&ffmpeg, &jobs, "t", 0, &info, &lens, None, &[1.0], 64, 64, &flat, &none, &d2).unwrap()[0], 64, 64);

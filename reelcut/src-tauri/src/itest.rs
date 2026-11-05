@@ -49,10 +49,10 @@ fn itest_real_ffmpeg() {
     let ahead = View { yaw: 30.0, pitch: 0.0, roll: 0.0, hfov: 90.0, dist: 0.0 };
     for (info, layout) in [(&osv, "dual"), (&lrf, "dfisheye")] {
         let lens = Lens { layout: layout.into(), swap: false, fov: 190.0, stitch: None, stab: None };
-        let shots = media::frames(&ffmpeg, &media::FrameReq { path: info.path.clone(), times: vec![1.0, 2.0], width: Some(320), view: Some(ahead.clone()), lens: Some(lens) }).unwrap();
+        let shots = media::frames(&ffmpeg, &media::FrameReq { path: info.path.clone(), times: vec![1.0, 2.0], width: Some(320), view: Some(ahead.clone()), lens: Some(lens), aspect: None }).unwrap();
         assert_eq!(shots.len(), 2, "{}", info.name);
     }
-    let plain = media::frames(&ffmpeg, &media::FrameReq { path: walk.path.clone(), times: vec![0.5], width: Some(320), view: None, lens: None }).unwrap();
+    let plain = media::frames(&ffmpeg, &media::FrameReq { path: walk.path.clone(), times: vec![0.5], width: Some(320), view: None, lens: None, aspect: None }).unwrap();
     assert_eq!(plain.len(), 1);
     let sheet = media::contact_sheet(&ffmpeg, &walk.path, 0.0, 1.0, 3, 2, 160).unwrap();
     assert!(sheet.len() > 1000);
