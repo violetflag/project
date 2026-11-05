@@ -15,12 +15,12 @@ import {
 } from "./edit";
 import { exportAndWait } from "./exporter";
 import { CAPTION_PRESETS, TEXT_KINDS } from "./graphics";
-import { applyVerdicts, badSpans, cleanKeys, frameGroup, frameSubject, lookSummary, normView, percentOk, sampleKeys, saneMarks, snapRanges, subjectLooks, thinMarks, type Mark, type Subject, type SubjectLook } from "./framing";
+import { applyVerdicts, badSpans, capView, cleanKeys, easePitch, frameGroup, frameSubject, lookSummary, normView, percentOk, sampleKeys, saneMarks, snapRanges, subjectLooks, thinMarks, type Mark, type Subject, type SubjectLook } from "./framing";
 import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSkillName, cleanSummary, findSkill, isChain, laterStepOf, looksForPeople, mergeSkills, NOT_IN_BATCH, panoramaTimes, parseSkillCommand, rangeFromText, runChainSteps, skillCatalog, stepLabel, upsertSkill, type Step, type StepResult } from "./skills";
 import { compactBudget, ctxLimit, estTokens, fmtK, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
 import { activeChat, asset, assetMap, editDraft, saveSkills, syncAssets, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
 import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
-import { PEOPLE_360_RULE } from "./playbook";
+import { LEVEL_VIEW_RULE, PEOPLE_360_RULE } from "./playbook";
 import { runScript, stopScript } from "./script";
 import { captionLines, draftCaptions, joinNext, moveWordPrev, setBreak, setHidden, setLineText, wordKey } from "./captions";
 import type { AnimKey, Asset, ChatBlock, Clip, ChoiceCard, ChatMsg, ChatSession, Draft, Skill, TextItem, View, ViewKey, VolKey } from "./types";
@@ -47,6 +47,7 @@ const SYSTEM = `당신은 Reelcut의 영상 편집 에이전트입니다. Reelcu
 - 360 클립은 시점을 한 개(view)만 두지 않고 시점 키프레임(view_keys: 원본 시간 t마다 yaw/pitch/roll/hfov)으로 움직일 수 있습니다. 키 사이는 부드럽게 이어집니다(과하게 튀지 않는 곡선). 사람을 따라가는 화면은 frame_subject로 0.1초 간격 키프레임을 만드세요. yaw·roll은 범위를 벗어나도 앱이 -180~180으로 맞춥니다.
 - 360 영상을 자동 편집해 달라는 요청이면 먼저 get_playbook으로 작업 순서(360 자동편집)를 읽고 따르세요.
 - ${PEOPLE_360_RULE}
+- ${LEVEL_VIEW_RULE}
 - 시간 단위는 모두 초입니다. 원본 시간(source)과 편집본 타임라인 시간(timeline)을 구분하세요.
 
 ## 일하는 방법
@@ -60,6 +61,7 @@ const SYSTEM = `당신은 Reelcut의 영상 편집 에이전트입니다. Reelcu
 
 const num = { type: "number" };
 const str = { type: "string" };
+const allow_steep = { type: "boolean", description: "사용자가 내려다보는 장면이나 넓은 화각을 직접 요청했을 때만 켭니다. 켜지 않으면 시점이 수평 가까이로 맞춰집니다." };
 const viewSchema = { type: "object", properties: { yaw: num, pitch: num, roll: num, hfov: num }, description: "360 시점 (도)" };
 const viewKeysSchema = { type: "array", items: { type: "object", properties: { t: { ...num, description: "원본 시간(초)" }, yaw: num, pitch: num, roll: num, hfov: num }, required: ["t"] }, description: "시점 키프레임 (키 사이는 부드럽게 이어짐)" };
 const draftId = { ...str, description: "편집본 id. 비우면 지금 열린 편집본" };
@@ -87,7 +89,7 @@ export const TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        name: str, aspect: { type: "string", enum: ["16:9", "9:16", "1:1", "4:5"] },
+        name: str, aspect: { type: "string", enum: ["16:9", "9:16", "1:1", "4:5"] }, allow_steep,
         clips: { type: "array", items: { type: "object", properties: { asset_id: str, start: num, end: num, speed: num, view: viewSchema, view_keys: viewKeysSchema }, required: ["asset_id", "start", "end"] } },
       },
       required: ["name", "clips"],
@@ -118,7 +120,7 @@ export const TOOLS = [
 - {op:"add_overlay", asset_id, at, start?, end?, track?(2|3), transform?, volume?}: 본편 위에 겹치기 (기본: 오른쪽 위 40% 크기)
 - {op:"set_overlay", overlay_id, at?, start?, end?, transform?, volume?}
 - {op:"remove_item", id}: V2/V3 또는 소리 클립 지우기`,
-    input_schema: { type: "object", properties: { draft_id: draftId, ops: { type: "array", items: { type: "object" } } }, required: ["ops"] },
+    input_schema: { type: "object", properties: { draft_id: draftId, allow_steep, ops: { type: "array", items: { type: "object" } } }, required: ["ops"] },
   },
   {
     name: "remove_silences", description: "편집본의 말 없는 구간을 잘라 냅니다. 받아쓰기가 있으면 단어 기준, 없으면 소리 크기 기준입니다.",
@@ -230,7 +232,7 @@ export const TOOLS = [
     input_schema: { type: "object", properties: { asset_id: str, times: { type: "array", items: num }, width: { ...num, description: "그림 가로 픽셀(기본 960)" } }, required: ["asset_id", "times"] },
   },
   {
-    name: "frame_subject", description: "사람(머리) 위치 표시를 따라가는 시점 키프레임을 만듭니다. 한 사람이면 marks에 equirect_sheet에서 읽은 [원본 초, x, y] 목록(빠르면 1초, 보통 2.5초 간격). 여러 사람을 함께 화면에 담으려면(쌍둥이 등) subjects에 사람마다 이름과 marks를 넣으세요. 화면이 모두의 가운데를 보고, 모두 들어오도록 화각을 넓힙니다(90~130°). 0.1초 간격 키프레임으로 부드럽게 이어서 클립에 넣고, 가장 높은 머리가 화면 위에서 1/3 지점에 오게 합니다. 결과에 사람마다 화면 안에 있었던 비율과, 너무 멀리 떨어져 한 화면에 못 담은 구간을 알려 줍니다.",
+    name: "frame_subject", description: "사람(머리) 위치 표시를 따라가는 시점 키프레임을 만듭니다. 한 사람이면 marks에 equirect_sheet에서 읽은 [원본 초, x, y] 목록(빠르면 1초, 보통 2.5초 간격). 여러 사람을 함께 화면에 담으려면(쌍둥이 등) subjects에 사람마다 이름과 marks를 넣으세요. 화면이 모두의 가운데를 보고, 한도(16:9는 100°, 9:16은 70°) 안에서 모두 들어오도록 화각을 조금 넓힙니다. 시점은 수평 가까이(±25°)를 지킵니다. 0.1초 간격 키프레임으로 부드럽게 이어서 클립에 넣고, 가장 높은 머리가 화면 위에서 1/3 지점에 오게 합니다. 결과에 사람마다 화면 안에 있었던 비율과, 너무 멀리 떨어져 한 화면에 못 담은 구간을 알려 줍니다.",
     input_schema: {
       type: "object",
       properties: {
@@ -241,7 +243,8 @@ export const TOOLS = [
           items: { type: "object", properties: { name: str, marks: { type: "array", items: { type: "array", items: num } } }, required: ["marks"] },
         },
         track: { type: "boolean", description: "표시를 시작점으로 얼굴·머리를 자동 추적해 0.2초 단위로 다듬습니다(기본 켬, 구간 3분 이하). 표시가 몇 개뿐이어도 따라갑니다." },
-        hfov: { ...num, description: "화각(기본 90)" }, headroom: { ...num, description: "머리 위 여백 비율(기본 0.33)" },
+        allow_steep,
+        hfov: { ...num, description: "화각. 보통 비워 둡니다(16:9는 90, 9:16은 62. 최대 100, 70)" }, headroom: { ...num, description: "머리 위 여백 비율(기본 0.33)" },
         step: { ...num, description: "키 간격 초(기본 0.1)" }, smooth: { ...num, description: "부드럽게 하는 정도 초(기본 0.4, 0이면 끔)" },
         from: num, to: num,
       },
@@ -345,6 +348,18 @@ function overview(): string {
   lines.push("", "편집본:");
   for (const d of p.drafts) lines.push(`- ${d.id} | ${d.name} | 클립 ${d.clips.length}개 | ${fmtTC(draftDuration(d))} | ${d.aspect}`);
   return lines.join("\n");
+}
+
+/** Views the AI just set are held near level, unless the user asked for steep or wide ones. Clips it did not touch stay as they are. */
+function capAiViews(before: Draft, after: Draft, free: boolean): Draft {
+  if (free) return after;
+  const [w, h] = after.aspect.split(":").map(Number);
+  const aspect = w / h || 16 / 9;
+  return { ...after, clips: after.clips.map((c) => (before.clips.includes(c) ? c : {
+    ...c,
+    ...(c.view ? { view: capView(c.view, aspect) } : {}),
+    ...(c.viewKeys ? { viewKeys: c.viewKeys.map((k) => ({ ...k, view: capView(k.view, aspect) })) } : {}),
+  })) };
 }
 
 function draftInfo(d: Draft): string {
@@ -537,7 +552,7 @@ async function run(name: string, inp: any): Promise<Out> {
     }
     case "create_draft": {
       let d = newDraft(String(inp.name || "새 편집본"), inp.aspect || "16:9");
-      d = applyOps(d, (inp.clips ?? []).map((c: any) => ({ op: "insert", ...c })));
+      d = capAiViews(d, applyOps(d, (inp.clips ?? []).map((c: any) => ({ op: "insert", ...c }))), !!inp.allow_steep);
       setDrafts(`AI: 편집본 만들기 "${d.name}"`, [...p.drafts, d], d.id);
       set({ playhead: 0, sourceId: null });
       return `만들었습니다.\n` + draftInfo(d);
@@ -545,7 +560,7 @@ async function run(name: string, inp: any): Promise<Out> {
     case "get_draft": return draftInfo(getDraft(inp.draft_id));
     case "edit_draft": {
       const d0 = getDraft(inp.draft_id);
-      const d = applyOps(d0, inp.ops ?? []);
+      const d = capAiViews(d0, applyOps(d0, inp.ops ?? []), !!inp.allow_steep);
       editDraft(`AI: 편집본 수정`, () => d, d0.id);
       return `적용했습니다. 길이 ${r3(draftDuration(d0))}초 → ${r3(draftDuration(d))}초\n` + draftInfo(d);
     }
@@ -731,7 +746,7 @@ async function run(name: string, inp: any): Promise<Out> {
       if (!marks.length && !subjects.length) throw new Error("marks나 subjects가 비었습니다");
       const [aw, ah] = d0.aspect.split(":").map(Number);
       const from = Math.max(c.start, inp.from ?? c.start), to = Math.min(c.end, inp.to ?? c.end);
-      const opts = { aspect: aw / ah || 16 / 9, hfov: inp.hfov, headroom: inp.headroom, step: inp.step, sigma: inp.smooth };
+      const opts = { aspect: aw / ah || 16 / 9, hfov: inp.hfov, headroom: inp.headroom, step: inp.step, sigma: inp.smooth, free: !!inp.allow_steep };
       let note = "";
       let keys;
       let people: Subject[] = subjects.length ? subjects : [{ name: "사람", marks }];
@@ -763,6 +778,9 @@ async function run(name: string, inp: any): Promise<Out> {
         keys = frameSubject(marks, from, to, opts);
       }
       if (!keys.length) throw new Error("키프레임을 만들 수 없습니다 (marks나 구간 확인)");
+      // A cut jumps less when this clip tilts about as the one before it ended.
+      const before = d0.clips[d0.clips.indexOf(c) - 1]?.viewKeys;
+      if (before?.length && !opts.free) keys = easePitch(keys, before[before.length - 1].view.pitch, people, opts.aspect);
       // Remembered so check_framing can tell who is in frame.
       const d = updateClip(d0, c.id, { viewKeys: keys, ...(subjects.length ? { subjects: people.map((p) => ({ name: p.name, marks: thinMarks(p.marks) })) } : {}) });
       editDraft("AI: 사람 따라가기", () => d, d0.id);

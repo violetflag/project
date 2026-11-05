@@ -1,6 +1,6 @@
 // The guides that come with the app, one for each kind of job. Each one only names tools the AI really
 // has here; web browsing and paid generation are not part of Reelcut, so nothing here assumes them.
-import { PEOPLE_360_RULE } from "./playbook";
+import { LEVEL_VIEW_RULE, PEOPLE_360_RULE } from "./playbook";
 import type { Skill } from "./types";
 
 const g = (name: string, description: string, triggers: string[], body: string): Skill => ({ name, description, triggers, body });
@@ -182,7 +182,7 @@ ${PEOPLE_360_RULE}
 1. 편집본이 없으면 create_draft로 만들고, 있으면 edit_draft의 aspect로 9:16을 정합니다. 앞에서 받은 구간이 있으면 그대로 씁니다.
 2. 일반 영상은 set의 fit "fill"로 채운 뒤 transform의 x로 사람이 가운데 오게 옮깁니다. 사람이 움직이면 클립을 나눠 맞춥니다.
 3. 360 영상은 구간의 처음, 중간, 끝을 equirect_sheet와 find_faces로 보고 따라갈 사람의 머리 위치를 찾습니다. 누구인지는 사진을 보고 직접 판단합니다. 어린아이는 보통 수평선(y 240)보다 한참 아래에 있습니다. 어른을 아이로 잡지 마세요.
-4. 머리 위치를 사람마다 frame_subject의 subjects에 넣습니다. 쌍둥이처럼 둘을 담으면 둘 다 넣습니다. 세로 화면에서는 hfov를 주지 않아도 됩니다. 앱이 75° 쯤으로 잡아 위에서 내려다보는 그림을 피합니다.
+4. 머리 위치를 사람마다 frame_subject의 subjects에 넣습니다. 쌍둥이처럼 둘을 담으면 둘 다 넣습니다. hfov는 주지 않아도 됩니다. ${LEVEL_VIEW_RULE}
 5. check_framing으로 확인합니다. 비율과 문제 있는 곳이 나오고 사진이 함께 옵니다. 사진에서 둘이 다 있는지, 어른이 화면을 차지하지 않는지 직접 봅니다.
 6. 문제가 있으면 먼저 그곳의 머리 위치를 더 찍어 frame_subject를 다시 합니다. 그래도 안 되는 부분은 trim_to_subjects에 not_ok_times로 알려 빼고, 괜찮은데 자동 판단이 틀린 곳은 ok_times로 알립니다.
 7. 마지막에 trim_to_subjects로 나온 비율을 그대로 사용자에게 알립니다. 길이가 많이 줄었으면 그것도 알립니다.

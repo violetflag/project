@@ -126,6 +126,21 @@ export function smoothViewAt(keys: ViewKey[], t: number): View {
 /** A mark on the level 960x480 panorama sheet: time, x (0–960 = azimuth −180..180), y (240 = horizon), optional zoom. */
 export type Mark = { t: number; x: number; y: number; hfov?: number };
 
+/** How far a followed view tilts up or down, degrees. Further than this people look seen from a ceiling. */
+export const LEVEL_PITCH = 25;
+
+/** Fields of view that keep lines straight and bodies in proportion, by frame shape. hfov is the frame's width, so a tall frame needs far less. */
+export function viewLimits(aspect: number, free = false): { base: number; max: number } {
+  if (free) return aspect < 1 ? { base: 75, max: 105 } : { base: 90, max: 130 };
+  return aspect < 1 ? { base: 62, max: 70 } : { base: 90, max: 100 };
+}
+
+/** A view kept near level and not too wide, unless the user asked otherwise. */
+export function capView(v: View, aspect: number, free = false): View {
+  if (free) return v;
+  return { ...v, pitch: Math.max(-LEVEL_PITCH, Math.min(LEVEL_PITCH, v.pitch)), hfov: Math.min(v.hfov, viewLimits(aspect).max) };
+}
+
 export type FrameOpts = {
   /** Output aspect, width / height (default 16/9). */
   aspect?: number;
@@ -137,6 +152,8 @@ export type FrameOpts = {
   step?: number;
   /** Gaussian smoothing, seconds (default 0.4; 0 = none). */
   sigma?: number;
+  /** The user asked for steep or very wide views: leave LEVEL_PITCH and the width limit off. */
+  free?: boolean;
 };
 
 /** Azimuth and elevation (degrees) of a panorama point. */
@@ -174,11 +191,13 @@ export function frameSubject(marks: Mark[], from: number, to: number, o: FrameOp
   const ms = marks.filter((m) => Number.isFinite(m.t) && Number.isFinite(m.x) && Number.isFinite(m.y)).sort((a, b) => a.t - b.t);
   if (!ms.length || to <= from) return [];
   const step = Math.max(0.02, o.step ?? 0.1);
-  const hf = o.hfov ?? 90, aspect = o.aspect ?? 16 / 9, headroom = Math.max(0, Math.min(0.5, o.headroom ?? 0.33));
+  const aspect = o.aspect ?? 16 / 9, headroom = Math.max(0, Math.min(0.5, o.headroom ?? 0.33));
+  const lim = viewLimits(aspect, o.free);
+  const hf = Math.min(o.hfov ?? lim.base, lim.max);
   const ang = ms.map(markAngles);
   const yaw = unwrapYaw(ang.map((a) => a.yaw));
   const pitch = ang.map((a) => a.pitch);
-  const fov = ms.map((m) => m.hfov ?? hf);
+  const fov = ms.map((m) => Math.min(m.hfov ?? hf, lim.max));
   const t = ms.map((m) => m.t);
   const my = pchipSlopes(t, yaw), mp = pchipSlopes(t, pitch), mf = pchipSlopes(t, fov);
   const n = Math.max(1, Math.round((to - from) / step));
@@ -193,7 +212,7 @@ export function frameSubject(marks: Mark[], from: number, to: number, o: FrameOp
   const sg = o.sigma ?? 0.4;
   const sy = gaussian(ts, ys, sg), sp = gaussian(ts, ps, sg), sf = gaussian(ts, fs, sg);
   return ts.map((tt, i) =>
-    ({ t: r3(tt), view: normView({ yaw: sy[i], pitch: sp[i] - headDrop(sf[i], aspect, headroom), roll: 0, hfov: sf[i] }) }));
+    ({ t: r3(tt), view: normView(capView({ yaw: sy[i], pitch: sp[i] - headDrop(sf[i], aspect, headroom), roll: 0, hfov: sf[i] }, aspect, o.free)) }));
 }
 
 // ---------------------------------------------------------------- following several people at once
@@ -272,10 +291,9 @@ export function frameGroup(subjects: Subject[], from: number, to: number, o: Gro
   if (!people.length || to <= from) return { keys: [], report: { subjects: [], tooFar: [] } };
   const step = Math.max(0.02, o.step ?? 0.1);
   const aspect = o.aspect ?? 16 / 9, headroom = Math.max(0, Math.min(0.5, o.headroom ?? 0.33));
-  // A tall frame sees far more up and down than across: wide angles look straight down on people.
-  const tall = aspect < 1;
-  const base = tall ? Math.min(o.hfov ?? 75, 85) : o.hfov ?? 90;
-  const reach = o.reach ?? 3, margin = o.margin ?? 25, maxF = Math.max(base, o.maxHfov ?? (tall ? 105 : 130));
+  const lim = viewLimits(aspect, o.free);
+  const base = Math.min(o.hfov ?? lim.base, lim.max);
+  const reach = o.reach ?? 3, margin = o.margin ?? (aspect < 1 ? 12 : 25), maxF = Math.max(base, Math.min(o.maxHfov ?? lim.max, lim.max));
   // Each person's head path, with how far each moment is from their nearest mark.
   const paths = people.map((p) => {
     const t = p.ms.map((m) => m.t), a = p.ms.map(markAngles);
@@ -334,8 +352,9 @@ export function frameGroup(subjects: Subject[], from: number, to: number, o: Gro
     const lowest = Math.max(...on.map((x) => project(x.yaw, x.pitch, view, aspect)?.v ?? 1));
     return lowest > 0.7 ? (top + low) / 2 : aim;
   });
-  // People are never so far overhead or underfoot that the view should point straight up or down.
-  const sp = gaussian(ts, pt, sg).map((p) => Math.max(-MAX_FOLLOW_PITCH, Math.min(MAX_FOLLOW_PITCH, p)));
+  // The view stays near level; people lower down simply sit lower in the frame.
+  const limit = o.free ? 62 : LEVEL_PITCH;
+  const sp = gaussian(ts, pt, sg).map((p) => Math.max(-limit, Math.min(limit, p)));
   const keys = ts.map((tt, i) => ({ t: r3(tt), view: normView({ yaw: sy[i], pitch: sp[i], roll: 0, hfov: fov[i] }) }));
   // How well everyone was kept in view, and where they could not all fit.
   const counts = people.map(() => ({ inFrame: 0, counted: 0 }));
@@ -360,7 +379,28 @@ export function frameGroup(subjects: Subject[], from: number, to: number, o: Gro
 
 // ---------------------------------------------------------------- snapping cuts into silences
 
-const MAX_FOLLOW_PITCH = 62;
+/**
+ * Moves a clip's tilt toward the end of the clip before it, so cuts jump less: at most `most` degrees,
+ * and only as far as everyone followed stays in frame.
+ */
+export function easePitch(keys: ViewKey[], target: number, people: { marks: Mark[] }[], aspect: number, most = 12): ViewKey[] {
+  if (!keys.length) return keys;
+  const near = (ms: Mark[], t: number) => ms.reduce<Mark | null>((b, m) => (!b || Math.abs(m.t - t) < Math.abs(b.t - t) ? m : b), null);
+  const fits = (shift: number) => keys.every((k, i) => {
+    if (i % 5) return true;
+    const view = { ...k.view, pitch: k.view.pitch + shift };
+    return people.every((p) => {
+      const m = near(p.marks, k.t);
+      if (!m) return true;
+      const a = markAngles(m), at = project(a.yaw, a.pitch, view, aspect);
+      return !!at && Math.abs(at.u) <= 0.95 && Math.abs(at.v) <= 0.95;
+    });
+  });
+  let shift = Math.max(-most, Math.min(most, target - keys[0].view.pitch));
+  for (let i = 0; i < 4 && shift && !fits(shift); i++) shift = i === 3 ? 0 : shift / 2;
+  if (!shift) return keys;
+  return keys.map((k) => ({ ...k, view: { ...k.view, pitch: r3(Math.max(-LEVEL_PITCH, Math.min(LEVEL_PITCH, k.view.pitch + shift))) } }));
+}
 
 /** Head marks without those near the poles of the panorama or that jump faster than a person moves. */
 export function saneMarks(marks: Mark[]): Mark[] {

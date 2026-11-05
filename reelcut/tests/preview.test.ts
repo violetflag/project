@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
 import { captionLines, draftCaptions, keyWordIndex, moveWordPrev, setHidden, setLineText, spokenIndex, toAss, toSrt, wordKey } from "../src/captions";
 import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSummary, findSkill, laterStepOf, looksForPeople, panoramaTimes, rangeFromText, mergeSkills, parseSkillCommand, runChainSteps, skillFromText, skillToText, upsertSkill } from "../src/skills";
-import { applyVerdicts, badSpans, frameGroup, percentOk, saneMarks, subjectLooks, thinMarks } from "../src/framing";
+import { applyVerdicts, badSpans, capView, easePitch, frameGroup, frameSubject, percentOk, project, saneMarks, subjectLooks, thinMarks } from "../src/framing";
 import { PEOPLE_360_RULE, PLAYBOOK_360 } from "../src/playbook";
 import { TOOLS } from "../src/agent";
 import { NOT_IN_SCRIPT, SDK, transpileScript } from "../src/script";
@@ -296,7 +296,7 @@ describe("skills and gaze", () => {
     const words = new Set<string>();
     for (const k of BUILTIN_SKILLS) for (const m of k.body.matchAll(/\b([a-z]+_[a-z_]+)\b/g)) words.add(m[1]);
     // Values and guide names that look like tool names.
-    const allowed = new Set([...BUILTIN_SKILLS.map((k) => k.name), "jump_cut", "break_by", "max_chars", "cut_source", "add_music", "add_overlay", "shrink_balanced", "shrink_small", "shrink_archive", "shrink_lecture", "break_before", "join_next", "move_word_prev", "fix_word", "set_line", "zoom_in", "zoom_out", "pan_left", "pan_right", "remove_range", "head_marks", "draft_id", "asset_id", "run_script", "set_view_keys", "not_ok_times", "ok_times"]);
+    const allowed = new Set([...BUILTIN_SKILLS.map((k) => k.name), "jump_cut", "break_by", "max_chars", "cut_source", "add_music", "add_overlay", "shrink_balanced", "shrink_small", "shrink_archive", "shrink_lecture", "break_before", "join_next", "move_word_prev", "fix_word", "set_line", "zoom_in", "zoom_out", "pan_left", "pan_right", "remove_range", "head_marks", "draft_id", "asset_id", "run_script", "set_view_keys", "not_ok_times", "ok_times", "allow_steep"]);
     const unknown = [...words].filter((w) => !known.has(w) && !allowed.has(w));
     expect(unknown).toEqual([]);
     expect(BUILTIN_SKILLS).toHaveLength(33);
@@ -473,12 +473,14 @@ describe("who is in frame", () => {
     expect(saneMarks([m(0, 950, 300), m(1, 10, 300)])).toHaveLength(2);
     const low = [{ name: "a", marks: [m(0, 480, 435), m(5, 480, 435)] }, { name: "b", marks: [m(0, 480, 435), m(5, 480, 435)] }];
     const { keys } = frameGroup(low, 0, 5, { aspect: 9 / 16, hfov: 40 });
-    expect(Math.min(...keys.map((k) => k.view.pitch))).toBeGreaterThanOrEqual(-62);
+    expect(Math.min(...keys.map((k) => k.view.pitch))).toBeGreaterThanOrEqual(-25);
     expect(thinMarks([m(0, 1, 2), m(0.2, 1, 2), m(0.5, 1, 2)]).map((x) => x.t)).toEqual([0, 0.5]);
-    // In a tall frame an asked-for wide angle is held back; a wide frame keeps it.
+    // Asked-for wide angles are held back by frame shape, unless the user asked for them.
     const pair = [{ name: "a", marks: [m(0, 480, 300), m(5, 480, 300)] }, { name: "b", marks: [m(0, 490, 300), m(5, 490, 300)] }];
-    expect(Math.max(...frameGroup(pair, 0, 5, { aspect: 9 / 16, hfov: 110 }).keys.map((k) => k.view.hfov))).toBeLessThanOrEqual(85);
-    expect(frameGroup(pair, 0, 5, { aspect: 16 / 9, hfov: 110 }).keys[0].view.hfov).toBeCloseTo(110);
+    expect(Math.max(...frameGroup(pair, 0, 5, { aspect: 9 / 16, hfov: 110 }).keys.map((k) => k.view.hfov))).toBeLessThanOrEqual(70);
+    expect(Math.max(...frameGroup(pair, 0, 5, { aspect: 16 / 9, hfov: 130 }).keys.map((k) => k.view.hfov))).toBeLessThanOrEqual(100);
+    expect(frameGroup(pair, 0, 5, { aspect: 16 / 9, hfov: 110, free: true }).keys[0].view.hfov).toBeCloseTo(110);
+    expect(Math.max(...frameSubject(pair[0].marks, 0, 5, { aspect: 9 / 16 }).map((k) => k.view.hfov))).toBeLessThanOrEqual(70);
   });
 });
 
@@ -541,5 +543,35 @@ describe("looking for people in 360 footage", () => {
     expect(t).toHaveLength(16);
     expect(t[0]).toBeGreaterThan(270);
     expect(t[15]).toBeLessThan(300);
+  });
+});
+
+describe("level views", () => {
+  const m = (t: number, x: number, y: number) => ({ t, x, y });
+  it("keeps children low in the frame instead of tilting after them", () => {
+    const kids = [{ name: "a", marks: [m(0, 470, 350), m(5, 470, 350)] }, { name: "b", marks: [m(0, 490, 355), m(5, 490, 355)] }];
+    const { keys, report } = frameGroup(kids, 0, 5, { aspect: 16 / 9 });
+    expect(Math.min(...keys.map((k) => k.view.pitch))).toBeGreaterThanOrEqual(-25);
+    expect(report.subjects.every((s) => s.inFrame === 100)).toBe(true);
+  });
+  it("caps a view unless the user asked for it", () => {
+    const steep = { yaw: 10, pitch: -60, roll: 0, hfov: 130 };
+    expect(capView(steep, 16 / 9)).toEqual({ yaw: 10, pitch: -25, roll: 0, hfov: 100 });
+    expect(capView(steep, 9 / 16).hfov).toBe(70);
+    expect(capView(steep, 16 / 9, true)).toEqual(steep);
+    expect(capView({ yaw: 0, pitch: 5, roll: 0, hfov: 50 }, 16 / 9).hfov).toBe(50);
+  });
+  it("moves a clip's tilt toward the last clip while everyone stays in frame", () => {
+    const keys = [0, 1, 2, 3, 4, 5].map((t) => ({ t, view: { yaw: 0, pitch: -20, roll: 0, hfov: 90 } }));
+    const near = [{ marks: [m(0, 480, 300), m(5, 480, 300)] }];
+    expect(easePitch(keys, -10, near, 16 / 9)[0].view.pitch).toBe(-10);
+    expect(easePitch(keys, 25, near, 16 / 9)[0].view.pitch).toBeLessThanOrEqual(-8);
+    // A head near the bottom edge limits the move.
+    const low = [{ marks: [m(0, 480, 350), m(5, 480, 350)] }];
+    const moved = easePitch(keys, 5, low, 16 / 9)[0].view.pitch;
+    expect(moved).toBeGreaterThan(-20);
+    expect(moved).toBeLessThan(-8);
+    const v = project(0, -41.25, { yaw: 0, pitch: moved, roll: 0, hfov: 90 }, 16 / 9);
+    expect(Math.abs(v!.v)).toBeLessThanOrEqual(0.95);
   });
 });

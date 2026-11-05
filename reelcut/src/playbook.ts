@@ -4,13 +4,18 @@
 /** How to look for people in 360 footage; every guide that looks for people says this. */
 export const PEOPLE_360_RULE = "360 영상에서 사람을 찾을 때는 equirect_sheet나 find_faces로 파노라마 전체를 봅니다. contact_sheet는 어안이고 view_frames는 한 방향만 보여 주므로, 거기 없다고 영상에 없다고 판단하면 안 됩니다.";
 
+/** The look of a followed view. The app holds AI views to this unless the user asks for something else. */
+export const LEVEL_VIEW_RULE = "시점은 수평에 가깝게 둡니다: pitch는 ±25° 안, 화각은 16:9에서 80~100°(보통 90), 9:16에서 55~70°. 많이 내려다보거나 화각이 넓으면 선이 휘고 몸이 늘어납니다. 아이가 아래에 있으면 시점을 더 숙이지 말고 아이가 화면 아래쪽에 오게 둡니다. 앱이 이 범위로 맞추며, 사용자가 내려다보는 장면이나 광각을 직접 요청했을 때만 allow_steep을 켭니다.";
+
 export const PLAYBOOK_360 = `# 360 영상 자동 편집 순서 (Reelcut 도구 기준)
 
 필요한 것: 360 원본(.osv 등), 따라갈 사람(누구인지), 목표 길이(말이 없으면 원본의 1/3).
 
 ## 늘 지킬 것
 - ${PEOPLE_360_RULE}
-- 머리는 화면 위에서 1/3 지점. 몸통이 아니라 머리 위치를 기준으로 합니다.
+- ${LEVEL_VIEW_RULE}
+- 머리는 되도록 화면 위에서 1/3 지점. 몸통이 아니라 머리 위치를 기준으로 합니다.
+- 컷 사이에 방향과 기울기가 크게 달라지지 않게 합니다. 비슷한 방향의 장면을 이어 붙이고, 앱이 기울기를 앞 클립에 맞춰 조금 옮깁니다.
 - 말 중간에서 끊지 않습니다. 컷은 말 틈에서.
 - 한 컷은 4~30초. 주인공 중심으로 하되 다른 가족도 전체의 10~15%.
 - 쌍둥이(두 아이)처럼 여러 명이 주인공이면 한 명만 가운데에 두지 말고 함께 담습니다: 장면마다 두 아이 머리를 모두 찍어 frame_subject의 subjects로 넣으세요(앱이 둘의 가운데를 보고 둘 다 들어오게 화각을 넓힘). 두 아이의 화면 시간은 비슷하게 맞춥니다. 이때 위의 '다른 가족 10~15%'는 두 아이 사이에는 적용하지 않습니다.

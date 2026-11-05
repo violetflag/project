@@ -9,7 +9,7 @@ const marks = (from: number, to: number, yaw: (t: number) => number, pitch = 5):
 
 describe("framing two people together (twins)", () => {
   it("aims between two heads 60° apart and opens wider than the single-person view", () => {
-    const { keys, report } = frameGroup([{ name: "A", marks: marks(0, 10, () => -30) }, { name: "B", marks: marks(0, 10, () => 30) }], 0, 10);
+    const { keys, report } = frameGroup([{ name: "A", marks: marks(0, 10, () => -30) }, { name: "B", marks: marks(0, 10, () => 30) }], 0, 10, { free: true });
     const mid = keys[50].view;
     expect(Math.abs(mid.yaw)).toBeLessThan(1);
     expect(mid.hfov).toBeGreaterThan(90);
@@ -36,6 +36,12 @@ describe("framing two people together (twins)", () => {
     expect(report.subjects[0].inFrame).toBe(100);
   });
 
+  it("holds a group to the normal width and says when they do not fit", () => {
+    const { keys, report } = frameGroup([{ name: "A", marks: marks(0, 10, () => -30) }, { name: "B", marks: marks(0, 10, () => 30) }], 0, 10);
+    expect(keys[50].view.hfov).toBeCloseTo(100, 0);
+    expect(report.tooFar.length).toBe(1);
+  });
+
   it("reports when they are too far apart to share one frame", () => {
     const { keys, report } = frameGroup([{ name: "A", marks: marks(0, 10, () => -90) }, { name: "B", marks: marks(0, 10, () => 90) }], 0, 10);
     expect(keys[50].view.hfov).toBeLessThanOrEqual(130.001);
@@ -48,7 +54,7 @@ describe("framing two people together (twins)", () => {
     const close = frameGroup([{ name: "A", marks: marks(0, 10, () => -10, 10) }, { name: "B", marks: marks(0, 10, () => 10, 5) }], 0, 10).keys[50].view;
     const top = project(-10, 10, close, 16 / 9)!;
     expect(top.v).toBeCloseTo(-1 + 2 * 0.33, 1);
-    const tall = frameGroup([{ name: "A", marks: marks(0, 10, () => -10, 30) }, { name: "B", marks: marks(0, 10, () => 10, -30) }], 0, 10).keys[50].view;
+    const tall = frameGroup([{ name: "A", marks: marks(0, 10, () => -10, 30) }, { name: "B", marks: marks(0, 10, () => 10, -30) }], 0, 10, { free: true }).keys[50].view;
     const low = project(10, -30, tall, 16 / 9)!;
     expect(low.v).toBeLessThan(0.7);
   });
