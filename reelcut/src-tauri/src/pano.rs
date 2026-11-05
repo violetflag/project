@@ -1276,7 +1276,7 @@ mod tests {
         // A flat view straight at the seam.
         let mut st2 = Stitcher::new(&s, 400.0, 320, 240, true, None);
         let rot = matrix(ypr(90.0, 0.0, 0.0));
-        let flat = st2.frame(&f, &FrameSetup { rot, hfov: Some(90.0), omega: None });
+        let flat = st2.frame(&f, &FrameSetup { rot, hfov: Some((90.0, 0.0)), omega: None });
         assert_eq!(flat.p[0].len(), 320 * 240);
     }
 
