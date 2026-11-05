@@ -88,6 +88,8 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
     case "store_get": return ls.get(a.name);
     case "store_set": ls.set(a.name, a.value); return;
     case "store_delete": ls.del(a.name); return;
+    case "store_trash_list": return [];
+    case "store_restore": case "log_event": return;
     case "store_list": return ls.keys().filter((k) => k.startsWith(a.prefix));
     case "expand_paths": return a.paths.map((p: string) => [p, ""]);
     case "inspect": return info(a.path);
