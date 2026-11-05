@@ -304,6 +304,17 @@ pub fn write_folder(dir: &Path, img: &Path, project: &Value, app: &str, saved_at
     let id = ok_id(project["id"].as_str().unwrap_or(""))?.to_string();
     let base = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "프로젝트".into());
     let file = dir.join(format!("{base}.{EXT}"));
+    // The folder was renamed in Explorer: the project file follows it, so the folder never holds
+    // an old copy next to the new one.
+    if !file.exists() {
+        if let Some(old) = project_files(dir).into_iter().find(|p| file_id(p).as_deref() == Some(id.as_str())) {
+            let old_bak = PathBuf::from(format!("{}.bak", old.display()));
+            let _ = std::fs::rename(&old, &file);
+            if old_bak.is_file() {
+                let _ = std::fs::rename(&old_bak, dir.join(format!("{base}.{EXT}.bak")));
+            }
+        }
+    }
     let mut out = Wrote { file: file.clone(), ..Default::default() };
     let mut proj = project.clone();
     if let Some(chats) = proj.get_mut("chats").and_then(Value::as_array_mut) {
@@ -1606,6 +1617,27 @@ mod tests {
         let to = trash_folder(&dir, &root.join("Docs/Reelcut"), "2026-11-05 1200").unwrap();
         assert!(to.join("기록.reelcut").is_file() && !dir.exists());
         assert!(std::fs::read_to_string(root.join("Docs/Reelcut/_휴지통/삭제 기록.txt")).unwrap().contains("기록"));
+    }
+
+    #[test]
+    fn a_renamed_folder_keeps_one_project_file() {
+        let root = tmp("renamed");
+        let media = root.join("CAM_0001.OSV");
+        std::fs::write(&media, b"x").unwrap();
+        let dir = root.join("옛이름");
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = img_dir(&root.join("data"), &dir, "p1");
+        let p = sample("p1", "옛이름", &media);
+        let mut w = Written::new();
+        write_folder(&dir, &img, &p, "2.18.1", "t", &mut w).unwrap();
+        write_folder(&dir, &img, &p, "2.18.1", "t2", &mut w).unwrap();
+        let to = root.join("새이름");
+        std::fs::rename(&dir, &to).unwrap();
+        let mut w = Written::new();
+        let out = write_folder(&to, &img, &p, "2.18.1", "t3", &mut w).unwrap();
+        assert_eq!(out.file, to.join("새이름.reelcut"));
+        assert_eq!(project_files(&to), vec![to.join("새이름.reelcut")]);
+        assert!(to.join("새이름.reelcut.bak").is_file() && !to.join("옛이름.reelcut.bak").exists());
     }
 
     #[test]
