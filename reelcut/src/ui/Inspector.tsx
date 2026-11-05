@@ -8,7 +8,7 @@ import { api, pickLut } from "../api";
 import {
   GAZE_MIN_FACE_360,
   gazeSpans,
-  ASPECTS, audioTrack, fitMusic, LOOKS, clipAt, clipDur, DEFAULT_COLOR, DEFAULT_TRANSFORM, DEFAULT_VIEW, detachAudio, fmtTCF, is360, isGap, overlays, parseTC, r3, setTransition, setViewKey, starts,
+  ASPECTS, parseAspect, audioTrack, fitMusic, LOOKS, clipAt, clipDur, DEFAULT_COLOR, DEFAULT_TRANSFORM, DEFAULT_VIEW, detachAudio, fmtTCF, is360, isGap, overlays, parseTC, r3, setTransition, setViewKey, starts,
   MOVE_PRESETS, movePreset, TRANSITIONS, timedDur, uid, updateAudio, updateClip, updateOverlay, viewAt, volAt,
 } from "../edit";
 import { CAPTION_PRESETS, STICKERS, TEXT_KINDS, textLook } from "../graphics";
@@ -94,6 +94,11 @@ function TransformSec({ t, onChange }: { t: Transform; onChange: (p: Partial<Tra
       <Num label="크기" value={t.scale * 100} min={5} max={400} step={1} def={100} unit="%" onChange={(v) => onChange({ scale: v / 100 })} />
       <Num label="회전" value={t.rotation} min={-180} max={180} step={0.5} def={0} unit="°" onChange={(v) => onChange({ rotation: v })} />
       <Num label="불투명도" value={t.opacity * 100} min={0} max={100} step={1} def={100} unit="%" onChange={(v) => onChange({ opacity: v / 100 })} />
+      <div class="row chips" role="group" aria-label="뒤집기와 돌리기">
+        <button class={`chip ${t.flip_h ? "on" : ""}`} aria-pressed={!!t.flip_h} onClick={() => onChange({ flip_h: !t.flip_h })} title="좌우 뒤집기 · Flip Horizontal">좌우 뒤집기</button>
+        <button class={`chip ${t.flip_v ? "on" : ""}`} aria-pressed={!!t.flip_v} onClick={() => onChange({ flip_v: !t.flip_v })} title="위아래 뒤집기 · Flip Vertical">위아래 뒤집기</button>
+        <button class="chip" onClick={() => onChange({ rotation: ((t.rotation + 90 + 180) % 360) - 180 })} title="시계 방향으로 90° 돌리기 · Rotate 90°">90° 돌리기</button>
+      </div>
       <div class="crop-grid">
         <Num label="자르기 왼쪽" value={t.crop_l * 100} min={0} max={45} step={0.5} def={0} unit="%" onChange={(v) => onChange({ crop_l: v / 100 })} />
         <Num label="자르기 오른쪽" value={t.crop_r * 100} min={0} max={45} step={0.5} def={0} unit="%" onChange={(v) => onChange({ crop_r: v / 100 })} />
@@ -407,10 +412,23 @@ function DraftView({ d }: { d: Draft }) {
     <div class="inspector">
       <Section id="draft" title="편집본" term="Sequence Settings">
         <label>화면 비율
-          <select value={d.aspect} onChange={(e) => editDraft("화면 비율", (x) => ({ ...x, aspect: (e.target as HTMLSelectElement).value }), st.draftId, false)}>
+          <select value={ASPECTS.includes(d.aspect) ? d.aspect : "custom"} onChange={(e) => { const v = (e.target as HTMLSelectElement).value; editDraft("화면 비율", (x) => ({ ...x, aspect: v === "custom" ? "3:2" : v }), st.draftId, false); }}>
             {ASPECTS.map((x) => <option value={x}>{x}{x === "9:16" ? " (쇼츠·릴스)" : x === "16:9" ? " (유튜브)" : x === "4:5" ? " (인스타 피드)" : ""}</option>)}
+            <option value="custom">{ASPECTS.includes(d.aspect) ? "직접 입력…" : `${d.aspect} (직접 입력)`}</option>
           </select>
         </label>
+        {!ASPECTS.includes(d.aspect) && (
+          <label title="가로:세로. 3:1부터 1:3까지">직접 입력
+            <input key={d.aspect} defaultValue={d.aspect} aria-label="화면 비율 직접 입력 (가로:세로)" placeholder="3:2"
+              onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+              onBlur={(e) => {
+                const el = e.target as HTMLInputElement, v = el.value.trim();
+                if (v === d.aspect) return;
+                if (!parseAspect(v)) { el.value = d.aspect; return toast("가로:세로 숫자로 적어 주세요 (예: 3:2). 3:1부터 1:3까지 됩니다"); }
+                editDraft("화면 비율", (x) => ({ ...x, aspect: v }), st.draftId, false);
+              }} />
+          </label>
+        )}
         <label>프레임 레이트
           <select value={String(d.fps)} onChange={(e) => editDraft("프레임 레이트", (x) => ({ ...x, fps: Number((e.target as HTMLSelectElement).value) }), st.draftId, false)}>
             {[23.976, 24, 25, 29.97, 30, 50, 59.94, 60].map((x) => <option value={String(x)}>{x}fps</option>)}

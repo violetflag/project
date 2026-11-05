@@ -1,8 +1,9 @@
 // Every editor command in one list: the menu bar, the keyboard shortcuts and the shortcut list
 // (Ctrl+/) all come from here, so a command is never reachable one way and missing another.
-import { pickFiles } from "./api";
+import { api, pickFiles, pickSave } from "./api";
+import { draftCaptions } from "./captions";
 import {
-  clipAt, deleteClip, detachAudio, draftDuration, liftClip, nudgeClip, removeFillers, removeItem, removeSilences, setTransition, splitAt, splitItem, starts, uid, type Pacing,
+  clipAt, deleteClip, detachAudio, draftDuration, draftWords, is360, isGap, lensFor, trimClipTo, liftClip, nudgeClip, removeFillers, removeItem, removeSilences, setTransition, splitAt, splitItem, starts, uid, type Pacing,
 } from "./edit";
 import { asset, assetMap, canRedo, canUndo, draft, editDraft, importPaths, loadWave, redo, saveNow, set, st, toast, undo, waves, type Tool, type Workspace } from "./store";
 import type { Clip } from "./types";
@@ -47,6 +48,67 @@ function toggleSelected() {
   player.refresh();
 }
 
+/** Ripple trim at the playhead: Q the part before it goes (the playhead follows), W the part after. */
+function trimToPlayhead(side: "start" | "end") {
+  const d = draft();
+  const hit = d?.clips.length ? clipAt(d, st.playhead) : null;
+  if (!d || !hit || isGap(hit.clip)) return;
+  const next = trimClipTo(d, hit.clip.id, side, hit.src);
+  if (!next) return toast("재생 위치가 클립 끝에 너무 가까워 자를 수 없습니다");
+  editDraft(side === "start" ? "앞부분 잘라 당기기" : "뒷부분 잘라 당기기", () => next);
+  if (side === "start") player.seek(hit.at);
+}
+
+function jumpMarker(dir: 1 | -1) {
+  const ts = (draft()?.markers ?? []).map((m) => m.t).sort((a, b) => a - b);
+  const t = dir > 0 ? ts.find((x) => x > st.playhead + 1e-3) : [...ts].reverse().find((x) => x < st.playhead - 1e-3);
+  if (t == null) return toast(ts.length ? `${dir > 0 ? "다음" : "이전"} 마커가 없습니다` : "마커가 없습니다");
+  player.seek(t);
+}
+
+const stamp = (t: number) => {
+  const s = Math.floor(t), p = (n: number) => String(n).padStart(2, "0");
+  return s >= 3600 ? `${Math.floor(s / 3600)}:${p(Math.floor(s / 60) % 60)}:${p(s % 60)}` : `${p(Math.floor(s / 60))}:${p(s % 60)}`;
+};
+
+/** 파일 > 현재 화면을 사진으로 저장: the frame itself, at the export's stitching for 360. */
+async function saveStill() {
+  const d = draft();
+  const hit = !st.sourceId && d?.clips.length ? clipAt(d, st.playhead) : null;
+  const a = st.sourceId ? asset(st.sourceId) : hit && !isGap(hit.clip) ? asset(hit.clip.asset) : null;
+  if (!a) return toast("저장할 화면이 없습니다");
+  const src = st.sourceId ? player.srcT : hit!.src;
+  const dest = await pickSave(`${a.info.name.replace(/\.[^.]+$/, "")} ${stamp(src).replace(/:/g, "-")}.jpg`, "JPEG 사진", "jpg");
+  if (!dest) return;
+  try {
+    const [w, h] = (d?.aspect ?? "16:9").split(":").map(Number);
+    const r360 = is360(a);
+    const lens = r360 ? (hit ? lensFor(hit.clip, a) : { ...(a.lens ?? { swap: false, fov: 190 }), layout: a.info.layout360 }) : undefined;
+    const [b] = await api.frames(a.info.path, [src], 1920, r360 ? player.currentView() : undefined, lens, r360 ? (st.sourceId ? 16 / 9 : w / h || 16 / 9) : undefined);
+    if (!b) throw new Error("그림이 없습니다");
+    await api.saveBase64(dest, b);
+    toast("사진을 저장했습니다. 자막과 글자는 들어가지 않습니다");
+  } catch (e) { toast(`사진을 저장하지 못했습니다: ${String((e as Error)?.message ?? e)}`); }
+}
+
+/** 파일 > 대본 저장: the draft's spoken words, a line each with its time on the timeline. */
+async function saveTranscript() {
+  const d = draft();
+  if (!d) return;
+  const lines = draftCaptions(d, draftWords(d, assetMap())).lines.filter((l) => !l.hidden && l.text.trim());
+  if (!lines.length) return toast("대본이 없습니다. 먼저 받아쓰기를 하세요");
+  const dest = await pickSave(`${d.name} 대본.txt`, "텍스트", "txt");
+  if (!dest) return;
+  try {
+    await api.saveText(dest, lines.map((l) => `[${stamp(l.t0)}] ${l.text.replace(/\s*\n\s*/g, " ")}`).join("\r\n") + "\r\n");
+    toast(`대본 ${lines.length}줄을 저장했습니다`);
+  } catch (e) { toast(`대본을 저장하지 못했습니다: ${String((e as Error)?.message ?? e)}`); }
+}
+
+let silencePad: number | null = null;
+export const setSilencePad = (p: number | null) => { silencePad = p; };
+export const getSilencePad = () => silencePad;
+
 let pacing: Pacing = "normal";
 export const setPacing = (p: Pacing) => { pacing = p; };
 export const getPacing = () => pacing;
@@ -55,7 +117,7 @@ export async function doSilence() {
   const d = draft();
   if (!d) return;
   for (const c of d.clips) { const a = asset(c.asset); if (a && !a.words && a.info.has_audio && !waves.has(a.id)) await loadWave(a); }
-  const r = removeSilences(d, assetMap(), waves, pacing);
+  const r = removeSilences(d, assetMap(), waves, pacing, silencePad);
   if (!r.removed) return toast("잘라 낼 무음이 없습니다");
   editDraft("무음 정리", () => r.draft);
   toast(`무음 ${r.removed.toFixed(1)}초를 잘라 냈습니다`);
@@ -152,6 +214,8 @@ export const COMMANDS: Cmd[] = [
   { id: "pack", label: "프로젝트 묶어 내보내기…", menu: "파일", term: "Project Manager / Archive", enabled: inProject, run: packProject },
   { id: "backupNow", label: "백업 만들기", menu: "파일", enabled: inProject, run: backupNow },
   { id: "restoreBackup", label: "백업에서 되살리기…", menu: "파일", term: "Revert to Backup", enabled: inProject, run: () => set({ dialog: "backups" }) },
+  { id: "saveStill", label: "현재 화면을 사진으로 저장…", menu: "파일", keys: "Ctrl+Shift+E", sep: true, term: "Export Frame", enabled: inProject, run: saveStill },
+  { id: "saveTranscript", label: "대본 저장…", menu: "파일", term: "Export Transcript", enabled: hasClips, run: saveTranscript },
   { id: "export", label: "내보내기…", menu: "파일", keys: "Ctrl+E", sep: true, term: "Export / Render", enabled: hasClips, run: () => set({ dialog: "export" }) },
   { id: "home", label: "홈으로", menu: "파일", sep: true, global: true, run: () => { saveNow(); set({ route: "home" }); } },
 
@@ -175,6 +239,9 @@ export const COMMANDS: Cmd[] = [
   { id: "right", label: "클립을 오른쪽으로", menu: "클립", keys: "Alt+ArrowRight", enabled: () => draftMode() && !!st.selClip, run: () => editDraft("클립 옮기기", (d) => nudgeClip(d, st.selClip!, 1)) },
   { id: "marker", label: "마커 달기", menu: "클립", keys: "M", sep: true, enabled: draftMode,
     run: () => editDraft("마커", (d) => ({ ...d, markers: [...d.markers, { id: uid(), t: st.playhead, label: `마커 ${d.markers.length + 1}`, color: "#FFB020" }] }), st.draftId, false) },
+
+  { id: "trimStart", label: "재생 위치 앞부분 잘라 당기기", menu: "클립", keys: "Q", term: "Ripple Trim Previous Edit to Playhead", enabled: draftMode, run: () => trimToPlayhead("start") },
+  { id: "trimEnd", label: "재생 위치 뒷부분 잘라 당기기", menu: "클립", keys: "W", term: "Ripple Trim Next Edit to Playhead", enabled: draftMode, run: () => trimToPlayhead("end") },
 
   // 타임라인
   { id: "toolSelect", label: "선택 도구", menu: "타임라인", keys: "V", term: "Selection Tool", checked: () => st.tool === "select", enabled: inProject, run: () => setTool("select") },
@@ -210,6 +277,8 @@ export const COMMANDS: Cmd[] = [
   { id: "toEnd", label: "끝으로", menu: "재생", keys: "End", enabled: hasDraft, run: () => { const d = draft(); if (d) player.seek(draftDuration(d)); } },
 
   // 보기
+  { id: "nextMarker", label: "다음 마커로", menu: "재생", keys: "Shift+M", term: "Go to Next Marker", enabled: draftMode, run: () => jumpMarker(1) },
+  { id: "prevMarker", label: "이전 마커로", menu: "재생", keys: "Ctrl+Shift+M", term: "Go to Previous Marker", enabled: draftMode, run: () => jumpMarker(-1) },
   { id: "wsEdit", label: "편집 화면", menu: "보기", keys: "Alt+1", term: "Edit Workspace", checked: () => st.workspace === "edit", enabled: inProject, run: () => ws("edit") },
   { id: "wsTranscript", label: "대본 화면", menu: "보기", keys: "Alt+2", checked: () => st.workspace === "transcript", enabled: inProject, run: () => ws("transcript") },
   { id: "ws360", label: "360 화면", menu: "보기", keys: "Alt+3", checked: () => st.workspace === "r360", enabled: inProject, run: () => ws("r360") },

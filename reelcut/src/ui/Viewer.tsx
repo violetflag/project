@@ -53,7 +53,7 @@ export const NO_PREVIEW = "이 파일은 미리보기를 할 수 없습니다. �
 
 /** CSS look of a transform and colour (an approximation of the export filters). */
 export function cssLook(t?: Transform | null, c?: ColorAdj | null): { transform: string; clipPath: string; filter: string; opacity: string } {
-  const tr = t ? `translate(${t.x * 100}%, ${t.y * 100}%) rotate(${t.rotation}deg) scale(${t.scale})` : "";
+  const tr = t ? `translate(${t.x * 100}%, ${t.y * 100}%) rotate(${t.rotation}deg) scale(${t.flip_h ? -t.scale : t.scale}, ${t.flip_v ? -t.scale : t.scale})` : "";
   const clip = t && (t.crop_l || t.crop_r || t.crop_t || t.crop_b) ? `inset(${t.crop_t * 100}% ${t.crop_r * 100}% ${t.crop_b * 100}% ${t.crop_l * 100}%)` : "";
   let f = "";
   if (c && !isDefaultColor(c)) {

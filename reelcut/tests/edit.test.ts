@@ -7,6 +7,8 @@ import {
 import { flatToEquirect } from "../src/gl360";
 import { pickCodec, SHRINK, shrinkSettings } from "../src/presets";
 import type { Asset, Clip, Draft } from "../src/types";
+import { DEFAULT_TRANSFORM as DT_, isDefaultTransform, outSize, parseAspect, silenceCuts, trimClipTo } from "../src/edit";
+const DEFAULT_TRANSFORM = DT_;
 
 const asset = (id: string, extra: Partial<Asset["info"]> = {}, words?: Asset["words"]): Asset => ({
   id, folder: "", words,
@@ -137,5 +139,43 @@ describe("360 view math (same as ffmpeg v360)", () => {
   });
   it("the right edge is half the field of view away", () => {
     expect(flatToEquirect(1, 0.5, v(0, 0, 90), 16 / 9)[0]).toBeCloseTo(0.5 + 45 / 360);
+  });
+});
+
+describe("화면 비율과 잘라 당기기", () => {
+  it("makes any sensible canvas, the usual four as before", () => {
+    expect(outSize("16:9", 1080)).toEqual([1920, 1080]);
+    expect(outSize("9:16", 1080)).toEqual([1080, 1920]);
+    expect(outSize("1:1", 1080)).toEqual([1080, 1080]);
+    expect(outSize("4:5", 1080)).toEqual([1080, 1350]);
+    expect(outSize("3:2", 1080)).toEqual([1620, 1080]);
+    expect(outSize("2:3", 1080)).toEqual([1080, 1620]);
+    expect(outSize("21:9", 1080)).toEqual([2520, 1080]);
+    expect(outSize("엉터리", 1080)).toEqual([1920, 1080]);
+  });
+  it("refuses what is not a screen shape", () => {
+    expect(parseAspect("3:2")).toEqual([3, 2]);
+    expect(parseAspect(" 2.35:1 ")).toEqual([2.35, 1]);
+    for (const bad of ["", "3", "3:0", "0:3", "4:1", "1:4", "a:b", "-1:1"]) expect(parseAspect(bad)).toBeNull();
+  });
+  it("trims a clip at a source time, keeping a little", () => {
+    const d: any = { id: "d", name: "d", aspect: "16:9", clips: [{ id: "a", asset: "x", start: 10, end: 20, speed: 1, volume: 1 }] };
+    expect(trimClipTo(d, "a", "start", 12)!.clips[0]).toMatchObject({ start: 12, end: 20 });
+    expect(trimClipTo(d, "a", "end", 12)!.clips[0]).toMatchObject({ start: 10, end: 12 });
+    expect(trimClipTo(d, "a", "start", 19.95)).toBeNull();
+    expect(trimClipTo(d, "a", "end", 10.05)).toBeNull();
+    expect(trimClipTo(d, "없음", "end", 12)).toBeNull();
+  });
+  it("keeps the chosen time around speech when cutting silence", () => {
+    const c: any = { id: "a", asset: "x", start: 0, end: 10, speed: 1, volume: 1 };
+    const sp: [number, number][] = [[2, 3], [7, 8]];
+    expect(silenceCuts(c, sp, "normal", 0.5)).toEqual([[0, 1.5], [3.5, 6.5], [8.5, 10]]);
+    expect(silenceCuts(c, sp, "normal", 0)).toEqual([[0, 2], [3, 7], [8, 10]]);
+    expect(silenceCuts(c, sp, "normal")).toEqual(silenceCuts(c, sp, "normal", null));
+  });
+  it("counts a flip as a change", () => {
+    expect(isDefaultTransform({ ...DEFAULT_TRANSFORM })).toBe(true);
+    expect(isDefaultTransform({ ...DEFAULT_TRANSFORM, flip_h: true })).toBe(false);
+    expect(isDefaultTransform({ ...DEFAULT_TRANSFORM, flip_v: true })).toBe(false);
   });
 });

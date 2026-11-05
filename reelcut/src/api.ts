@@ -61,6 +61,8 @@ export const api = {
   projectPack: (id: string, dest: string, priv: boolean) => invoke<{ files: number; bytes: number }>("project_pack", { id, dest, private: priv }),
   projectUnpack: (path: string) => invoke<{ folder: string; file: string }>("project_unpack", { path }),
   projectUnpackDrop: (folder: string) => invoke<void>("project_unpack_drop", { folder }),
+  saveBase64: (dest: string, b64: string) => invoke<void>("save_base64", { dest, b64 }),
+  saveText: (dest: string, text: string) => invoke<void>("save_text", { dest, text }),
   diagBundle: (dest: string) => invoke<{ files: number; bytes: number }>("diag_bundle", { dest }),
   projectSave: (id: string, json: string, savedAt: string) => invoke<{ file?: string; folder?: string; error?: string }>("project_save", { id, json, savedAt }),
   projectOpen: (path: string, time: string) => invoke<{ project: any; folder: string; from: string; warnings: string[]; conflict: boolean; backup?: string | null; backupProject?: any }>("project_open", { path, time }),
@@ -155,7 +157,9 @@ export async function pickProject(): Promise<string | null> {
 
 /** Where to save a file of this kind. */
 export async function pickSave(name: string, label: string, ext: string): Promise<string | null> {
-  if (!inTauri) return (window as any).__mockPickSave?.() ?? null;
+  // The tests answer for the dialog.
+  const mock = (window as any).__mockPickSave;
+  if (mock || !inTauri) return mock?.() ?? null;
   const d = await import("@tauri-apps/plugin-dialog");
   return await d.save({ defaultPath: name, filters: [{ name: label, extensions: [ext] }] });
 }

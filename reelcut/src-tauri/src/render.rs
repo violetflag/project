@@ -26,11 +26,13 @@ pub struct Transform {
     pub crop_t: f64,
     pub crop_b: f64,
     pub opacity: f64,
+    pub flip_h: bool,
+    pub flip_v: bool,
 }
 
 impl Default for Transform {
     fn default() -> Self {
-        Transform { x: 0.0, y: 0.0, scale: 1.0, rotation: 0.0, crop_l: 0.0, crop_r: 0.0, crop_t: 0.0, crop_b: 0.0, opacity: 1.0 }
+        Transform { x: 0.0, y: 0.0, scale: 1.0, rotation: 0.0, crop_l: 0.0, crop_r: 0.0, crop_t: 0.0, crop_b: 0.0, opacity: 1.0, flip_h: false, flip_v: false }
     }
 }
 
@@ -48,7 +50,7 @@ impl Transform {
         self.opacity.clamp(0.0, 1.0)
     }
     fn identity(&self) -> bool {
-        self.x.abs() < 1e-4 && self.y.abs() < 1e-4 && (self.scale - 1.0).abs() < 1e-4 && !self.rotated() && !self.cropped() && self.opacity() > 0.999
+        self.x.abs() < 1e-4 && self.y.abs() < 1e-4 && (self.scale - 1.0).abs() < 1e-4 && !self.rotated() && !self.flip_h && !self.flip_v && !self.cropped() && self.opacity() > 0.999
     }
 }
 
@@ -579,6 +581,12 @@ fn alpha_filters(t: &Transform, rotate: bool, alpha: bool) -> Vec<String> {
     let rot = rotate && t.rotated();
     let op = t.opacity();
     let mut f = Vec::new();
+    if rotate && t.flip_h {
+        f.push("hflip".to_string());
+    }
+    if rotate && t.flip_v {
+        f.push("vflip".to_string());
+    }
     if alpha || rot || op < 0.999 {
         f.push("format=yuva420p".to_string());
     }
@@ -1116,6 +1124,18 @@ pub fn build(p: &Plan, hw: &Hw, graph_file: &str, new_syntax: bool, has_ass: boo
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_flip_is_a_filter_on_flat_pictures_only() {
+        let t = Transform { flip_h: true, flip_v: true, ..Default::default() };
+        assert!(!t.identity());
+        assert_eq!(alpha_filters(&t, true, false), vec!["hflip", "vflip"]);
+        assert!(alpha_filters(&t, false, false).is_empty());
+        assert!(Transform::default().identity());
+        // Projects saved before flips keep working.
+        let old: Transform = serde_json::from_str(r#"{"x":0,"y":0,"scale":1,"rotation":0}"#).unwrap();
+        assert!(!old.flip_h && old.identity());
+    }
+
     /// The hard-seam lens of 2.1 and before (stitching turned off).
     fn off() -> Option<stitch::Stitch> {
         Some(stitch::Stitch { on: false, ..Default::default() })
@@ -1247,7 +1267,7 @@ mod tests {
     fn transform_crops_scales_rotates_and_places() {
         let ident = Seg { transform: Some(Transform::default()), ..seg("a.mp4", 0.0, 2.0) };
         assert_eq!(graph(&plan(vec![ident])).graph, graph(&plan(vec![seg("a.mp4", 0.0, 2.0)])).graph);
-        let t = Transform { x: 0.25, y: -0.1, scale: 0.5, rotation: 30.0, crop_l: 0.1, crop_r: 0.1, crop_t: 0.0, crop_b: 0.2, opacity: 1.0 };
+        let t = Transform { x: 0.25, y: -0.1, scale: 0.5, rotation: 30.0, crop_l: 0.1, crop_r: 0.1, crop_t: 0.0, crop_b: 0.2, opacity: 1.0, flip_h: false, flip_v: false };
         let b = graph(&plan(vec![Seg { transform: Some(t), ..seg("a.mp4", 0.0, 2.0) }]));
         let want = "[0:v:0]crop=iw*0.8000:ih*0.8000:iw*0.1000:ih*0.0000,scale=960:540:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=bicubic,setsar=1,format=yuva420p,rotate=a=0.523599:ow=ceil(rotw(0.523599)/2)*2:oh=ceil(roth(0.523599)/2)*2:c=black@0,setpts=(PTS-STARTPTS)/1.00000[t0];color=c=black:s=1920x1080:r=30.000:d=2.000[cv0];[cv0][t0]overlay=x=(W-w)/2+480.00:y=(H-h)/2-108.00,fps=30.00000,format=yuv420p,trim=duration=2.0000[v0];";
         assert!(b.graph.starts_with(want), "{}", b.graph);

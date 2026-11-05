@@ -5,7 +5,7 @@ import { Captions, Eye, EyeOff, Headphones, Lock, LockOpen, Volume2, VolumeX } f
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { fileSrc } from "../api";
 import { draftCaptions } from "../captions";
-import { doFillers, doSilence, getPacing, setPacing } from "../commands";
+import { doFillers, doSilence, getPacing, getSilencePad, setPacing, setSilencePad } from "../commands";
 import {
   audioTrack, clipDur, deleteClip, detachAudio, draftDuration, draftWords, fmtTCF, insertClips, is360, isGap, liftClip, moveClip, newClip, newOverlay, overlays, PACING,
   r3, rollEdit, setTransition, silenceCuts, slipClip, speechFromWave, speechFromWords, splitAt, splitItem, starts, timedDur, trackState, uid, updateAudio, updateClip, updateOverlay, xinOf, type Pacing,
@@ -52,6 +52,7 @@ export function Timeline() {
   const d = draft();
   const [zoom, setZoom] = useState(40); // px per second
   const [pacing, setPac] = useState<Pacing>(getPacing());
+  const [silPad, setSilPad] = useState<number | null>(getSilencePad());
   const [menu, setMenu] = useState<{ id: string; x: number; y: number; item?: boolean } | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const drag = useRef<Drag | null>(null);
@@ -98,10 +99,10 @@ export function Timeline() {
       if (!a || isGap(c) || a.info.kind === "image") return;
       const sp = a.words?.length ? speechFromWords(a.words, c.start, c.end) : waves.get(a.id) ? speechFromWave(waves.get(a.id)!, c.start, c.end) : null;
       if (!sp) return;
-      for (const [x, y] of silenceCuts(c, sp, pacing)) out.push([st0[i] + (x - c.start) / c.speed, st0[i] + (y - c.start) / c.speed]);
+      for (const [x, y] of silenceCuts(c, sp, pacing, silPad)) out.push([st0[i] + (x - c.start) / c.speed, st0[i] + (y - c.start) / c.speed]);
     });
     return out;
-  }, [d?.updated, s.showSilence, pacing, waves.size]);
+  }, [d?.updated, s.showSilence, pacing, silPad, waves.size]);
 
   if (!d) return <div class="timeline" />;
   const total = draftDuration(d);
@@ -425,6 +426,13 @@ export function Timeline() {
           <span class="muted">무음</span>
           <select value={pacing} onChange={(e) => { const p = (e.target as HTMLSelectElement).value as Pacing; setPac(p); setPacing(p); }} aria-label="무음 정리 세기">
             {(Object.keys(PACING) as Pacing[]).map((k) => <option value={k}>{PACING[k].label}</option>)}
+          </select>
+        </label>
+        <label class="inline" title="말 앞뒤로 남겨 둘 시간. 말끝이 잘리면 늘리세요">
+          <span class="muted">여백</span>
+          <select value={silPad == null ? "" : String(silPad)} aria-label="무음 정리 말 앞뒤 여백" onChange={(e) => { const v = (e.target as HTMLSelectElement).value; const p = v === "" ? null : Number(v); setSilPad(p); setSilencePad(p); }}>
+            <option value="">기본</option>
+            {[0, 0.05, 0.1, 0.2, 0.3, 0.5].map((x) => <option value={String(x)}>{x}초</option>)}
           </select>
         </label>
         <button class="small" disabled={!d.clips.length} onClick={doSilence} title="말 없는 구간 잘라 내기">무음 정리</button>

@@ -17,7 +17,7 @@ export const newGap = (dur: number): Clip => ({ id: uid(), asset: GAP, start: 0,
 
 export const DEFAULT_TRANSFORM: Transform = { x: 0, y: 0, scale: 1, rotation: 0, crop_l: 0, crop_r: 0, crop_t: 0, crop_b: 0, opacity: 1 };
 export const DEFAULT_COLOR: ColorAdj = { exposure: 0, contrast: 1, saturation: 1, temperature: 6500, lut: "" };
-export const isDefaultTransform = (t?: Transform | null) => !t || Object.keys(DEFAULT_TRANSFORM).every((k) => Math.abs((t as any)[k] - (DEFAULT_TRANSFORM as any)[k]) < 1e-6);
+export const isDefaultTransform = (t?: Transform | null) => !t || (!t.flip_h && !t.flip_v && Object.keys(DEFAULT_TRANSFORM).every((k) => Math.abs((t as any)[k] - (DEFAULT_TRANSFORM as any)[k]) < 1e-6));
 export const isDefaultColor = (c?: ColorAdj | null) => !c || (Math.abs(c.exposure) < 1e-6 && Math.abs(c.contrast - 1) < 1e-6 && Math.abs(c.saturation - 1) < 1e-6 && Math.abs(c.temperature - 6500) < 1 && !c.lut && !c.tint && !c.highlights && !c.shadows && !c.vibrance && !c.vignette);
 
 /** Ready-made looks: colour values applied over the clip's own. */
@@ -649,8 +649,10 @@ export function speechFromWave(wave: ArrayLike<number>, s0: number, s1: number):
 }
 
 /** Source ranges of silence to cut from a clip, given its speech spans. */
-export function silenceCuts(c: Clip, speech: [number, number][], p: Pacing): [number, number][] {
-  const { minGap, pad } = PACING[p];
+export function silenceCuts(c: Clip, speech: [number, number][], p: Pacing, padding?: number | null): [number, number][] {
+  const { minGap, pad: paced } = PACING[p];
+  // Seconds kept before and after speech; the pacing's own when not chosen.
+  const pad = padding ?? paced;
   if (!speech.length) return [];
   const sp = mergeRanges(speech, minGap);
   const cuts: [number, number][] = [];
@@ -729,7 +731,7 @@ export function refineWords(words: Word[], wave: ArrayLike<number>, duration: nu
   return out;
 }
 
-export function removeSilences(d: Draft, assets: Map<string, Asset>, waves: Map<string, ArrayLike<number>>, p: Pacing): { draft: Draft; removed: number } {
+export function removeSilences(d: Draft, assets: Map<string, Asset>, waves: Map<string, ArrayLike<number>>, p: Pacing, padding?: number | null): { draft: Draft; removed: number } {
   const cuts: Record<string, [number, number][]> = {};
   let removed = 0;
   for (const c of d.clips) {
@@ -737,7 +739,7 @@ export function removeSilences(d: Draft, assets: Map<string, Asset>, waves: Map<
     if (!a || a.info.kind === "image") continue;
     const speech = a.words?.length ? speechFromWords(a.words, c.start, c.end) : waves.get(a.id) ? speechFromWave(waves.get(a.id)!, c.start, c.end) : null;
     if (!speech) continue;
-    const cs = silenceCuts(c, speech, p);
+    const cs = silenceCuts(c, speech, p, padding);
     if (cs.length) { cuts[c.id] = cs; removed += cs.reduce((s, [x, y]) => s + (y - x) / c.speed, 0); }
   }
   return { draft: cutSource(d, cuts), removed };
@@ -754,12 +756,24 @@ export function removeFillers(d: Draft, assets: Map<string, Asset>): { draft: Dr
 export const ASPECTS = ["16:9", "9:16", "1:1", "4:5"];
 export function outSize(aspect: string, short: number): [number, number] {
   const even = (x: number) => Math.round(x / 2) * 2;
-  switch (aspect) {
-    case "9:16": return [short, even((short * 16) / 9)];
-    case "1:1": return [short, short];
-    case "4:5": return [short, even((short * 5) / 4)];
-    default: return [even((short * 16) / 9), short];
-  }
+  const [w, h] = parseAspect(aspect) ?? [16, 9];
+  return w >= h ? [even((short * w) / h), short] : [short, even((short * h) / w)];
+}
+
+/** "W:H" as numbers, within what a screen can sensibly be (3:1 to 1:3); else null. */
+export function parseAspect(a: string): [number, number] | null {
+  const m = /^(\d{1,3}(?:\.\d+)?):(\d{1,3}(?:\.\d+)?)$/.exec(a.trim());
+  if (!m) return null;
+  const [w, h] = [Number(m[1]), Number(m[2])];
+  return w > 0 && h > 0 && w / h <= 3 && h / w <= 3 ? [w, h] : null;
+}
+
+/** Ripple trim at a source time: the part before (`start`) or after (`end`) goes; null if too little would stay. */
+export function trimClipTo(d: Draft, id: string, side: "start" | "end", src: number): Draft | null {
+  const c = d.clips.find((x) => x.id === id);
+  if (!c) return null;
+  if (side === "start" ? c.end - src < 0.1 : src - c.start < 0.1) return null;
+  return updateClip(d, id, side === "start" ? { start: r3(src) } : { end: r3(src) });
 }
 
 /** The still view sent with a segment: a single keyframe counts as the view (as in the preview). */

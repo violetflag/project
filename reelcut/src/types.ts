@@ -76,7 +76,7 @@ export type Asset = {
 };
 
 /** Picture placement. x/y: offset of the centre as a fraction of the frame; crops are fractions of the source. */
-export type Transform = { x: number; y: number; scale: number; rotation: number; crop_l: number; crop_r: number; crop_t: number; crop_b: number; opacity: number };
+export type Transform = { x: number; y: number; scale: number; rotation: number; crop_l: number; crop_r: number; crop_t: number; crop_b: number; opacity: number; flip_h?: boolean; flip_v?: boolean };
 /** Colour: exposure in stops, contrast/saturation as factors, temperature in Kelvin (6500 = none), LUT = .cube path. */
 export type ColorAdj = {
   exposure: number; contrast: number; saturation: number; temperature: number; lut: string;

@@ -1362,6 +1362,20 @@ fn save_srt(video: String, text: String) -> Result<String, String> {
     Ok(p.to_string_lossy().into_owned())
 }
 
+/// 현재 화면을 사진으로 저장: a picture `frames` gave.
+#[tauri::command]
+fn save_base64(dest: String, b64: String) -> Result<(), String> {
+    use base64::Engine;
+    let b = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| e.to_string())?;
+    std::fs::write(&dest, b).map_err(|e| format!("{dest}: {e}"))
+}
+
+/// 대본 저장: with a BOM, so Notepad and Excel read the Korean.
+#[tauri::command]
+fn save_text(dest: String, text: String) -> Result<(), String> {
+    std::fs::write(&dest, format!("\u{feff}{text}")).map_err(|e| format!("{dest}: {e}"))
+}
+
 #[tauri::command]
 fn cancel(app: St<'_>, tag: String) -> u64 {
     app.jobs.cancel(&tag)
@@ -1629,6 +1643,8 @@ pub fn run() {
             project::project_save,
             project::project_open,
             project::project_info,
+            save_base64,
+            save_text,
             project::project_root,
             project::project_pack,
             project::project_unpack,
