@@ -33,6 +33,16 @@ export type ExportChoice = {
 // Matches the "유튜브 FHD" purpose it starts on.
 export const DEFAULT_CHOICE: ExportChoice = { mode: "standard", quality: "fhd", preset: "balanced", codec: "auto", container: "mkv", dir: "", name: "", kbps: 0, abr: 256, fps: 0, loudnorm: true, duck: false, range: false, purpose: "yt-fhd" };
 
+/** The choices worth remembering between exports (not the name, folder or range of one export). */
+export function rememberedChoice(c: ExportChoice) {
+  return { loudnorm: c.loudnorm, duck: c.duck, quality: c.quality, preset: c.preset, mode: c.mode, codec: c.codec, container: c.container, srt: c.srt };
+}
+
+/** What an AI export of a given quality uses: the user's saved sound choices, else the dialog's defaults. */
+export function aiExportSound(saved: { loudnorm?: boolean; duck?: boolean } | undefined): { loudnorm: boolean; duck: boolean } {
+  return { loudnorm: saved?.loudnorm ?? !!DEFAULT_CHOICE.loudnorm, duck: saved?.duck ?? !!DEFAULT_CHOICE.duck };
+}
+
 /** Purpose presets: what most people pick from. */
 export const PURPOSES: { id: string; label: string; desc: string; aspect?: string; choice: Partial<ExportChoice> }[] = [
   { id: "yt-4k", label: "유튜브 4K", desc: "3840×2160 · H.264 32Mbps", aspect: "16:9", choice: { mode: "standard", quality: "4k", loudnorm: true } },
@@ -115,9 +125,9 @@ async function runNext() {
 }
 
 /** Called by the job listener when an export ends. */
-export function onExportEnd(state: string, name: string, path: string, message: string) {
+export function onExportEnd(state: string, name: string, path: string, message: string, warnings?: string[]) {
   const msg = state === "done" ? `내보내기 완료: ${name}` : state === "cancelled" ? `내보내기 취소: ${name}` : `내보내기 실패: ${name}`;
-  toast(msg);
+  toast(warnings?.length ? `${msg}. 주의: ${warnings.join(" / ")}` : msg);
   // A system notification too, for when Reelcut is behind other windows.
   try {
     if (typeof Notification !== "undefined" && document.hidden) {

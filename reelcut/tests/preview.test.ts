@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
 import { captionLines, draftCaptions, keyWordIndex, moveWordPrev, setHidden, setLineText, spokenIndex, toAss, toSrt, wordKey } from "../src/captions";
 import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSummary, findSkill, laterStepOf, looksForPeople, panoramaTimes, rangeFromText, mergeSkills, parseSkillCommand, runChainSteps, skillFromText, skillToText, upsertSkill } from "../src/skills";
-import { applyVerdicts, badSpans, capView, easePitch, frameGroup, frameSubject, percentOk, project, saneMarks, subjectLooks, thinMarks } from "../src/framing";
+import { applyVerdicts, badSpans, capView, easePitch, frameGroup, frameSubject, percentOk, pitchLimit, project, saneMarks, subjectLooks, thinMarks } from "../src/framing";
 import { PEOPLE_360_RULE, PLAYBOOK_360 } from "../src/playbook";
 import { TOOLS } from "../src/agent";
+import { aiExportSound, DEFAULT_CHOICE, rememberedChoice } from "../src/exporter";
+import { isEmptyProject, type Meta } from "../src/store";
 import { NOT_IN_SCRIPT, SDK, transpileScript } from "../src/script";
 import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
 import { CAPTION_PRESETS, STICKERS, stickerSvgPath, textEvent, textLook } from "../src/graphics";
@@ -473,7 +475,7 @@ describe("who is in frame", () => {
     expect(saneMarks([m(0, 950, 300), m(1, 10, 300)])).toHaveLength(2);
     const low = [{ name: "a", marks: [m(0, 480, 435), m(5, 480, 435)] }, { name: "b", marks: [m(0, 480, 435), m(5, 480, 435)] }];
     const { keys } = frameGroup(low, 0, 5, { aspect: 9 / 16, hfov: 40 });
-    expect(Math.min(...keys.map((k) => k.view.pitch))).toBeGreaterThanOrEqual(-25);
+    expect(Math.min(...keys.map((k) => k.view.pitch))).toBeGreaterThanOrEqual(-30);
     expect(thinMarks([m(0, 1, 2), m(0.2, 1, 2), m(0.5, 1, 2)]).map((x) => x.t)).toEqual([0, 0.5]);
     // Asked-for wide angles are held back by frame shape, unless the user asked for them.
     const pair = [{ name: "a", marks: [m(0, 480, 300), m(5, 480, 300)] }, { name: "b", marks: [m(0, 490, 300), m(5, 490, 300)] }];
@@ -551,12 +553,16 @@ describe("level views", () => {
   it("keeps children low in the frame instead of tilting after them", () => {
     const kids = [{ name: "a", marks: [m(0, 470, 350), m(5, 470, 350)] }, { name: "b", marks: [m(0, 490, 355), m(5, 490, 355)] }];
     const { keys, report } = frameGroup(kids, 0, 5, { aspect: 16 / 9 });
-    expect(Math.min(...keys.map((k) => k.view.pitch))).toBeGreaterThanOrEqual(-25);
+    expect(Math.min(...keys.map((k) => k.view.pitch))).toBeGreaterThanOrEqual(-30);
     expect(report.subjects.every((s) => s.inFrame === 100)).toBe(true);
   });
   it("caps a view unless the user asked for it", () => {
     const steep = { yaw: 10, pitch: -60, roll: 0, hfov: 130 };
-    expect(capView(steep, 16 / 9)).toEqual({ yaw: 10, pitch: -25, roll: 0, hfov: 100 });
+    const capped = capView(steep, 16 / 9);
+    expect(capped.hfov).toBe(100);
+    expect(capped.pitch).toBeCloseTo(-28.8, 1);
+    expect(pitchLimit(91, 16 / 9)).toBeCloseTo(24.8, 1);
+    expect(pitchLimit(56, 9 / 16)).toBe(30);
     expect(capView(steep, 9 / 16).hfov).toBe(70);
     expect(capView(steep, 16 / 9, true)).toEqual(steep);
     expect(capView({ yaw: 0, pitch: 5, roll: 0, hfov: 50 }, 16 / 9).hfov).toBe(50);
@@ -573,5 +579,27 @@ describe("level views", () => {
     expect(moved).toBeLessThan(-8);
     const v = project(0, -41.25, { yaw: 0, pitch: moved, roll: 0, hfov: 90 }, 16 / 9);
     expect(Math.abs(v!.v)).toBeLessThanOrEqual(0.95);
+  });
+});
+
+describe("nothing is lost by accident", () => {
+  const meta = (o: Partial<Meta>): Meta => ({ id: "x", name: "x", updated: 0, created: 0, assets: 0, drafts: 1, duration: 0, clips: 0, chats: 0, ...o });
+  it("does not call a project with a conversation empty", () => {
+    expect(isEmptyProject(meta({}))).toBe(true);
+    expect(isEmptyProject(meta({ chats: 1 }))).toBe(false);
+    expect(isEmptyProject(meta({ assets: 1 }))).toBe(false);
+    expect(isEmptyProject(meta({ clips: 2 }))).toBe(false);
+  });
+  it("gives AI exports the saved sound choices", () => {
+    expect(aiExportSound(undefined).loudnorm).toBe(true);
+    expect(aiExportSound({ loudnorm: false }).loudnorm).toBe(false);
+    const c = rememberedChoice({ ...DEFAULT_CHOICE, name: "a", loudnorm: false });
+    expect(c.loudnorm).toBe(false);
+    expect("name" in c).toBe(false);
+  });
+  it("has no AI tool that deletes a project or a conversation", () => {
+    const names = TOOLS.map((t) => t.name);
+    for (const bad of ["delete_project", "delete_chat", "remove_project", "store_delete"]) expect(names).not.toContain(bad);
+    expect(names.filter((n) => /delete|remove/.test(n)).every((n) => /draft|skill|text|silences|fillers/.test(n))).toBe(true);
   });
 });

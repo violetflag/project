@@ -264,13 +264,13 @@ export function AgentPanel() {
     try { await askWithSkills(t.trim()); } catch (e) { setErr(String((e as Error)?.message ?? e)); if (!loadPrompt(projectId, chatId)) setText(t); }
   };
   const open = (id: string) => { if (!s.agentBusy) mutate((x) => ({ ...x, activeChat: id })); };
+  /** Puts the conversation away; it stays in the project and 보관함 brings it back. */
   const remove = () => {
-    if (!c || !confirm(`대화 "${c.title}"를 지울까요? 되돌릴 수 없습니다.`)) return;
-    savePrompt(projectId, c.id, "");
-    const rest = (p.chats ?? []).filter((x) => x.id !== c.id);
-    if (!rest.length) rest.push(newSession());
-    mutate((x) => ({ ...x, chats: rest, activeChat: rest.slice().sort((a, b) => b.updated - a.updated)[0].id }));
-    set({ aiRuns: s.aiRuns.filter((r) => r.chat !== c.id) });
+    if (!c) return;
+    const rest = (p.chats ?? []).filter((x) => x.id !== c.id && !x.archived);
+    const fresh = rest.length ? null : newSession();
+    mutate((x) => ({ ...x, chats: [...(x.chats ?? []).map((y) => (y.id === c.id ? { ...y, archived: true } : y)), ...(fresh ? [fresh] : [])], activeChat: fresh?.id ?? rest.slice().sort((m, n) => n.updated - m.updated)[0].id }));
+    toast("대화를 보관함으로 옮겼습니다");
   };
 
   // Shown items, with a divider where earlier turns were compacted.
@@ -307,11 +307,12 @@ export function AgentPanel() {
             }} onBlur={() => setRenaming(false)} />
         ) : (
           <select class="chat-pick" value={chatId} disabled={s.agentBusy} onChange={(e) => open((e.target as HTMLSelectElement).value)} aria-label="대화 기록" title="이 프로젝트의 대화 (최근 순)">
-            {all.map((x) => <option value={x.id}>{x.title} · {when(x.updated)}{x.messages.length ? "" : " (비어 있음)"}</option>)}
+            {all.filter((x) => !x.archived).map((x) => <option value={x.id}>{x.title} · {when(x.updated)}{x.messages.length ? "" : " (비어 있음)"}</option>)}
+            {all.some((x) => x.archived) && <optgroup label="보관함 (고르면 꺼냅니다)">{all.filter((x) => x.archived).map((x) => <option value={x.id}>{x.title} · {when(x.updated)}</option>)}</optgroup>}
           </select>
         )}
         <button class="icon-btn" disabled={!c || s.agentBusy} onClick={() => setRenaming(true)} aria-label="대화 이름 바꾸기" title="대화 이름 바꾸기"><Pencil size={14} /></button>
-        <button class="icon-btn" disabled={!c || s.agentBusy} onClick={remove} aria-label="대화 지우기" title="대화 지우기"><Trash2 size={14} /></button>
+        <button class="icon-btn" disabled={!c || s.agentBusy} onClick={remove} aria-label="대화 보관" title="대화 보관 (보관함에서 다시 꺼낼 수 있습니다)"><Trash2 size={14} /></button>
         <button class="small" disabled={s.agentBusy || !chat.length} onClick={() => { newChat(); toast("새 대화를 시작합니다. 이전 대화는 목록에 남아 있습니다"); }} title="새 대화 (이전 대화는 목록에 남음)"><Plus size={13} aria-hidden="true" /> 새 대화</button>
       </div>
       <div class="agent-sub">

@@ -2,7 +2,7 @@ import { FolderOpen, Pencil, Plus, Trash2 } from "lucide-preact";
 import { useEffect, useState } from "preact/hooks";
 import { api, fileSrc, pickFiles } from "../api";
 import { fmtTC } from "../edit";
-import { createProject, deleteProject, importPaths, loadProjects, openProject, renameProject, set, toast, useStore } from "../store";
+import { createProject, deleteProject, importPaths, isEmptyProject, loadProjects, openProject, renameProject, set, toast, useStore } from "../store";
 import { Modal } from "./Modal";
 
 const when = (ms: number) => {
@@ -54,7 +54,7 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
 export function Home() {
   const [trash, setTrash] = useState<{ file: string; at: number; name?: string; drafts?: number; assets?: number }[]>([]);
   const [showTrash, setShowTrash] = useState(false);
-  const loadTrash = () => api.storeTrashList().then(setTrash).catch(() => {});
+  const loadTrash = () => api.trashList().then(setTrash).catch(() => {});
   useEffect(() => { loadTrash(); }, []);
   const s = useStore();
   const [q, setQ] = useState("");
@@ -63,7 +63,7 @@ export function Home() {
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
   const list = s.projects.filter((p) => p.name.toLowerCase().includes(q.toLowerCase())).sort((a, b) =>
     sort === "name" ? a.name.localeCompare(b.name, "ko") : sort === "created" ? b.created - a.created : b.updated - a.updated);
-  const empty = s.projects.filter((p) => !p.assets && !p.clips && p.id !== s.project?.id);
+  const empty = s.projects.filter((p) => isEmptyProject(p) && p.id !== s.project?.id);
 
   return (
     <div class="home">
@@ -74,17 +74,18 @@ export function Home() {
           <option value="recent">최근 수정</option><option value="created">만든 날</option><option value="name">이름</option>
         </select>
         <span class="spacer" />
-        {empty.length > 0 && <button onClick={() => Promise.all(empty.map((p) => deleteProject(p.id))).then(loadTrash)} title="미디어도 편집도 없는 프로젝트를 지웁니다">빈 프로젝트 {empty.length}개 정리</button>}
+        {empty.length > 0 && <button onClick={() => Promise.all(empty.map((p) => deleteProject(p.id, "cleanup"))).then(loadTrash)} title="미디어도 편집도 대화도 없는 프로젝트를 휴지통으로 옮깁니다">빈 프로젝트 {empty.length}개 정리</button>}
         <button onClick={() => setShowTrash(true)} title="지운 프로젝트를 되살립니다"><Trash2 size={15} aria-hidden="true" /> 휴지통{trash.length ? ` ${trash.length}` : ""}</button>
         <button class="primary" onClick={() => set({ dialog: "newProject" })}><Plus size={15} aria-hidden="true" /> 새 프로젝트</button>
       </div>
+      {s.brokenProjects.length > 0 && <p class="muted">읽을 수 없는 프로젝트 {s.brokenProjects.length}개: {s.brokenProjects.join(", ")}. 파일은 그대로 있습니다.</p>}
       {showTrash && (
         <Modal title="휴지통" onClose={() => setShowTrash(false)}>
           {!trash.length && <p class="muted">지운 프로젝트가 없습니다.</p>}
           {trash.map((t) => (
             <div class="row trash-row" key={t.file}>
               <span class="grow"><b>{t.name ?? t.file}</b> <span class="muted">{when(t.at)}에 지움 · 미디어 {t.assets ?? 0} · 편집본 {t.drafts ?? 0}</span></span>
-              <button class="small" onClick={() => api.storeRestore(t.file).then(() => { loadProjects(); loadTrash(); toast("프로젝트를 되살렸습니다"); }).catch((e) => toast(String(e)))}>되살리기</button>
+              <button class="small" onClick={() => api.trashRestore(t.file).then(() => { loadProjects(); loadTrash(); toast("프로젝트를 되살렸습니다"); }).catch((e) => toast(String(e)))}>되살리기</button>
             </div>
           ))}
         </Modal>

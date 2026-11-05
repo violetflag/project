@@ -13,7 +13,7 @@ import {
   pasteAttrs,
   type Pacing, mergeScenes, searchScenes,
 } from "./edit";
-import { exportAndWait } from "./exporter";
+import { aiExportSound, exportAndWait } from "./exporter";
 import { CAPTION_PRESETS, TEXT_KINDS } from "./graphics";
 import { applyVerdicts, badSpans, capView, cleanKeys, easePitch, frameGroup, frameSubject, lookSummary, normView, percentOk, sampleKeys, saneMarks, snapRanges, subjectLooks, thinMarks, type Mark, type Subject, type SubjectLook } from "./framing";
 import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSkillName, cleanSummary, findSkill, isChain, laterStepOf, looksForPeople, mergeSkills, NOT_IN_BATCH, panoramaTimes, parseSkillCommand, rangeFromText, runChainSteps, skillCatalog, stepLabel, upsertSkill, type Step, type StepResult } from "./skills";
@@ -232,7 +232,7 @@ export const TOOLS = [
     input_schema: { type: "object", properties: { asset_id: str, times: { type: "array", items: num }, width: { ...num, description: "그림 가로 픽셀(기본 960)" } }, required: ["asset_id", "times"] },
   },
   {
-    name: "frame_subject", description: "사람(머리) 위치 표시를 따라가는 시점 키프레임을 만듭니다. 한 사람이면 marks에 equirect_sheet에서 읽은 [원본 초, x, y] 목록(빠르면 1초, 보통 2.5초 간격). 여러 사람을 함께 화면에 담으려면(쌍둥이 등) subjects에 사람마다 이름과 marks를 넣으세요. 화면이 모두의 가운데를 보고, 한도(16:9는 100°, 9:16은 70°) 안에서 모두 들어오도록 화각을 조금 넓힙니다. 시점은 수평 가까이(±25°)를 지킵니다. 0.1초 간격 키프레임으로 부드럽게 이어서 클립에 넣고, 가장 높은 머리가 화면 위에서 1/3 지점에 오게 합니다. 결과에 사람마다 화면 안에 있었던 비율과, 너무 멀리 떨어져 한 화면에 못 담은 구간을 알려 줍니다.",
+    name: "frame_subject", description: "사람(머리) 위치 표시를 따라가는 시점 키프레임을 만듭니다. 한 사람이면 marks에 equirect_sheet에서 읽은 [원본 초, x, y] 목록(빠르면 1초, 보통 2.5초 간격). 여러 사람을 함께 화면에 담으려면(쌍둥이 등) subjects에 사람마다 이름과 marks를 넣으세요. 화면이 모두의 가운데를 보고, 한도(16:9는 100°, 9:16은 70°) 안에서 모두 들어오도록 화각을 조금 넓힙니다. 시점은 수평선이 보이게(±30° 안) 둡니다. 0.1초 간격 키프레임으로 부드럽게 이어서 클립에 넣고, 가장 높은 머리가 화면 위에서 1/3 지점에 오게 합니다. 결과에 사람마다 화면 안에 있었던 비율과, 너무 멀리 떨어져 한 화면에 못 담은 구간을 알려 줍니다.",
     input_schema: {
       type: "object",
       properties: {
@@ -244,7 +244,7 @@ export const TOOLS = [
         },
         track: { type: "boolean", description: "표시를 시작점으로 얼굴·머리를 자동 추적해 0.2초 단위로 다듬습니다(기본 켬, 구간 3분 이하). 표시가 몇 개뿐이어도 따라갑니다." },
         allow_steep,
-        hfov: { ...num, description: "화각. 보통 비워 둡니다(16:9는 90, 9:16은 62. 최대 100, 70)" }, headroom: { ...num, description: "머리 위 여백 비율(기본 0.33)" },
+        hfov: { ...num, description: "화각. 보통 비워 둡니다(16:9는 91, 9:16은 56. 최대 100, 70)" }, headroom: { ...num, description: "머리 위 여백 비율(기본 0.33)" },
         step: { ...num, description: "키 간격 초(기본 0.1)" }, smooth: { ...num, description: "부드럽게 하는 정도 초(기본 0.4, 0이면 끔)" },
         from: num, to: num,
       },
@@ -1094,10 +1094,11 @@ async function run(name: string, inp: any): Promise<Out> {
       set({ agentStatus: "내보내는 중…" });
       const e = await exportAndWait(d, {
         mode: pr === "audio" ? "audio" : shrink ? "shrink" : "standard", quality: shrink ? "fhd" : pr, preset: shrink ? pr.slice(7) : "balanced",
-        codec: "auto", container: "mkv", dir: noFolder ? "" : given.dir, name: given.name, srt: !!inp.srt,
+        codec: "auto", container: "mkv", dir: noFolder ? "" : given.dir, name: given.name, srt: !!inp.srt, ...aiExportSound(st.settings.lastExport),
       });
       if (e.state !== "done") return `내보내기 실패: ${e.message}`;
-      return `${noFolder ? `폴더 ${noFolder}이 없어 내보내기 폴더에 저장했습니다. ` : ""}내보냈습니다: ${e.result.path} (${(e.result.size / 1048576).toFixed(1)}MB, ${r3(e.result.duration)}초)${inp.srt ? ` 자막 파일: ${String(e.result.path).replace(/\.[^.\/]+$/, ".srt")}` : ""}${e.message ? " 경고: " + e.message : ""}`;
+      const warned: string[] = e.result.warnings ?? [];
+      return `${warned.length ? `주의: ${warned.join(" / ")}\n` : ""}${noFolder ? `폴더 ${noFolder}이 없어 내보내기 폴더에 저장했습니다. ` : ""}내보냈습니다: ${e.result.path} (${(e.result.size / 1048576).toFixed(1)}MB, ${r3(e.result.duration)}초)${inp.srt ? ` 자막 파일: ${String(e.result.path).replace(/\.[^.\/]+$/, ".srt")}` : ""}${e.message ? " 경고: " + e.message : ""}`;
     }
   }
   throw new Error(`알 수 없는 도구: ${name}`);

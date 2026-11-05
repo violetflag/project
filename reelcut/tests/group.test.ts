@@ -19,7 +19,7 @@ describe("framing two people together (twins)", () => {
   });
 
   it("works across the ±180° seam (centre behind, not in front)", () => {
-    const { keys } = frameGroup([{ name: "A", marks: marks(0, 10, () => 165) }, { name: "B", marks: marks(0, 10, () => -165) }], 0, 10);
+    const { keys } = frameGroup([{ name: "A", marks: marks(0, 10, () => 165) }, { name: "B", marks: marks(0, 10, () => -165) }], 0, 10, { hfov: 90 });
     const v = keys[50].view;
     expect(Math.abs(wrap180(v.yaw - 180))).toBeLessThan(1);
     expect(v.hfov).toBeCloseTo(90, 0);

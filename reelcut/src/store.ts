@@ -6,7 +6,7 @@ export { promptName };
 import { draftDuration, newDraft, refineWords, rippleConnected, uid } from "./edit";
 import type { Asset, BadShot, ChatSession, Draft, JobEvent, Lens, Project, SavedPrompt, Settings, Skill, Word } from "./types";
 
-export type Meta = { id: string; name: string; updated: number; created: number; assets: number; drafts: number; duration: number; poster?: string; clips: number };
+export type Meta = { id: string; name: string; updated: number; created: number; assets: number; drafts: number; duration: number; poster?: string; clips: number; chats: number };
 export type ExportJob = { id: string; draft: string; pct: number; state: string; message: string; out: string; result?: any; left?: number; name?: string };
 /** Timeline tools: select (V), blade (C), roll (R), slip (Y). */
 export type Tool = "select" | "blade" | "roll" | "slip";
@@ -40,6 +40,7 @@ type S = {
   qwenSetup: { pct: number; state: string; message: string } | null;
   downloads: Record<string, { pct: number; state: string; message: string }>;
   exportJob: ExportJob | null;
+  brokenProjects: string[];
   toast: string;
   agentBusy: boolean;
   agentStatus: string;
@@ -73,7 +74,7 @@ type S = {
 
 export const st: S = {
   route: "home", projects: [], project: null, draftId: null, sourceId: null, folder: "", playhead: 0, selClip: null,
-  settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, ccConnect: null, qwenSetup: null, downloads: {}, exportJob: null, toast: "",
+  settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, ccConnect: null, qwenSetup: null, downloads: {}, exportJob: null, brokenProjects: [], toast: "",
   agentBusy: false, agentStatus: "", rightTab: "inspect", leftTab: "media",
   selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, dialog: "", showSafe: false, showSilence: false, motion: {}, scans: {}, motionRev: 0, prompts: [], skills: [],
 };
@@ -127,6 +128,7 @@ function metaOf(p: Project): Meta {
     id: p.id, name: p.name, updated: p.updated, created: p.created, assets: p.assets.length, drafts: p.drafts.length,
     duration: p.drafts[0] ? draftDuration(p.drafts[0]) : 0, poster: p.assets.find((a) => a.poster)?.poster,
     clips: p.drafts.reduce((n, d) => n + d.clips.length, 0),
+    chats: (p.chats ?? []).filter((c) => c.messages.length).length,
   };
 }
 
@@ -143,12 +145,13 @@ export async function saveSettings(p: Partial<Settings>) {
 
 export async function loadProjects() {
   const names = await api.storeList("project-");
-  const metas: Meta[] = [];
+  const metas: Meta[] = [], broken: string[] = [];
   for (const n of names) {
-    try { const raw = await api.storeGet(n); if (raw) metas.push(metaOf(JSON.parse(raw))); } catch { /* skip broken */ }
+    // One that cannot be read is listed, not silently hidden.
+    try { const raw = await api.storeGet(n); if (raw) metas.push(metaOf(JSON.parse(raw))); } catch { broken.push(n); }
   }
   metas.sort((a, b) => b.updated - a.updated);
-  set({ projects: metas });
+  set({ projects: metas, brokenProjects: broken });
 }
 
 export async function createProject(name: string, aspect = "16:9", fps = 30): Promise<Project> {
@@ -181,8 +184,12 @@ export async function openProject(id: string) {
   }
 }
 
-export async function deleteProject(id: string) {
-  await api.storeDelete("project-" + id);
+/** Empty means nothing would be lost: no media, no edits and no conversation. */
+export const isEmptyProject = (p: Meta) => !p.assets && !p.clips && !p.chats;
+
+/** Moves the project to the trash; Home can bring it back. */
+export async function deleteProject(id: string, by: "user" | "cleanup" = "user") {
+  await api.storeDelete("project-" + id, by, by === "cleanup" ? "빈 프로젝트 정리" : "홈에서 삭제");
   set({ projects: st.projects.filter((m) => m.id !== id) });
 }
 
@@ -498,7 +505,7 @@ export async function initJobs() {
       case "export":
         if (st.exportJob && st.exportJob.id === e.id) {
           set({ exportJob: { ...st.exportJob, pct: e.pct, state: e.state, message: e.message, result: e.result, left: e.state === "running" ? Number(e.message) : undefined } });
-          if (e.state !== "running") import("./exporter").then((m) => m.onExportEnd(e.state, st.exportJob?.name ?? "", e.result?.path ?? "", e.message));
+          if (e.state !== "running") import("./exporter").then((m) => m.onExportEnd(e.state, st.exportJob?.name ?? "", e.result?.path ?? "", e.message, e.result?.warnings));
         }
         break;
     }

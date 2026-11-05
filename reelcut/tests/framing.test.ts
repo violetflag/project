@@ -67,7 +67,7 @@ describe("smooth interpolation", () => {
 
 describe("frameSubject", () => {
   it("centres a person at the front with head near the top third", () => {
-    const keys = frameSubject([{ t: 0, x: 480, y: 240 }, { t: 5, x: 480, y: 240 }], 0, 5, { sigma: 0 });
+    const keys = frameSubject([{ t: 0, x: 480, y: 240 }, { t: 5, x: 480, y: 240 }], 0, 5, { sigma: 0, hfov: 90 });
     expect(keys.length).toBe(51);
     expect(keys[0].view.yaw).toBe(0);
     expect(keys[0].view.pitch).toBeLessThan(0); // camera looks below the head

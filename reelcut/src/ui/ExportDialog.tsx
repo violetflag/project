@@ -4,7 +4,7 @@ import { ChevronDown, ChevronRight, ListChecks, Save, Trash2 } from "lucide-prea
 import { useState } from "preact/hooks";
 import { api, pickFolder } from "../api";
 import { draftDuration, fmtTC, fmtTCF, outSize, uid } from "../edit";
-import { DEFAULT_CHOICE, enqueue, exportRange, exportSeconds, outPath, PURPOSES, startExport, type ExportChoice } from "../exporter";
+import { DEFAULT_CHOICE, rememberedChoice, enqueue, exportRange, exportSeconds, outPath, PURPOSES, startExport, type ExportChoice } from "../exporter";
 import { estimateBytes, pickCodec, QUALITIES, SHRINK } from "../presets";
 import { editDraft, saveSettings, set, st, toast, useStore } from "../store";
 import type { Draft } from "../types";
@@ -17,11 +17,11 @@ let lastChoice: ExportChoice = { ...DEFAULT_CHOICE };
 
 export function ExportDialog({ draft: d, onClose }: { draft: Draft; onClose: () => void }) {
   const s = useStore();
-  const [c, setC] = useState<ExportChoice>({ ...lastChoice, name: "", range: d.inPoint != null || d.outPoint != null ? lastChoice.range : false });
+  const [c, setC] = useState<ExportChoice>({ ...lastChoice, ...s.settings.lastExport as Partial<ExportChoice>, name: "", range: d.inPoint != null || d.outPoint != null ? lastChoice.range : false });
   const [adv, setAdv] = useState(false);
   const [multi, setMulti] = useState<string[]>([]);
   const [saveName, setSaveName] = useState<string | null>(null);
-  const up = (p: Partial<ExportChoice>) => { const n = { ...c, ...p }; setC(n); lastChoice = { ...n, name: "" }; };
+  const up = (p: Partial<ExportChoice>) => { const n = { ...c, ...p }; setC(n); lastChoice = { ...n, name: "" }; saveSettings({ lastExport: rememberedChoice(n) }); };
   const job = s.exportJob && s.exportJob.draft === d.id ? s.exportJob : null;
   const secs = exportSeconds(d, c);
   const q = QUALITIES.find((x) => x.id === c.quality)!;

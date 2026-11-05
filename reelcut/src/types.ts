@@ -256,6 +256,8 @@ export type ChatSession = {
   chatMode?: "account" | "api";
   /** Model of the last request (sets the context limit). */
   model?: string;
+  /** Put away by the user; kept, and listed under 보관함. */
+  archived?: boolean;
   /** Skills in force, in the order they were picked; a later one wins over an earlier one. */
   activeSkills?: string[];
   /** Those whose text the AI has already been given (given again after a compaction). */
@@ -299,6 +301,8 @@ export type Settings = {
   exportPresets?: SavedExport[];
   /** What the AI should always keep in mind (added to its instructions), e.g. "our children are twins". */
   aiNotes?: string;
+  /** The export dialog's last choices, which AI exports follow too. */
+  lastExport?: { loudnorm?: boolean; duck?: boolean; quality?: string; preset?: string; mode?: string; codec?: string; container?: string; srt?: boolean };
   /** Shortcut changes: command id → keys ("" = none). */
   keys?: Record<string, string>;
   /** Context limits in tokens (Haiku models / all others) and the compaction rule in percent. */

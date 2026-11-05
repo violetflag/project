@@ -127,18 +127,25 @@ export function smoothViewAt(keys: ViewKey[], t: number): View {
 export type Mark = { t: number; x: number; y: number; hfov?: number };
 
 /** How far a followed view tilts up or down, degrees. Further than this people look seen from a ceiling. */
-export const LEVEL_PITCH = 25;
+export const LEVEL_PITCH = 30;
 
 /** Fields of view that keep lines straight and bodies in proportion, by frame shape. hfov is the frame's width, so a tall frame needs far less. */
 export function viewLimits(aspect: number, free = false): { base: number; max: number } {
   if (free) return aspect < 1 ? { base: 75, max: 105 } : { base: 90, max: 130 };
-  return aspect < 1 ? { base: 62, max: 70 } : { base: 90, max: 100 };
+  return aspect < 1 ? { base: 56, max: 70 } : { base: 91, max: 100 };
+}
+
+/** The steepest tilt that keeps the horizon in the picture, at most LEVEL_PITCH. */
+export function pitchLimit(hfov: number, aspect: number): number {
+  const v = (2 * Math.atan(Math.tan((hfov * Math.PI) / 360) / aspect) * 180) / Math.PI;
+  return Math.max(0, Math.min(LEVEL_PITCH, v / 2 - 5));
 }
 
 /** A view kept near level and not too wide, unless the user asked otherwise. */
 export function capView(v: View, aspect: number, free = false): View {
   if (free) return v;
-  return { ...v, pitch: Math.max(-LEVEL_PITCH, Math.min(LEVEL_PITCH, v.pitch)), hfov: Math.min(v.hfov, viewLimits(aspect).max) };
+  const hfov = Math.min(v.hfov, viewLimits(aspect).max), lim = pitchLimit(hfov, aspect);
+  return { ...v, pitch: Math.max(-lim, Math.min(lim, v.pitch)), hfov };
 }
 
 export type FrameOpts = {
@@ -353,8 +360,7 @@ export function frameGroup(subjects: Subject[], from: number, to: number, o: Gro
     return lowest > 0.7 ? (top + low) / 2 : aim;
   });
   // The view stays near level; people lower down simply sit lower in the frame.
-  const limit = o.free ? 62 : LEVEL_PITCH;
-  const sp = gaussian(ts, pt, sg).map((p) => Math.max(-limit, Math.min(limit, p)));
+  const sp = gaussian(ts, pt, sg).map((p, i) => { const limit = o.free ? 62 : pitchLimit(fov[i], aspect); return Math.max(-limit, Math.min(limit, p)); });
   const keys = ts.map((tt, i) => ({ t: r3(tt), view: normView({ yaw: sy[i], pitch: sp[i], roll: 0, hfov: fov[i] }) }));
   // How well everyone was kept in view, and where they could not all fit.
   const counts = people.map(() => ({ inFrame: 0, counted: 0 }));
@@ -399,7 +405,7 @@ export function easePitch(keys: ViewKey[], target: number, people: { marks: Mark
   let shift = Math.max(-most, Math.min(most, target - keys[0].view.pitch));
   for (let i = 0; i < 4 && shift && !fits(shift); i++) shift = i === 3 ? 0 : shift / 2;
   if (!shift) return keys;
-  return keys.map((k) => ({ ...k, view: { ...k.view, pitch: r3(Math.max(-LEVEL_PITCH, Math.min(LEVEL_PITCH, k.view.pitch + shift))) } }));
+  return keys.map((k) => { const lim = pitchLimit(k.view.hfov, aspect); return { ...k, view: { ...k.view, pitch: r3(Math.max(-lim, Math.min(lim, k.view.pitch + shift))) } }; });
 }
 
 /** Head marks without those near the poles of the panorama or that jump faster than a person moves. */

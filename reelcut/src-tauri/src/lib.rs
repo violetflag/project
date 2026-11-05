@@ -38,11 +38,31 @@ mod store_tests {
         back_up(&d, "project-a", &p, start + 1000).unwrap();
         let versions = |d: &Path| std::fs::read_dir(d.join("backups/project-a")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("v-")).count();
         assert_eq!(versions(&d), 1);
-        for i in 1..30u128 {
+        for i in 1..70u128 {
             back_up(&d, "project-a", &p, start + i * BACKUP_EVERY_MS).unwrap();
         }
         assert_eq!(versions(&d), BACKUP_VERSIONS);
         assert!(d.join(format!("backups/project-a/daily-{}.json", &stamp(start)[..10])).is_file());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn deleted_projects_come_back() {
+        let d = temp("trash");
+        let p = d.join("project-c.json");
+        std::fs::write(&p, "{}").unwrap();
+        let to = move_to_trash(&d, "project-c", &p, 1234).unwrap();
+        assert!(!p.exists() && to.is_file());
+        assert_eq!(restore_from_trash(&d, "project-c--1234.json").unwrap(), "project-c");
+        assert!(p.is_file());
+        // Never over a project that is there, and only files from the trash.
+        std::fs::write(d.join("_trash/project-c--5.json"), "{}").unwrap();
+        assert!(restore_from_trash(&d, "project-c--5.json").is_err());
+        assert!(restore_from_trash(&d, "../project-c--5.json").is_err());
+        let log = d.join("logs/deletions.jsonl");
+        append_line(&log, "{\"a\":1}");
+        append_line(&log, "{\"a\":2}");
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -233,21 +253,21 @@ fn write_atomic(p: &Path, value: &[u8]) -> Result<(), String> {
     std::fs::rename(&tmp, p).map_err(|e| e.to_string())
 }
 
-const BACKUP_VERSIONS: usize = 20;
+const BACKUP_VERSIONS: usize = 50;
 const BACKUP_DAYS: usize = 30;
-const BACKUP_EVERY_MS: u128 = 120_000;
+const BACKUP_EVERY_MS: u128 = 600_000;
 
 fn now_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
 }
 
-/// `v-<ms>.json` copies of a project before it is replaced, at most one every two minutes, plus
-/// the first copy of each day. The newest 20 and 30 stay.
-fn back_up(dir: &Path, name: &str, current: &Path, now: u128) -> Result<(), String> {
+/// `v-<ms>.json` copies of a project before it is replaced, at most one every ten minutes, plus
+/// the first copy of each day. The newest 50 and 30 stay.
+fn back_up(data: &Path, name: &str, current: &Path, now: u128) -> Result<(), String> {
     if !current.is_file() {
         return Ok(());
     }
-    let d = dir.join("backups").join(name);
+    let d = data.join("backups").join(name);
     std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
     let names: Vec<String> = std::fs::read_dir(&d).map_err(|e| e.to_string())?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     let mut versions: Vec<u128> = names.iter().filter_map(|n| n.strip_prefix("v-")?.strip_suffix(".json")?.parse().ok()).collect();
@@ -295,34 +315,55 @@ fn store_set(app: St<'_>, name: String, value: String) -> Result<(), String> {
     let p = dir.join(format!("{safe}.json"));
     if safe.starts_with("project-") {
         // A failed copy must not stop the save itself.
-        if let Err(e) = back_up(&dir, &safe, &p, now_ms()) {
+        if let Err(e) = back_up(&app.data_dir, &safe, &p, now_ms()) {
             app.log("backup", &format!("{safe}: {e}"));
         }
     }
     write_atomic(&p, value.as_bytes())
 }
 
-/// Never removes anything: the file moves to the trash folder, from which Home can bring it back.
+/// Never removes anything: the file moves to the trash folder, from which Home can bring it back,
+/// and `logs/deletions.jsonl` says what went where, by whom and why.
 #[tauri::command]
-fn store_delete(app: St<'_>, name: String) -> Result<(), String> {
+fn store_delete(app: St<'_>, name: String, by: Option<String>, reason: Option<String>) -> Result<(), String> {
     let dir = app.store_dir();
     let safe = safe_name(&name)?;
     let p = dir.join(format!("{safe}.json"));
     if p.exists() {
-        let trash = dir.join("trash");
-        std::fs::create_dir_all(&trash).map_err(|e| e.to_string())?;
-        let to = format!("{safe}--{}.json", now_ms());
-        std::fs::rename(&p, trash.join(&to)).map_err(|e| e.to_string())?;
-        app.log("delete", &format!("{safe} moved to trash as {to}"));
+        let doc: Value = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+        let bytes = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        let to = move_to_trash(&dir, &safe, &p, now_ms())?;
+        let line = json!({ "t": stamp(now_ms()), "id": safe, "name": doc["name"], "from": p.to_string_lossy(), "to": to.to_string_lossy(), "by": by.as_deref().unwrap_or("user"), "reason": reason.as_deref().unwrap_or(""), "bytes": bytes });
+        append_line(&app.data_dir.join("logs").join("deletions.jsonl"), &line.to_string());
+        app.log("delete", &line.to_string());
     }
     Ok(())
 }
 
+fn move_to_trash(store: &Path, safe: &str, p: &Path, now: u128) -> Result<PathBuf, String> {
+    let trash = store.join("_trash");
+    std::fs::create_dir_all(&trash).map_err(|e| e.to_string())?;
+    let to = trash.join(format!("{safe}--{now}.json"));
+    std::fs::rename(p, &to).map_err(|e| e.to_string())?;
+    Ok(to)
+}
+
+fn append_line(p: &Path, line: &str) {
+    use std::io::Write;
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        let _ = writeln!(f, "{line}");
+        let _ = f.sync_data();
+    }
+}
+
 /// What the trash holds: file, project name and when it was deleted (ms), newest first.
 #[tauri::command]
-fn store_trash_list(app: St<'_>) -> Vec<Value> {
+fn trash_list(app: St<'_>) -> Vec<Value> {
     let mut out: Vec<(u128, Value)> = Vec::new();
-    for e in std::fs::read_dir(app.store_dir().join("trash")).into_iter().flatten().flatten() {
+    for e in std::fs::read_dir(app.store_dir().join("_trash")).into_iter().flatten().flatten() {
         let file = e.file_name().to_string_lossy().into_owned();
         let Some((_, at)) = file.strip_suffix(".json").and_then(|s| s.rsplit_once("--")) else { continue };
         let at: u128 = at.parse().unwrap_or(0);
@@ -333,18 +374,23 @@ fn store_trash_list(app: St<'_>) -> Vec<Value> {
     out.into_iter().map(|x| x.1).collect()
 }
 
-#[tauri::command]
-fn store_restore(app: St<'_>, file: String) -> Result<(), String> {
+fn restore_from_trash(store: &Path, file: &str) -> Result<String, String> {
     let stem = file.strip_suffix(".json").ok_or("잘못된 파일")?;
     let (name, _) = stem.rsplit_once("--").ok_or("잘못된 파일")?;
     safe_name(stem)?;
     let safe = safe_name(name)?;
-    let dir = app.store_dir();
-    let to = dir.join(format!("{safe}.json"));
+    let to = store.join(format!("{safe}.json"));
     if to.exists() {
         return Err("같은 프로젝트가 이미 있습니다".into());
     }
-    std::fs::rename(dir.join("trash").join(&file), &to).map_err(|e| e.to_string())?;
+    std::fs::rename(store.join("_trash").join(file), &to).map_err(|e| e.to_string())?;
+    Ok(safe)
+}
+
+#[tauri::command]
+fn trash_restore(app: St<'_>, file: String) -> Result<(), String> {
+    let safe = restore_from_trash(&app.store_dir(), &file)?;
+    append_line(&app.data_dir.join("logs").join("deletions.jsonl"), &json!({ "t": stamp(now_ms()), "id": safe, "restored": file }).to_string());
     app.log("restore", &format!("{file} restored as {safe}"));
     Ok(())
 }
@@ -1062,14 +1108,18 @@ fn export(handle: tauri::AppHandle, app: St<'_>, id: String, plan: render::Plan)
     std::thread::spawn(move || {
         let mut built = built;
         let t0 = std::time::Instant::now();
+        let warnings: Mutex<Vec<String>> = Mutex::default();
         // 360 clips first go through Reelcut's 360 engine (seam per frame, stabilisation) into
         // flat pictures; the main render then treats them as ordinary clips.
         let (pre_w, pre_end) = if n360 > 0 { (60.0, 60.0) } else { (0.0, 0.0) };
         if n360 > 0 {
-            match engine_prepass(&app, &tag, gen, &plan, &work, |f| emit(&handle, &id, "export", f * pre_w, "running", "-1", json!({ "stage": "360" }))) {
+            match engine_prepass(&app, &tag, gen, &plan, &work, &warnings, |f| emit(&handle, &id, "export", f * pre_w, "running", "-1", json!({ "stage": "360" }))) {
                 Ok(Some(p2)) => match render::build(&p2, &hw, &graph_file.to_string_lossy(), app.ffmpeg_major() >= 7, has_ass, &part).and_then(|b| std::fs::write(&graph_file, &b.graph).map(|_| b).map_err(|e| e.to_string())) {
                     Ok(b) => built = b,
-                    Err(e) => app.log("export", &format!("{id} 360 engine render plan failed, using the ffmpeg stitch: {e}")),
+                    Err(e) => {
+                        app.log("export", &format!("{id} 360 engine render plan failed, using the ffmpeg stitch: {e}"));
+                        warnings.lock().push(format!("360 처리 계획을 만들지 못해 간단한 방식으로 내보냈습니다: {e}"));
+                    }
                 },
                 Ok(None) => {}
                 Err(e) if e == CANCELLED => {
@@ -1077,7 +1127,10 @@ fn export(handle: tauri::AppHandle, app: St<'_>, id: String, plan: render::Plan)
                     emit(&handle, &id, "export", 0.0, "cancelled", &e, Value::Null);
                     return;
                 }
-                Err(e) => app.log("export", &format!("{id} 360 engine failed, using the ffmpeg stitch: {e}")),
+                Err(e) => {
+                    app.log("export", &format!("{id} 360 engine failed, using the ffmpeg stitch: {e}"));
+                    warnings.lock().push(format!("360 엔진이 실패해 간단한 방식으로 내보냈습니다: {e}"));
+                }
             }
         }
         let dur = built.duration.max(0.1);
@@ -1102,7 +1155,7 @@ fn export(handle: tauri::AppHandle, app: St<'_>, id: String, plan: render::Plan)
                     None => "결과 파일을 다시 읽지 못했습니다".into(),
                     _ => String::new(),
                 };
-                emit(&handle, &id, "export", 100.0, "done", &warn, json!({ "path": out2, "size": size, "seconds": t0.elapsed().as_secs_f64(), "duration": dur }));
+                emit(&handle, &id, "export", 100.0, "done", &warn, json!({ "path": out2, "size": size, "seconds": t0.elapsed().as_secs_f64(), "duration": dur, "warnings": *warnings.lock() }));
             }
             Err(e) => {
                 app.log("export", &format!("{id} ended: {e}"));
@@ -1117,7 +1170,7 @@ fn export(handle: tauri::AppHandle, app: St<'_>, id: String, plan: render::Plan)
 
 /// Renders every 360 clip of the plan (main track and overlays) flat through the engine and
 /// returns the plan with those clips pointing at the results; None when nothing needed it.
-fn engine_prepass(app: &App, tag: &str, gen: u64, plan: &render::Plan, work: &Path, on: impl Fn(f64)) -> Result<Option<render::Plan>, String> {
+fn engine_prepass(app: &App, tag: &str, gen: u64, plan: &render::Plan, work: &Path, warnings: &Mutex<Vec<String>>, on: impl Fn(f64)) -> Result<Option<render::Plan>, String> {
     use media::View;
     struct Job {
         main: bool,
@@ -1156,6 +1209,11 @@ fn engine_prepass(app: &App, tag: &str, gen: u64, plan: &render::Plan, work: &Pa
         let share = j.dur.max(0.1) / total;
         // Analysis (only the first time for a recording) counts as a fifth of the clip's share.
         let m = motion::motion_for(&app.dir("motion"), &app.bins.ffmpeg, &app.bins.ffprobe, &app.jobs, tag, gen, &info, &j.lens, &file_key(&j.path), |f| on((done + f * share * 0.2) / 1.0))?;
+        if m.is_none() && motion::stab_of(&j.lens).mode != "off" {
+            let w = format!("흔들림 정보가 없어 {} 클립은 보정 없이 내보냈습니다", n + 1);
+            app.log("export", &w);
+            warnings.lock().push(w);
+        }
         let mut keys = j.keys.clone();
         keys.sort_by(|a, b| a.t.total_cmp(&b.t));
         let still = j.view.clone().unwrap_or(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0 });
@@ -1291,9 +1349,18 @@ fn cc_run(handle: tauri::AppHandle, app: St<'_>, model: String, effort: String, 
     let workdir = st.data_dir.join("agent");
     std::thread::spawn(move || {
         let h2 = handle.clone();
+        let mut seen = session.clone();
         let r = cc::run(&st.cc, cc::Turn { model, effort, system, prompt, session, workdir, data: st.data_dir.clone() }, |v| {
+            if let Some(id) = v["session_id"].as_str() {
+                seen = Some(id.to_string());
+            }
             let _ = h2.emit("cc", json!({ "kind": "line", "data": v }));
         });
+        if let Some(id) = seen {
+            if let Err(e) = cc::archive_session(&st.data_dir, &id) {
+                st.log("archive", &format!("{id}: {e}"));
+            }
+        }
         let (ok, err) = match r {
             Ok(x) => x,
             Err(e) => (false, e),
@@ -1388,8 +1455,8 @@ pub fn run() {
             store_get,
             store_set,
             store_delete,
-            store_trash_list,
-            store_restore,
+            trash_list,
+            trash_restore,
             log_event,
             store_list,
             expand_paths,

@@ -351,11 +351,42 @@ fn cmd(bin: &Path, data: &Path) -> Command {
 fn env(c: &mut Command, data: &Path) {
     if std::env::var_os("REELCUT_CLAUDE_KEEP_ENV").is_none() {
         let _ = std::fs::create_dir_all(config_dir(data));
+        keep_transcripts(&config_dir(data));
         c.env("CLAUDE_CONFIG_DIR", config_dir(data));
         for k in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "ANTHROPIC_BASE_URL"] {
             c.env_remove(k);
         }
     }
+}
+
+const KEEP_DAYS: u64 = 36500;
+
+/// Claude Code deletes old conversations unless told otherwise; these are the user's history.
+fn keep_transcripts(cfg: &Path) {
+    let p = cfg.join("settings.json");
+    let mut v: Value = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({}));
+    if v.get("cleanupPeriodDays").and_then(|d| d.as_u64()) == Some(KEEP_DAYS) || !v.is_object() {
+        return;
+    }
+    v["cleanupPeriodDays"] = json!(KEEP_DAYS);
+    let _ = std::fs::write(&p, v.to_string());
+}
+
+/// A copy of a finished conversation under `claude-archive`, outside Claude Code's own folder.
+pub fn archive_session(data: &Path, session: &str) -> Result<(), String> {
+    if session.is_empty() || !session.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("잘못된 대화 id".into());
+    }
+    let projects = config_dir(data).join("projects");
+    for d in std::fs::read_dir(&projects).map_err(|e| e.to_string())?.flatten() {
+        let f = d.path().join(format!("{session}.jsonl"));
+        if f.is_file() {
+            let to = data.join("claude-archive").join(d.file_name());
+            std::fs::create_dir_all(&to).map_err(|e| e.to_string())?;
+            std::fs::copy(&f, to.join(format!("{session}.jsonl"))).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn out(bin: &Path, data: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
@@ -513,6 +544,34 @@ pub fn run(bridge: &Bridge, t: Turn, mut on_line: impl FnMut(Value)) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_transcripts_and_other_settings() {
+        let d = std::env::temp_dir().join(format!("reelcut-cc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        keep_transcripts(&d);
+        let read = || -> Value { serde_json::from_str(&std::fs::read_to_string(d.join("settings.json")).unwrap()).unwrap() };
+        assert_eq!(read()["cleanupPeriodDays"], json!(KEEP_DAYS));
+        std::fs::write(d.join("settings.json"), r#"{"theme":"dark","cleanupPeriodDays":30}"#).unwrap();
+        keep_transcripts(&d);
+        assert_eq!(read()["cleanupPeriodDays"], json!(KEEP_DAYS));
+        assert_eq!(read()["theme"], json!("dark"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn archives_a_finished_conversation() {
+        let d = std::env::temp_dir().join(format!("reelcut-arc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let src = config_dir(&d).join("projects").join("p1");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("abc-1.jsonl"), "x").unwrap();
+        archive_session(&d, "abc-1").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("claude-archive/p1/abc-1.jsonl")).unwrap(), "x");
+        assert!(archive_session(&d, "../x").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     fn post(port: u16, path: &str, body: &str) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
