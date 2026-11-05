@@ -21,8 +21,10 @@ use std::path::Path;
 /// Stabilisation settings, stored on the asset's lens.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Stab {
-    /// off | horizon (level only, the camera's movement stays) | smooth (only take the shake out) |
-    /// eis (level and take the shake out) | lock (level, always look the same way)
+    /// off | horizon (level only, gently; the camera's movement stays) | tilt (level on every frame,
+    /// DJI's TiltRecovery) | smooth (only take the shake out) | eis (level and take the shake out) |
+    /// lock (level, always look the same way) | forward (level, looking the way the camera has been
+    /// heading, DJI's ForwardView)
     #[serde(default = "horizon")]
     pub mode: String,
     /// With the shake taken out: how slowly the picture follows the camera's turns, seconds.
@@ -923,6 +925,8 @@ fn level(down: [f64; 3], fwd: [f64; 3]) -> Option<M3> {
 /// How gently the horizon correction changes, seconds (sigma of the smoothing). Far slower than a
 /// hand or a step, so it cannot put any shake into the picture, whatever the attitude's timing.
 const LEVEL_SIGMA: f64 = 0.6;
+/// How slowly the forward view turns with the camera, seconds.
+const FORWARD_SIGMA: f64 = 2.0;
 
 /// The shortest turn that takes `a` to `b` (unit vectors).
 fn from_to(a: [f64; 3], b: [f64; 3]) -> M3 {
@@ -941,10 +945,11 @@ fn from_to(a: [f64; 3], b: [f64; 3]) -> M3 {
 /// dropped by a median, then smoothed the same way forward and backward, so it does not lag behind
 /// the picture. What the camera did in between stays as it was filmed, and turning does not change
 /// it: a tilted camera that spins keeps the same down in its own axes.
-fn level_turns(rot: &[M3], down: [f64; 3], fps: f64) -> Vec<M3> {
+fn level_turns(rot: &[M3], down: [f64; 3], fps: f64, sigma: f64) -> Vec<M3> {
     let n = rot.len();
     let raw: Vec<[f64; 3]> = rot.iter().map(|r| mv(&mt(r), down)).collect();
-    let m = ((fps * 0.1).round() as isize).max(1);
+    // Levelling every frame keeps its speed: only single odd samples go.
+    let m = if sigma <= 0.0 { 1 } else { ((fps * 0.1).round() as isize).max(1) };
     let med: Vec<[f64; 3]> = (0..n as isize)
         .map(|k| {
             let mut out = [0.0; 3];
@@ -956,7 +961,10 @@ fn level_turns(rot: &[M3], down: [f64; 3], fps: f64) -> Vec<M3> {
             out
         })
         .collect();
-    let sig = LEVEL_SIGMA * fps.max(1.0);
+    if sigma <= 0.0 {
+        return med.iter().map(|v| from_to([0.0, 1.0, 0.0], unit(*v))).collect();
+    }
+    let sig = sigma * fps.max(1.0);
     let rad = (sig * 3.0).ceil() as isize;
     let weights: Vec<f64> = (-rad..=rad).map(|d| (-(d * d) as f64 / (2.0 * sig * sig)).exp()).collect();
     (0..n as isize)
@@ -983,16 +991,43 @@ pub fn targets(m: &Motion, s: &Stab) -> Vec<M3> {
     let fps = m.fps.max(1.0);
     let sig = (s.strength.clamp(0.1, 10.0) * fps) / 2.0;
     let down = unit(m.down);
-    let then = |path: Vec<M3>| -> Vec<M3> {
-        let turns = level_turns(&path, down, fps);
+    let then = |path: Vec<M3>, sigma: f64| -> Vec<M3> {
+        let turns = level_turns(&path, down, fps, sigma);
         path.iter().zip(&turns).map(|(r, t)| mmul(r, t)).collect()
     };
     match s.mode.as_str() {
         // Level only: the camera's own movement is left alone.
-        "horizon" => then(rot),
+        "horizon" => then(rot, LEVEL_SIGMA),
+        // The tilt out on every frame; turning stays. Only as steady as the attitude is.
+        "tilt" => then(rot, 0.0),
         // The shake out of the attitude (DJI's EIS), with or without levelling (EisAndHorizontal).
         "smooth" => (0..rot.len()).map(|k| gauss_avg(&rot, k, sig)).collect(),
-        "eis" => then((0..rot.len()).map(|k| gauss_avg(&rot, k, sig)).collect()),
+        "eis" => then((0..rot.len()).map(|k| gauss_avg(&rot, k, sig)).collect(), LEVEL_SIGMA),
+        // Level, heading where the camera has been going over the last seconds: its forward, flattened
+        // and smoothed. (DJI also has the GPS when a remote gives one; this camera's files do not.)
+        "forward" => {
+            let n = rot.len();
+            let fwd: Vec<[f64; 3]> = rot.iter().map(|r| mv(r, [0.0, 0.0, 1.0])).collect();
+            let sg = FORWARD_SIGMA * fps;
+            let rad = (sg * 3.0).ceil() as isize;
+            let weights: Vec<f64> = (-rad..=rad).map(|d| (-(d * d) as f64 / (2.0 * sg * sg)).exp()).collect();
+            let mut last = level(down, fwd[0]).or_else(|| level(down, mv(&rot[0], [1.0, 0.0, 0.0]))).unwrap_or(I3);
+            (0..n as isize)
+                .map(|k| {
+                    let mut a = [0.0; 3];
+                    for (d, g) in (-rad..=rad).zip(&weights) {
+                        let v = fwd[(k + d).clamp(0, n as isize - 1) as usize];
+                        for i in 0..3 {
+                            a[i] += g * v[i];
+                        }
+                    }
+                    if let Some(l) = level(down, a) {
+                        last = l;
+                    }
+                    last
+                })
+                .collect()
+        }
         "lock" => {
             // Level, always looking the way the camera looked in the first second.
             let k = (fps as usize).clamp(1, rot.len());
@@ -1106,7 +1141,7 @@ pub fn motion_for(dir: &Path, ffmpeg: &Path, ffprobe: &Path, jobs: &Jobs, tag: &
 }
 
 /// Bump when the engine's picture changes, so kept clips are made again.
-pub const ENGINE_VERSION: u32 = 11;
+pub const ENGINE_VERSION: u32 = 12;
 
 /// How `render_flat` works: the lens size to decode at, the GPU, and the intermediate's quality.
 #[derive(Clone, Debug, Default)]
@@ -1458,6 +1493,83 @@ mod tests {
         let tg = targets(&m, &Stab::default());
         let got = mmul(&mt(&m.at(151)), &tg[151]);
         assert!(angle_between(&got, &clean[151]).to_degrees() < 0.2);
+    }
+
+    #[test]
+    fn tilt_recovery_levels_every_frame_and_keeps_the_turning() {
+        let m = shaky(30.0, 20.0);
+        let tg = targets(&m, &Stab { mode: "tilt".into(), ..Default::default() });
+        // Single odd samples go, which takes a little off the fastest shake (2.5° at most here).
+        let worst = tg[60..540].iter().map(|r| mv(r, [0.0, 1.0, 0.0])[1].clamp(-1.0, 1.0).acos().to_degrees()).fold(0.0, f64::max);
+        assert!(worst < 1.6, "{worst}");
+        // It still spins with the camera (25°/s is 500° in 20 s).
+        let turn: f64 = tg.windows(2).map(|w| angle_between(&w[0], &w[1]).to_degrees()).sum();
+        assert!(turn > 400.0, "{turn}");
+    }
+
+    #[test]
+    fn the_forward_view_is_level_and_follows_slowly() {
+        let m = shaky(30.0, 20.0);
+        let tg = targets(&m, &Stab { mode: "forward".into(), ..Default::default() });
+        for s in &tg {
+            assert!((mv(s, [0.0, 1.0, 0.0])[1] - 1.0).abs() < 1e-9);
+        }
+        let mid = &tg[120..480];
+        let fast = mid.windows(2).map(|w| angle_between(&w[0], &w[1]).to_degrees()).fold(0.0, f64::max);
+        // It spins with the camera at 0.83° a frame, without the shake's jumps.
+        assert!(fast < 1.1, "{fast}");
+        let total: f64 = mid.windows(2).map(|w| angle_between(&w[0], &w[1]).to_degrees()).sum();
+        assert!(total > 250.0, "{total}");
+    }
+
+    /// The seam with and without lining up, on a real recording (numbers only).
+    #[test]
+    fn real_seam() {
+        let Ok(path) = std::env::var("REELCUT_REAL_OSV") else { return };
+        let bin = |n: &str| std::path::PathBuf::from(std::env::var("FFDIR").unwrap_or_else(|_| "/usr/bin".into())).join(n);
+        let info = crate::media::inspect(&bin("ffprobe"), &path).unwrap();
+        let lens0 = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: None, stab: None };
+        let st = crate::stitch::calibrate(&bin("ffmpeg"), &bin("ffprobe"), &info, &lens0).unwrap();
+        let lens = Lens { stitch: Some(st.clone()), ..lens0 };
+        let s = crate::stitch::params(&lens);
+        let mut all = [0f64; 4];
+        let times = [77.0, 188.0, 333.0, 555.0, 777.0, 888.0, 1111.0, 1234.0];
+        for t in times {
+            let mut src = source_for(&info, &lens, t, 3.0, Some(1024), false);
+            src.gpu = true;
+            let mut sp = Stitcher::new(&s, src.n() as f64, 2048, 1024, true, None);
+            sp.stats = Some(vec![]);
+            let setup = |_k: usize, _t: f64| FrameSetup { rot: I3, hfov: None, omega: None };
+            let mut cb = |_k: usize, _f: &Frame<u8>| {};
+            pano::run::<u8>(&bin("ffmpeg"), &Jobs::default(), "t", 0, &src, &mut sp, &setup, Sink::Call(&mut cb), |_| {}).unwrap();
+            let rec = sp.stats.take().unwrap();
+            let n = rec.len().saturating_sub(10).max(1) as f64;
+            let mut m = [0f64; 4];
+            for r in rec.iter().skip(10) {
+                for i in 0..4 {
+                    m[i] += r[i] as f64 / n;
+                }
+            }
+            println!("SEAM t {t:>6}: plain {:.2} lined up {:.2}; flow moves {:.3} px/frame, cut {:.4}/frame ({} frames)", m[0], m[1], m[2], m[3], rec.len());
+            for i in 0..4 {
+                all[i] += m[i] / times.len() as f64;
+            }
+        }
+        println!("SEAM all: plain {:.2} lined up {:.2}; flow moves {:.3}, cut {:.4}", all[0], all[1], all[2], all[3]);
+        // What it costs an export.
+        for flow in [false, true] {
+            let mut src = source_for(&info, &lens, 295.0, 8.0, None, false);
+            src.gpu = true;
+            src.crop = true;
+            let mut sp = Stitcher::new(&s, src.n() as f64, 1920, 1080, flow, None);
+            let rot = matrix(ypr(90.0, -10.0, 0.0));
+            let setup = move |_k: usize, _t: f64| FrameSetup { rot, hfov: Some((91.0, 0.0)), omega: None };
+            let mut frames = 0;
+            let t0 = std::time::Instant::now();
+            let mut cb = |_k: usize, _f: &Frame<u8>| frames += 1;
+            pano::run::<u8>(&bin("ffmpeg"), &Jobs::default(), "t", 0, &src, &mut sp, &setup, Sink::Call(&mut cb), |_| {}).unwrap();
+            println!("SEAM speed lined up {flow}: {:.1} fps", frames as f64 / t0.elapsed().as_secs_f64());
+        }
     }
 
     #[test]

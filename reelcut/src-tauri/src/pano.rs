@@ -265,6 +265,9 @@ impl Geo {
 
 // ------------------------------------------------------------------ the seam strip
 
+/// Stretches round the seam, for working only on the part in view.
+const SEAM_GROUPS: usize = 64;
+
 /// Settings of the band: half-width of the cross-fade band (degrees), margin rows each side
 /// for the flow search (as a share of the band).
 const BAND_SHARE: f64 = 0.7;
@@ -434,13 +437,10 @@ fn measure_flow(lo: &Low, nrl: usize, mrl: usize) -> (Vec<f32>, Vec<f32>, Vec<f3
     let half = 8isize;
     let ry = mrl as isize;
     let rx = 2isize;
-    let mut fx = vec![0f32; nb];
-    let mut fy = vec![0f32; nb];
-    let mut wt = vec![0f32; nb];
     let w = lo.w as isize;
     let at = |img: &[f32], x: isize, y: usize| img[y * lo.w + x.rem_euclid(w) as usize];
     let okat = |x: isize, y: usize| lo.ok[y * lo.w + x.rem_euclid(w) as usize];
-    for k in 0..nb {
+    let one = |k: usize| -> (f32, f32, f32) {
         let cb = ((k as f32 + 0.5) * lo.w as f32 / nb as f32) as isize;
         // The lens-A patch, its mean and spread.
         let (mut sa, mut sa2, mut na) = (0f32, 0f32, 0f32);
@@ -455,7 +455,7 @@ fn measure_flow(lo: &Low, nrl: usize, mrl: usize) -> (Vec<f32>, Vec<f32>, Vec<f3
             }
         }
         if na < 16.0 {
-            continue;
+            return (0.0, 0.0, 0.0);
         }
         let ma = sa / na;
         let var = (sa2 / na - ma * ma).max(0.0);
@@ -502,7 +502,7 @@ fn measure_flow(lo: &Low, nrl: usize, mrl: usize) -> (Vec<f32>, Vec<f32>, Vec<f3
             }
         }
         if !best.0.is_finite() {
-            continue;
+            return (0.0, 0.0, 0.0);
         }
         let cost = |dx: isize, dy: isize| -> Option<f32> {
             if dx.abs() > rx || dy.abs() > ry {
@@ -523,8 +523,6 @@ fn measure_flow(lo: &Low, nrl: usize, mrl: usize) -> (Vec<f32>, Vec<f32>, Vec<f3
         let (c0, bx, by) = best;
         let sx = sub(cost(bx - 1, by), c0, cost(bx + 1, by));
         let sy = sub(cost(bx, by - 1), c0, cost(bx, by + 1));
-        fx[k] = bx as f32 + sx;
-        fy[k] = by as f32 + sy;
         // Trust textured blocks whose best match is not at the edge of the search.
         let mut wk = var / (var + 25.0);
         if by.abs() == ry || bx.abs() == rx {
@@ -536,9 +534,11 @@ fn measure_flow(lo: &Low, nrl: usize, mrl: usize) -> (Vec<f32>, Vec<f32>, Vec<f3
                 wk *= 0.5;
             }
         }
-        wt[k] = wk;
-    }
-    (fx, fy, wt)
+        (bx as f32 + sx, by as f32 + sy, wk)
+    };
+    use rayon::prelude::*;
+    let found: Vec<(f32, f32, f32)> = (0..nb).into_par_iter().map(one).collect();
+    (found.iter().map(|f| f.0).collect(), found.iter().map(|f| f.1).collect(), found.iter().map(|f| f.2).collect())
 }
 
 /// Seam line through the band (DJI's DP seam): per low column the core row where the warped
@@ -660,6 +660,9 @@ pub struct Stitcher {
     mesh: Vec<[f32; 6]>,
     gw: usize,
     gh: usize,
+    /// When measuring: per frame the lenses' difference on the seam without and with the alignment,
+    /// how far the flow moved (strip pixels), how far the cut moved (share of the band).
+    pub stats: Option<Vec<[f32; 4]>>,
 }
 
 impl Stitcher {
@@ -672,11 +675,39 @@ impl Stitcher {
         let nc = strip.nc;
         let step = if out_w * out_h > 600_000 { 8 } else { 4 };
         let blend = crate::stitch::blend_width(geo.fov).to_radians() as f32;
-        Stitcher { geo, strip, flow, blend, gains: [s.gain_a, s.gain_b], state: SeamState::new(nc), out_w, out_h, step, rs, mesh_key: None, mesh: vec![], gw: 0, gh: 0 }
+        Stitcher { geo, strip, flow, blend, gains: [s.gain_a, s.gain_b], state: SeamState::new(nc), out_w, out_h, step, rs, mesh_key: None, mesh: vec![], gw: 0, gh: 0, stats: None }
     }
 
-    /// The lenses' strips (luma and chroma, gains applied) from a side-by-side frame.
-    fn strips<T: Px>(&self, src: &Frame<T>) -> [[Vec<f32>; 3]; 2] {
+    /// Which of `SEAM_GROUPS` stretches round the seam this frame's mesh shows; None when it shows
+    /// none of them (no need to measure, or to read those parts of the lenses).
+    fn seam_in_view(&self) -> Option<[bool; SEAM_GROUPS]> {
+        let (nc, reach) = (self.strip.nc as f32, self.strip.b as f32 * 1.2);
+        let mut on = [false; SEAM_GROUPS];
+        let mut any = false;
+        for m in &self.mesh {
+            if m[5].abs() < reach {
+                let g = (((m[4] + 0.5) / nc * SEAM_GROUPS as f32) as isize).rem_euclid(SEAM_GROUPS as isize) as usize;
+                on[g] = true;
+                any = true;
+            }
+        }
+        if !any {
+            return None;
+        }
+        // The neighbours too: the search looks to the sides, the smoothing reaches over.
+        let mut out = [false; SEAM_GROUPS];
+        for (g, v) in on.iter().enumerate() {
+            if *v {
+                for d in 0..=4 {
+                    out[(g + SEAM_GROUPS - 2 + d) % SEAM_GROUPS] = true;
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// The lenses' strips (luma and chroma, gains applied) from a side-by-side frame, in the stretches `cols`.
+    fn strips<T: Px>(&self, src: &Frame<T>, cols: &[bool; SEAM_GROUPS]) -> [[Vec<f32>; 3]; 2] {
         let st = &self.strip;
         let n = self.geo.n as usize;
         let ga = [Gain::of::<T>(&self.gains[0]), Gain::of::<T>(&self.gains[1])];
@@ -693,8 +724,10 @@ impl Stitcher {
                 let w = if ci == 0 { st.nc } else { st.nc / 2 };
                 par_rows(&mut v, w, lut.len() / w, |r0, chunk| {
                     for (i, o) in chunk.iter_mut().enumerate() {
-                        let (x, y, _) = lut[r0 * w + i];
-                        *o = g.apply(pl, bil(plane, fw, lens * ln, ln, fh, x, y));
+                        if cols[(i % w) * SEAM_GROUPS / w] {
+                            let (x, y, _) = lut[r0 * w + i];
+                            *o = g.apply(pl, bil(plane, fw, lens * ln, ln, fh, x, y));
+                        }
                     }
                 });
                 out[lens][pl] = v;
@@ -703,8 +736,8 @@ impl Stitcher {
         out
     }
 
-    /// Measures the flow, seam line and colour match for this frame (updates `state`).
-    fn update_seam<T: Px>(&mut self, s: &[[Vec<f32>; 3]; 2]) {
+    /// Measures the flow, seam line and colour match for this frame (updates `state`), in the stretches `cols`.
+    fn update_seam<T: Px>(&mut self, s: &[[Vec<f32>; 3]; 2], cols: &[bool; SEAM_GROUPS]) {
         let st = &self.strip;
         let rows = st.rows();
         let q = ((st.nr as f32 / 24.0).round() as usize).max(2);
@@ -716,7 +749,7 @@ impl Stitcher {
         let mut ok = vec![true; lw * lh];
         for y in 0..lh {
             for x in 0..lw {
-                ok[y * lw + x] = (0..q).all(|yy| (0..q).all(|xx| ok_full[(y * q + yy) * st.nc + x * q + xx]));
+                ok[y * lw + x] = cols[x * SEAM_GROUPS / lw] && (0..q).all(|yy| (0..q).all(|xx| ok_full[(y * q + yy) * st.nc + x * q + xx]));
             }
         }
         let cq = q / 2;
@@ -796,6 +829,7 @@ impl Stitcher {
                 *o += (n - *o) * a;
             }
         };
+        let before = self.stats.is_some().then(|| (self.state.fx.clone(), self.state.fy.clone(), self.state.ts.clone()));
         let s = &mut self.state;
         mix(&mut s.fx, &full_fx, af);
         mix(&mut s.fy, &full_fy, af);
@@ -804,10 +838,30 @@ impl Stitcher {
         mix(&mut s.du, &du, ac);
         mix(&mut s.dv, &dv, ac);
         s.started = true;
+        if let (Some(rec), Some((ofx, ofy, ots))) = (self.stats.as_mut(), before) {
+            let n = ofx.len() as f32;
+            let moved = s.fx.iter().zip(&ofx).chain(s.fy.iter().zip(&ofy)).map(|(a, b)| (a - b).abs()).sum::<f32>() / n;
+            let cut = s.ts.iter().zip(&ots).map(|(a, b)| (a - b).abs()).sum::<f32>() / n;
+            let (mut plain, mut lined, mut cnt) = (0f32, 0f32, 0f32);
+            let mid = mrl + nrl / 2;
+            for c in 0..lw {
+                if !lo.ok[mid * lw + c] {
+                    continue;
+                }
+                plain += (lo.a[mid * lw + c] - lo.b[mid * lw + c]).abs();
+                let fc = (c * q + q / 2).min(st.nc - 1);
+                let t = s.ts[fc];
+                let y = mrl as f32 + t * nrl as f32 - 0.5;
+                let (fx, fy) = (s.fx[fc] / q as f32, s.fy[fc] / q as f32);
+                lined += (bil_strip(&lo.a, lw, lh, c as f32 - t * fx, y - t * fy) - bil_strip(&lo.b, lw, lh, c as f32 + (1.0 - t) * fx, y + (1.0 - t) * fy)).abs();
+                cnt += 1.0;
+            }
+            rec.push([plain / cnt.max(1.0), lined / cnt.max(1.0), moved, cut]);
+        }
     }
 
-    /// The cross-faded band (core rows only) for each plane.
-    fn blend_band<T: Px>(&self, s: &[[Vec<f32>; 3]; 2]) -> [Vec<f32>; 3] {
+    /// The cross-faded band (core rows only) for each plane, in the stretches `cols`.
+    fn blend_band<T: Px>(&self, s: &[[Vec<f32>; 3]; 2], cols: &[bool; SEAM_GROUPS]) -> [Vec<f32>; 3] {
         let st = &self.strip;
         let k = T::MAX / 255.0;
         let mut out: [Vec<f32>; 3] = Default::default();
@@ -822,6 +876,9 @@ impl Stitcher {
             par_rows(&mut v, w, nr, |r0, chunk| {
                 for (i, o) in chunk.iter_mut().enumerate() {
                     let (r, c) = (r0 + i / w, i % w);
+                    if !cols[c * SEAM_GROUPS / w] {
+                        continue;
+                    }
                     let lc = if ci == 0 { c } else { (2 * c).min(st.nc - 1) };
                     let t = (r as f32 + 0.5) / nr as f32;
                     let (fx, fy) = (state.fx[lc] * sc, state.fy[lc] * sc);
@@ -929,8 +986,8 @@ impl Stitcher {
         let n = self.geo.n as u32;
         // Lens pixels: what may move between the sampled frames, and more than the sampling reads.
         let pad = (self.geo.n * 0.02) as f32 + 16.0;
-        // A lens counts a little before its blend starts.
-        let reach = self.blend / 2.0 + 2f32.to_radians();
+        // A lens counts a little before its blend starts, or before the strip that lines the seam up.
+        let reach = if self.flow { self.strip.b as f32 * 2.2 + 2f32.to_radians() } else { self.blend / 2.0 + 2f32.to_radians() };
         let mut lo = [[f32::MAX; 2]; 2];
         let mut hi = [[f32::MIN; 2]; 2];
         let last = first + frames.max(1) - 1;
@@ -994,16 +1051,21 @@ impl Stitcher {
 
     /// One output frame from one side-by-side input frame.
     pub fn frame<T: Px>(&mut self, src: &Frame<T>, fs: &FrameSetup) -> Frame<T> {
-        // The band strip and its seam search are only for the precise seam.
-        let band: [Vec<f32>; 3] = if self.flow {
-            let strips = self.strips(src);
-            self.update_seam::<T>(&strips);
-            self.blend_band::<T>(&strips)
-        } else {
-            Default::default()
-        };
         self.build_mesh(fs);
-        let (flow, bw) = (self.flow, self.blend);
+        // The seam is lined up where this frame shows it. Out of sight it starts over when it comes back.
+        let seen = if self.flow { self.seam_in_view() } else { None };
+        let band: [Vec<f32>; 3] = match &seen {
+            Some(cols) => {
+                let strips = self.strips(src, cols);
+                self.update_seam::<T>(&strips, cols);
+                self.blend_band::<T>(&strips, cols)
+            }
+            None => {
+                self.state.started = false;
+                Default::default()
+            }
+        };
+        let (flow, bw) = (seen.is_some(), self.blend);
         let mut out = Frame::<T>::new(self.out_w, self.out_h);
         let st = &self.strip;
         let n = self.geo.n as usize;
@@ -1324,7 +1386,7 @@ pub fn run<T: Px>(
     let n = src.n() as usize;
     let (iw, ih) = (2 * n, n);
     // Only at the file's own size: shrinking and cropping as two passes loses the last frame.
-    let parts = if src.crop && src.gpu && src.layout == "dual" && src.n() == src.lens_px && src.every == 1 && src.dur > 0.0 && !st.flow && st.rs.is_none() {
+    let parts = if src.crop && src.gpu && src.layout == "dual" && src.n() == src.lens_px && src.every == 1 && src.dur > 0.0 && st.rs.is_none() {
         st.parts(setup, ((src.dur * src.fps).ceil() as usize + 1).max(1), src.fps)
     } else {
         vec![Part { first: 0, frames: None, rects: None }]
@@ -1769,7 +1831,7 @@ mod tests {
         let f = render_pair(&geo, 1.2);
         // How much the two warped lenses still disagree inside the band (a double picture).
         let mismatch = |st: &Stitcher| {
-            let strips = st.strips(&f);
+            let strips = st.strips(&f, &[true; SEAM_GROUPS]);
             let sp = &st.strip;
             let (w, rows) = (sp.nc, sp.rows());
             let (mut e, mut k) = (0.0f64, 0.0f64);

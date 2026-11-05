@@ -38,9 +38,9 @@ export function Stitch360({ a }: { a: Asset }) {
       )}
       {s.on && (
         <label>이음새
-          <select value={s.seam === "flow" ? "flow" : "linear"} onChange={(e) => setStitch(a, { ...s, seam: (e.target as HTMLSelectElement).value as "linear" | "flow" })}>
-            <option value="linear">미리보기와 같게 (기본)</option>
-            <option value="flow">정밀 (느림, 미리보기에는 안 보임)</option>
+          <select value={s.seam === "plain" ? "plain" : "flow"} onChange={(e) => setStitch(a, { ...s, seam: (e.target as HTMLSelectElement).value as "plain" | "flow" })}>
+            <option value="flow">프레임마다 맞추기 (기본)</option>
+            <option value="plain">단순 섞기 (조금 빠름)</option>
           </select>
         </label>
       )}

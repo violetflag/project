@@ -55,7 +55,9 @@ function projOf(a: Asset): Proj {
     const fov = Math.max(181, Math.min(260, s && s.fov >= 90 ? s.fov : a.lens?.fov ?? 190));
     const shape = (c?: any): LensShape => c ? { fu: c.fx / c.size, fv: c.fy / c.size, cu: (c.cx + 0.5) / c.size, cv: (c.cy + 0.5) / c.size, k: c.k } : plainLens(fov);
     const f = layout === "dual" ? (s?.factory as any[] | undefined) : undefined;
-    return { kind: "lenses", back: shape(f?.[0]), front: shape(f?.[1]), yaw: s?.yaw ?? 0, pitch: s?.pitch ?? 0, roll: s?.roll ?? 0, blend: blendWidth(fov) };
+    // The band lined up on each frame (src-tauri/src/pano.rs `Strip`); none for a plain blend.
+    const band = s?.seam === "plain" ? 0 : (Math.max(0.5, ((fov - 180) / 2) * 0.7) * Math.PI) / 180;
+    return { kind: "lenses", back: shape(f?.[0]), front: shape(f?.[1]), yaw: s?.yaw ?? 0, pitch: s?.pitch ?? 0, roll: s?.roll ?? 0, blend: blendWidth(fov), band, fov };
   }
   return p.proj === "dfisheye" ? { kind: "dfisheye", fov: p.fov, swap: p.swap } : { kind: "equirect" };
 }

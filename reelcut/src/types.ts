@@ -21,10 +21,10 @@ export type Stitch = {
   /** Line the lenses up again on every frame (DJI's AI seam, Reelcut's own matching). */
   flow?: boolean;
   /** "linear" = the live preview's blend (default); "flow" = slower alignment the preview cannot show. */
-  seam?: "linear" | "flow";
+  seam?: "plain" | "flow" | "linear" | "";
 };
 /** 360 stabilisation (see src-tauri/src/motion.rs). */
-export type Stab = { mode: "horizon" | "eis" | "lock" | "smooth" | "off"; strength: number; rs: boolean };
+export type Stab = { mode: "horizon" | "tilt" | "eis" | "lock" | "forward" | "smooth" | "off"; strength: number; rs: boolean };
 /** What the stabilisation analysis found (gyro in the file, or the picture). */
 export type MotionInfo = { source: string; note: string; readout: number; product: string };
 export type Lens = { layout: string; swap: boolean; fov: number; stitch?: Stitch | null; stab?: Stab | null };

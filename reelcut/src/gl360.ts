@@ -4,6 +4,7 @@
 // the right half and the back lens mirrored on the left), so the preview looks where the export does.
 import type { View } from "./types";
 import { maxFov } from "./framing";
+import { SEAM_NODES, SEAM_RANGE, SeamTrack, STRIP_H, STRIP_NR, STRIP_W } from "./seam360";
 
 type Q = [number, number, number, number]; // w x y z
 const qmul = (a: Q, b: Q): Q => [
@@ -74,16 +75,10 @@ export const plainLens = (fov: number): LensShape => {
 };
 /** How the picture on the texture is laid out. "lenses": the back lens on the left half, the front on the right, joined here. */
 export type Proj = { kind: "equirect" } | { kind: "dfisheye"; fov: number; swap: boolean }
-  | { kind: "lenses"; back: LensShape; front: LensShape; yaw: number; pitch: number; roll: number; blend: number };
+  | { kind: "lenses"; back: LensShape; front: LensShape; yaw: number; pitch: number; roll: number; blend: number; band: number; fov: number };
 
 const VS = `attribute vec2 p; varying vec2 uv; void main(){ uv = vec2(p.x*0.5+0.5, 0.5-p.y*0.5); gl_Position = vec4(p,0.0,1.0); }`;
-const FS = `precision highp float;
-varying vec2 uv; uniform sampler2D tex; uniform vec4 q; uniform vec2 rng;
-uniform float fish; uniform float frng; uniform float swp; uniform vec4 stab;
-uniform float dist; uniform float rE; uniform float asp; uniform vec2 vs;
-uniform float both; uniform vec4 backQ; uniform float bw;
-uniform vec4 shapeA; uniform vec4 kA; uniform float k5A; uniform vec4 shapeB; uniform vec4 kB; uniform float k5B;
-vec2 lensAt(vec3 v, vec4 s, vec4 k, float k5){
+const LENS_AT = `vec2 lensAt(vec3 v, vec4 s, vec4 k, float k5){
   float h = length(v.xy);
   float a = atan(h, v.z);
   float t2 = a*a;
@@ -96,6 +91,36 @@ vec4 qm(vec4 a, vec4 b){ return vec4(
   a.x*b.y + a.y*b.x + a.z*b.w - a.w*b.z,
   a.x*b.z - a.y*b.w + a.z*b.x + a.w*b.y,
   a.x*b.w + a.y*b.z - a.z*b.y + a.w*b.x); }
+vec3 toBack(vec3 v, vec4 q){ return qm(qm(vec4(q.x, -q.yzw), vec4(0.0, v)), q).yzw; }
+vec2 inA(vec2 a, vec2 vs){ return vec2(clamp(a.x, 0.001, 0.999)*0.5, min(a.y*vs.x, vs.y)); }
+vec2 inB(vec2 b, vec2 vs){ return vec2(0.5 + clamp(b.x, 0.001, 0.999)*0.5, min(b.y*vs.x, vs.y)); }
+`;
+/** The strip for lining up the seam: R = back lens's luma, G = front lens's, B = both see this place. */
+const STRIP_VS = `attribute vec2 p; varying vec2 st; void main(){ st = p*0.5+0.5; gl_Position = vec4(p,0.0,1.0); }`;
+const STRIP_FS = `precision highp float;
+varying vec2 st; uniform sampler2D tex; uniform vec2 vs; uniform vec4 backQ; uniform float reach; uniform float limit;
+uniform vec4 shapeA; uniform vec4 kA; uniform float k5A; uniform vec4 shapeB; uniform vec4 kB; uniform float k5B;
+${LENS_AT}
+void main(){
+  float u = -3.14159265 + st.x*6.2831853;
+  float s = (st.y*2.0 - 1.0)*reach;
+  vec3 v = vec3(cos(s)*cos(u), cos(s)*sin(u), sin(s));
+  vec3 vb = toBack(v, backQ);
+  vec3 l = vec3(0.299, 0.587, 0.114);
+  float ca = dot(texture2D(tex, inA(lensAt(vb, shapeA, kA, k5A), vs)).rgb, l);
+  float cb = dot(texture2D(tex, inB(lensAt(v, shapeB, kB, k5B), vs)).rgb, l);
+  float seen = (acos(clamp(vb.z, -1.0, 1.0)) < limit && acos(clamp(v.z, -1.0, 1.0)) < limit) ? 1.0 : 0.0;
+  gl_FragColor = vec4(ca, cb, seen, 1.0);
+}`;
+const FS = `precision highp float;
+varying vec2 uv; uniform sampler2D tex; uniform vec4 q; uniform vec2 rng;
+uniform float fish; uniform float frng; uniform float swp; uniform vec4 stab;
+uniform float dist; uniform float rE; uniform float asp; uniform vec2 vs;
+uniform float both; uniform vec4 backQ; uniform float bw;
+uniform vec4 shapeA; uniform vec4 kA; uniform float k5A; uniform vec4 shapeB; uniform vec4 kB; uniform float k5B;
+uniform sampler2D seamTex; uniform float sb; uniform float seamRange;
+${LENS_AT}
+vec3 dirOf(float u, float s){ return vec3(cos(s)*cos(u), cos(s)*sin(u), sin(s)); }
 void main(){
   vec3 d;
   if (dist <= 0.0) d = normalize(vec3(rng.x*(2.0*uv.x-1.0), rng.y*(2.0*uv.y-1.0), 1.0));
@@ -114,11 +139,30 @@ void main(){
   vec2 t;
   if (both > 0.5) {
     vec3 v = r.yzw;
-    vec3 vb = qm(qm(vec4(backQ.x, -backQ.yzw), vec4(0.0, v)), backQ).yzw;
-    float f = clamp((asin(clamp(v.z, -1.0, 1.0))*57.29578 + bw*0.5)/bw, 0.0, 1.0);
-    vec2 a = lensAt(vb, shapeA, kA, k5A), b = lensAt(v, shapeB, kB, k5B);
-    vec4 ca = texture2D(tex, vec2(clamp(a.x, 0.001, 0.999)*0.5, min(a.y*vs.x, vs.y)));
-    vec4 cb = texture2D(tex, vec2(0.5 + clamp(b.x, 0.001, 0.999)*0.5, min(b.y*vs.x, vs.y)));
+    float sn = asin(clamp(v.z, -1.0, 1.0));
+    if (sb > 0.0) {
+      // The band round the seam: each lens moved part of the way (pano.rs \`blend_band\`).
+      if (abs(sn) < sb) {
+        float un = atan(v.y, v.x);
+        vec4 nd = texture2D(seamTex, vec2((un + 3.14159265)/6.2831853, 0.5));
+        float fu = (nd.r - 0.5)*2.0*seamRange, fs = (nd.g - 0.5)*2.0*seamRange, ts = nd.b, gy = 0.85 + nd.a*0.33;
+        float t = (sn + sb)/(2.0*sb);
+        vec4 ca = texture2D(tex, inA(lensAt(toBack(dirOf(un - t*fu, sn - t*fs), backQ), shapeA, kA, k5A), vs));
+        vec4 cb = texture2D(tex, inB(lensAt(dirOf(un + (1.0 - t)*fu, sn + (1.0 - t)*fs), shapeB, kB, k5B), vs));
+        float wb = clamp((t - ts)/0.5 + 0.5, 0.0, 1.0);
+        float ph = t < ts ? t/max(ts, 0.001) : (1.0 - t)/max(1.0 - ts, 0.001);
+        float g = pow(gy, ph);
+        gl_FragColor = vec4(mix(ca.rgb*g, cb.rgb/g, wb), 1.0);
+      } else if (sn < 0.0) {
+        gl_FragColor = texture2D(tex, inA(lensAt(toBack(v, backQ), shapeA, kA, k5A), vs));
+      } else {
+        gl_FragColor = texture2D(tex, inB(lensAt(v, shapeB, kB, k5B), vs));
+      }
+      return;
+    }
+    float f = clamp((sn*57.29578 + bw*0.5)/bw, 0.0, 1.0);
+    vec4 ca = texture2D(tex, inA(lensAt(toBack(v, backQ), shapeA, kA, k5A), vs));
+    vec4 cb = texture2D(tex, inB(lensAt(v, shapeB, kB, k5B), vs));
     gl_FragColor = mix(ca, cb, f);
     return;
   }
@@ -144,6 +188,15 @@ export class Flat360 {
   prog: WebGLProgram;
   tex: WebGLTexture;
   private fb: WebGLFramebuffer | null = null;
+  /** Lining up the seam: its program, picture and state. */
+  private stripProg: WebGLProgram | null = null;
+  private stripTex: WebGLTexture | null = null;
+  private stripFb: WebGLFramebuffer | null = null;
+  private stripPx = new Uint8Array(STRIP_W * STRIP_H * 4);
+  private seamTex: WebGLTexture | null = null;
+  private nodes = new Uint8Array(SEAM_NODES * 4);
+  private seam = new SeamTrack();
+  private seamFrame: number | string | null = null;
   private row = new Uint8Array((MARK_W * (MARK_BITS + 2)) * 4);
   constructor(public canvas: HTMLCanvasElement) {
     const gl = canvas.getContext("webgl", { preserveDrawingBuffer: true, antialias: false });
@@ -159,7 +212,14 @@ export class Flat360 {
     const p = gl.createProgram()!;
     gl.attachShader(p, sh(gl.VERTEX_SHADER, VS));
     gl.attachShader(p, sh(gl.FRAGMENT_SHADER, FS));
+    gl.bindAttribLocation(p, 0, "p");
     gl.linkProgram(p);
+    const sp = gl.createProgram()!;
+    gl.attachShader(sp, sh(gl.VERTEX_SHADER, STRIP_VS));
+    gl.attachShader(sp, sh(gl.FRAGMENT_SHADER, STRIP_FS));
+    gl.bindAttribLocation(sp, 0, "p");
+    gl.linkProgram(sp);
+    this.stripProg = sp;
     gl.useProgram(p);
     this.prog = p;
     const buf = gl.createBuffer();
@@ -174,6 +234,65 @@ export class Flat360 {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  }
+  private lensUniforms(prog: WebGLProgram, proj: Extract<Proj, { kind: "lenses" }>) {
+    const { gl } = this;
+    const u = (n: string, s: LensShape, m: string, k5: string) => {
+      gl.uniform4f(gl.getUniformLocation(prog, n), s.fu, s.fv, s.cu, s.cv);
+      gl.uniform4f(gl.getUniformLocation(prog, m), s.k[0], s.k[1], s.k[2], s.k[3]);
+      gl.uniform1f(gl.getUniformLocation(prog, k5), s.k[4]);
+    };
+    u("shapeA", proj.back, "kA", "k5A");
+    u("shapeB", proj.front, "kB", "k5B");
+    const b = rotation({ yaw: 180 + proj.yaw, pitch: proj.pitch, roll: proj.roll, hfov: 90 } as View);
+    gl.uniform4f(gl.getUniformLocation(prog, "backQ"), b[0], b[1], b[2], b[3]);
+  }
+  /** Measures this frame's seam from the picture just uploaded (once per frame; a jump starts over). */
+  private updateSeam(proj: Extract<Proj, { kind: "lenses" }>, key: number | string, vsA: number, vsB: number) {
+    const { gl } = this;
+    if (key === this.seamFrame) return;
+    if (typeof key !== "number" || typeof this.seamFrame !== "number" || key < this.seamFrame || key - this.seamFrame > 3) this.seam.reset();
+    this.seamFrame = key;
+    if (!this.stripTex) {
+      this.stripTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this.stripTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, STRIP_W, STRIP_H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      this.stripFb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.stripFb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.stripTex, 0);
+      this.seamTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this.seamTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, SEAM_NODES, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    }
+    const sp = this.stripProg!;
+    gl.useProgram(sp);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.stripFb);
+    gl.viewport(0, 0, STRIP_W, STRIP_H);
+    gl.uniform2f(gl.getUniformLocation(sp, "vs"), vsA, vsB);
+    gl.uniform1f(gl.getUniformLocation(sp, "reach"), (proj.band * STRIP_H) / STRIP_NR);
+    gl.uniform1f(gl.getUniformLocation(sp, "limit"), (proj.fov * Math.PI) / 360);
+    this.lensUniforms(sp, proj);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.readPixels(0, 0, STRIP_W, STRIP_H, gl.RGBA, gl.UNSIGNED_BYTE, this.stripPx);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.useProgram(this.prog);
+    this.seam.update(this.stripPx);
+    this.seam.nodes(proj.band, this.nodes);
+    (window as any).__seamStats?.push({ ...this.seam.last, k: key });
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.seamTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, SEAM_NODES, 1, gl.RGBA, gl.UNSIGNED_BYTE, this.nodes);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
   }
   /** The frame number under the picture just uploaded. */
   private frameMark(w: number, h: number): number | null {
@@ -204,8 +323,14 @@ export class Flat360 {
     // A stream with the strip: the picture is what lies above it.
     const vw = (src as HTMLVideoElement).videoWidth ?? 0, vh = (src as HTMLVideoElement).videoHeight ?? 0;
     const marked = vw > 0 && vh === vw / 2 + MARK_H;
-    gl.uniform2f(gl.getUniformLocation(this.prog, "vs"), marked ? (vh - MARK_H) / vh : 1, marked ? (vh - MARK_H - 0.5) / vh : 1);
-    if (typeof stab === "function") stab = stab(marked ? this.frameMark(vw, vh) : null);
+    const vsA = marked ? (vh - MARK_H) / vh : 1, vsB = marked ? (vh - MARK_H - 0.5) / vh : 1;
+    gl.uniform2f(gl.getUniformLocation(this.prog, "vs"), vsA, vsB);
+    const mark = marked ? this.frameMark(vw, vh) : null;
+    if (typeof stab === "function") stab = stab(mark);
+    if (proj.kind === "lenses" && proj.band > 0) {
+      const key = mark ?? (src instanceof HTMLImageElement ? src.src : (src as HTMLVideoElement).currentTime ?? 0);
+      this.updateSeam(proj, typeof key === "number" && mark == null ? `t${key}` : key, vsA, vsB);
+    }
     const q = rotation(view);
     const d = Math.max(0, Math.min(1, view.dist ?? 0));
     const tx = Math.tan((Math.max(20, Math.min(160, view.hfov)) * Math.PI) / 360);
@@ -222,16 +347,12 @@ export class Flat360 {
     gl.uniform1f(gl.getUniformLocation(this.prog, "swp"), fish && proj.swap ? 1 : 0);
     gl.uniform1f(gl.getUniformLocation(this.prog, "both"), proj.kind === "lenses" ? 1 : 0);
     if (proj.kind === "lenses") {
-      const u = (n: string, s: LensShape, m: string, k5: string) => {
-        gl.uniform4f(gl.getUniformLocation(this.prog, n), s.fu, s.fv, s.cu, s.cv);
-        gl.uniform4f(gl.getUniformLocation(this.prog, m), s.k[0], s.k[1], s.k[2], s.k[3]);
-        gl.uniform1f(gl.getUniformLocation(this.prog, k5), s.k[4]);
-      };
-      u("shapeA", proj.back, "kA", "k5A");
-      u("shapeB", proj.front, "kB", "k5B");
-      const b = rotation({ yaw: 180 + proj.yaw, pitch: proj.pitch, roll: proj.roll, hfov: 90 } as View);
-      gl.uniform4f(gl.getUniformLocation(this.prog, "backQ"), b[0], b[1], b[2], b[3]);
+      this.lensUniforms(this.prog, proj);
       gl.uniform1f(gl.getUniformLocation(this.prog, "bw"), proj.blend);
+      gl.uniform1f(gl.getUniformLocation(this.prog, "sb"), proj.band);
+      gl.uniform1f(gl.getUniformLocation(this.prog, "seamRange"), SEAM_RANGE);
+      gl.uniform1i(gl.getUniformLocation(this.prog, "tex"), 0);
+      gl.uniform1i(gl.getUniformLocation(this.prog, "seamTex"), 1);
     }
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }

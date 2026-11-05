@@ -96,6 +96,10 @@ pub fn parity(ffmpeg: &Path, jobs: &ff::Jobs, info: &MediaInfo, lens: &Lens, tim
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let mut flat = lens.clone();
     flat.stab = Some(motion::Stab { mode: "off".into(), ..Default::default() });
+    // The lenses and the plain seam: what is lined up frame by frame is measured apart (`real_seam`).
+    let mut plain = stitch::params(lens);
+    plain.seam = "plain".into();
+    flat.stitch = Some(plain);
     let band = stitch::blend_width(stitch::params(lens).fov.clamp(181.0, 260.0));
     let hfov = 100.0;
     let geo = crate::pano::Geo::new(&stitch::params(lens), SH as f64);

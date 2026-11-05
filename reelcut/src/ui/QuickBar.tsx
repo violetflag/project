@@ -102,6 +102,8 @@ export function QuickBar() {
               {STRENGTHS.map((x) => <button role="menuitem" onClick={(e) => run(stab, e.shiftKey, { strength: x.v })}><span class="mk" /><span class="ml">{x.label}</span><span class="mkey">{x.v === 1 ? "기본" : ""}</span></button>)}
               <div class="menu-sep" role="separator" />
               <button role="menuitem" onClick={(e) => run(stab, e.shiftKey, { mode: "lock" })} title="카메라가 돌아도 보는 방향을 그대로 둡니다"><span class="mk" /><span class="ml">방향 고정</span><span class="mkey" /></button>
+              <button role="menuitem" onClick={(e) => run(stab, e.shiftKey, { mode: "forward" })} title="수평을 맞추고, 카메라가 가는 쪽을 천천히 따라갑니다"><span class="mk" /><span class="ml">진행 방향 보기</span><span class="mkey" /></button>
+              <button role="menuitem" onClick={(e) => run(stab, e.shiftKey, { mode: "tilt" })} title="프레임마다 기울기를 없앱니다. 도는 움직임은 그대로 둡니다"><span class="mk" /><span class="ml">기울기 복원</span><span class="mkey" /></button>
               <button role="menuitem" onClick={(e) => run(stab, e.shiftKey, { mode: "off" })}><span class="mk" /><span class="ml">끄기</span><span class="mkey" /></button>
               <button role="menuitem" onClick={(e) => run(stab, e.shiftKey, { mode: "none" })} title="수평 맞추기도 끄고 찍힌 그대로 봅니다"><span class="mk" /><span class="ml">수평까지 끄기</span><span class="mkey" /></button>
             </div>

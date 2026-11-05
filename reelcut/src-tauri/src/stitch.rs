@@ -53,8 +53,8 @@ pub struct Stitch {
     /// here with Reelcut's own motion matching; on by default).
     #[serde(default = "yes")]
     pub flow: bool,
-    /// "" or "linear": the same blend as the live preview. "flow": the slower per-frame alignment,
-    /// which the preview cannot show. (`flow` above is left from older files and not read.)
+    /// "plain": a plain blend. Anything else: the lenses are lined up along the seam on every frame,
+    /// in the export and in the preview. (`flow` above is left from older files and not read.)
     #[serde(default)]
     pub seam: String,
     /// The camera's factory calibration of the back and the front lens, when the file has it and it
@@ -109,7 +109,7 @@ impl LensCal {
 
 impl Stitch {
     pub fn precise(&self) -> bool {
-        self.seam == "flow"
+        self.seam != "plain"
     }
 }
 
@@ -742,11 +742,10 @@ mod weight_tests {
     }
 
     #[test]
-    fn older_files_get_the_preview_seam() {
-        let s: Stitch = serde_json::from_str(r#"{"on":true,"flow":true}"#).unwrap();
-        assert!(!s.precise());
-        let p: Stitch = serde_json::from_str(r#"{"on":true,"seam":"flow"}"#).unwrap();
-        assert!(p.precise());
+    fn the_seam_is_lined_up_unless_asked_for_a_plain_blend() {
+        assert!(Stitch::default().precise());
+        assert!(Stitch { seam: "linear".into(), ..Default::default() }.precise());
+        assert!(!Stitch { seam: "plain".into(), ..Default::default() }.precise());
     }
 }
 

@@ -46,15 +46,16 @@ export function levelClip(c: Clip, a: Asset | undefined, hw: number): { clip: Cl
 }
 
 /** Whether the shake is taken out, with levelling kept as it is. */
-const SHAKE_ON: Record<Stab["mode"], Stab["mode"]> = { off: "smooth", smooth: "smooth", horizon: "eis", eis: "eis", lock: "lock" };
-const SHAKE_OFF: Record<Stab["mode"], Stab["mode"]> = { off: "off", smooth: "off", horizon: "horizon", eis: "horizon", lock: "horizon" };
+const SHAKE_ON: Record<Stab["mode"], Stab["mode"]> = { off: "smooth", smooth: "smooth", horizon: "eis", tilt: "eis", eis: "eis", lock: "lock", forward: "forward" };
+const SHAKE_OFF: Record<Stab["mode"], Stab["mode"]> = { off: "off", smooth: "off", horizon: "horizon", tilt: "horizon", eis: "horizon", lock: "horizon", forward: "horizon" };
+const SET_MODES = ["lock", "forward", "tilt"] as const;
 
 /** 흔들림 줄이기 on one clip: a strength, or a mode: lock, off (the shake only), none (as filmed). */
-export function stabClip(c: Clip, a: Asset | undefined, p: { strength?: number; mode?: "lock" | "off" | "none" }): Clip {
+export function stabClip(c: Clip, a: Asset | undefined, p: { strength?: number; mode?: "lock" | "forward" | "tilt" | "off" | "none" }): Clip {
   const eff = stabFor(c, a) ?? DEFAULT_STAB;
   const next: Stab = p.mode === "none" ? { ...eff, mode: "off" }
     : p.mode === "off" ? { ...eff, mode: SHAKE_OFF[eff.mode] }
-    : p.mode === "lock" ? { ...eff, mode: "lock" }
+    : p.mode ? { ...eff, mode: p.mode }
     : { ...eff, mode: SHAKE_ON[eff.mode], strength: p.strength ?? 1 };
   return JSON.stringify(next) === JSON.stringify(eff) ? c : { ...c, stab: next };
 }
@@ -102,7 +103,7 @@ const quick: ActionDef[] = [
     enabled: (d) => has360(d.clips),
     run: ({ draft, clips, params }): ActionOut => {
       const am = assetMap();
-      const mode = params.mode === "lock" || params.mode === "off" || params.mode === "none" ? params.mode : undefined;
+      const mode = params.mode === "off" || params.mode === "none" ? params.mode : SET_MODES.find((m) => m === params.mode);
       const strength = Number(params.strength ?? 1) || 1;
       let d = draft, n = 0;
       for (const c of clips) {
@@ -112,7 +113,7 @@ const quick: ActionDef[] = [
         n++;
         d = updateClip(d, c.id, { stab: nc.stab });
       }
-      const what = mode === "none" ? "수평까지 끔" : mode === "off" ? "끔" : mode === "lock" ? "방향 고정" : strengthName(strength);
+      const what = mode === "none" ? "수평까지 끔" : mode === "off" ? "끔" : mode === "lock" ? "방향 고정" : mode === "forward" ? "진행 방향 보기" : mode === "tilt" ? "기울기 복원" : strengthName(strength);
       return { draft: d, changed: n, detail: `흔들림 줄이기 ${what} (${n}개 클립)` };
     },
   },
