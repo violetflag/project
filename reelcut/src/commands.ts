@@ -143,7 +143,10 @@ export const COMMANDS: Cmd[] = [
   { id: "import", label: "미디어 가져오기…", menu: "파일", keys: "Ctrl+I", sep: true, enabled: inProject, run: async () => importPaths(await pickFiles()) },
   { id: "importFolder", label: "폴더 가져오기…", menu: "파일", enabled: inProject, run: async () => importPaths(await pickFiles(true)) },
   { id: "relink", label: "미디어 다시 연결…", menu: "파일", term: "Relink Media", enabled: () => inProject() && st.missing.length > 0, run: () => set({ dialog: "relink" }) },
-  { id: "save", label: "저장", menu: "파일", keys: "Ctrl+S", sep: true, enabled: inProject, run: async () => { await saveNow(); toast(st.projectFile ? `저장했습니다: ${st.projectFile}` : "저장했습니다"); } },
+  { id: "save", label: "저장", menu: "파일", keys: "Ctrl+S", sep: true, enabled: inProject, run: async () => {
+    const r = await saveNow();
+    toast(r?.error ? `앱 안에는 저장했지만 프로젝트 폴더에는 저장하지 못했습니다: ${r.error}` : st.projectFile ? `저장했습니다: ${st.projectFile}` : "저장했습니다");
+  } },
   { id: "saveAs", label: "다른 이름으로 저장…", menu: "파일", keys: "Ctrl+Shift+S", term: "Save As", enabled: inProject, run: () => set({ dialog: "saveAs" }) },
   { id: "revealProject", label: "프로젝트 폴더 열기", menu: "파일", term: "Show in Explorer", enabled: inProject, run: () => revealProjectFolder() },
   { id: "backupNow", label: "백업 만들기", menu: "파일", enabled: inProject, run: backupNow },

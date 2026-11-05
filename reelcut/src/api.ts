@@ -59,7 +59,7 @@ export const api = {
   jsonlTail: (kind: "actions" | "chats", name: string, max: number) => invoke<string[]>("jsonl_tail", { kind, name, max }),
   // Project folders (2.18): Documents\Reelcut\<이름>\<이름>.reelcut with chats, logs and backups.
   projectSave: (id: string, json: string, savedAt: string) => invoke<{ file?: string; folder?: string; error?: string }>("project_save", { id, json, savedAt }),
-  projectOpen: (path: string) => invoke<{ project: any; folder: string; from: string; warnings: string[]; conflict: boolean }>("project_open", { path }),
+  projectOpen: (path: string, time: string) => invoke<{ project: any; folder: string; from: string; warnings: string[]; conflict: boolean; backup?: string | null }>("project_open", { path, time }),
   projectInfo: (id: string) => invoke<{ folder: string; file?: string } | null>("project_info", { id }),
   projectRoot: () => invoke<ProjectRoot>("project_root"),
   projectSetRoot: (path: string) => invoke<void>("project_set_root", { path }),
@@ -116,6 +116,10 @@ export const api = {
   reveal: (path: string) => invoke<void>("reveal", { path }),
   pathExists: (path: string) => invoke<boolean>("path_exists", { path }),
   initialFiles: () => invoke<string[]>("initial_files"),
+  /** Files later starts handed over, waiting until the window takes them. */
+  takeOpenFiles: () => invoke<string[]>("take_open_files"),
+  /** The project file in the first of these folders that holds one (a project folder dropped or opened). */
+  projectFileIn: (paths: string[]) => invoke<string | null>("project_file_in", { paths }),
   ccStatus: () => invoke<CcStatus>("cc_status"),
   ccLogin: () => invoke<void>("cc_login"),
   ccSetup: () => invoke<void>("cc_setup"),
@@ -145,8 +149,8 @@ export async function pickProject(): Promise<string | null> {
   return typeof r === "string" ? r : null;
 }
 
-/** Files handed over by a second start of the app (a .reelcut or video opened from Explorer). */
-export const onOpenFiles = (cb: (paths: string[]) => void) => onEvent("open-files", cb);
+/** A later start of the app handed over files (a .reelcut or video opened from Explorer); take them with `takeOpenFiles`. */
+export const onOpenFiles = (cb: () => void) => onEvent("open-files", () => cb());
 
 /** Runs `fn` before the window closes (Alt+F4, the taskbar, the X button), then closes it. */
 export async function beforeClose(fn: () => Promise<void>) {

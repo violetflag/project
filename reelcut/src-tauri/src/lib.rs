@@ -234,13 +234,10 @@ fn store_get(app: St<'_>, name: String) -> Result<Option<String>, String> {
 }
 
 /// Writes a file so that a crash leaves either the old one or the new one, never half of it.
+/// Whole or not at all, under a temporary name no other write uses (two saves at once never
+/// write into one temporary file).
 fn write_atomic(p: &Path, value: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    let tmp = p.with_extension("json.tmp");
-    let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-    f.write_all(value).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
-    drop(f);
-    std::fs::rename(&tmp, p).map_err(|e| e.to_string())
+    project::write_atomic(p, value)
 }
 
 const BACKUP_VERSIONS: usize = 50;
@@ -1395,6 +1392,15 @@ fn initial_files() -> Vec<String> {
     std::env::args().skip(1).filter(|a| !a.starts_with('-') && Path::new(a).exists()).collect()
 }
 
+/// Files handed over by later starts (Explorer starts the app once per selected file). They wait
+/// here until the window takes them, so none is lost while it is still starting.
+static OPEN_QUEUE: parking_lot::Mutex<Vec<String>> = parking_lot::const_mutex(Vec::new());
+
+#[tauri::command]
+fn take_open_files() -> Vec<String> {
+    std::mem::take(&mut *OPEN_QUEUE.lock())
+}
+
 /// Calls the Claude Messages API from the native side (no browser CORS, the key stays out of
 /// page requests). `body` is the request JSON; returns the response JSON or the API error text.
 #[tauri::command]
@@ -1524,7 +1530,8 @@ pub fn run() {
             }
             let files: Vec<String> = argv.into_iter().skip(1).filter(|a| !a.starts_with('-') && Path::new(a).exists()).collect();
             if !files.is_empty() {
-                let _ = app.emit("open-files", files);
+                OPEN_QUEUE.lock().extend(files);
+                let _ = app.emit("open-files", ());
             }
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -1608,6 +1615,7 @@ pub fn run() {
             reveal,
             path_exists,
             initial_files,
+            take_open_files,
             claude,
             cc_status,
             cc_login,
@@ -1630,6 +1638,7 @@ pub fn run() {
             project::project_copy_logs,
             project::relink_search_cmd,
             project::paths_exist,
+            project::project_file_in,
             recover::recover_scan,
             recover::recover_chats
         ])

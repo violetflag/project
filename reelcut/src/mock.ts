@@ -103,7 +103,7 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
       const files = (window as any).__mockProjectFiles ?? {};
       const doc = files[a.path];
       if (!doc) throw new Error(`${a.path}: 파일이 없습니다`);
-      return { project: doc, folder: a.path.replace(/[\\/][^\\/]+$/, ""), from: "file", warnings: [], conflict: false };
+      return { project: doc, folder: a.path.replace(/[\\/][^\\/]+$/, ""), from: "file", warnings: [], conflict: false, backup: null };
     }
     case "project_info": { const f = ls.get(`folder:${a.id}`); return f ? { folder: f, file: `${f}/${f.split("/").pop()}.reelcut` } : null; }
     case "project_root": return { root: ls.get("mock-root") || "C:/Users/me/Documents/Reelcut", default: "C:/Users/me/Documents/Reelcut", custom: !!ls.get("mock-root"), docsSyncedBy: null, rootSyncedBy: null };
@@ -156,6 +156,8 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
     case "reveal": return;
     case "path_exists": return true;
     case "initial_files": return [];
+    case "project_file_in": return ((window as any).__mockProjectFolders ?? {})[a.paths[0]] ?? null;
+    case "take_open_files": { const f = (window as any).__mockHanded ?? []; (window as any).__mockHanded = []; return f; }
     case "cc_status": return (window as any).__mockCcStatus ?? { found: true, path: "C:/Users/me/.local/bin/claude.exe", version: "2.1.0", logged_in: true, method: "claude.ai", account: "me@example.com", plan: "max", error: "" };
     case "cc_login": (window as any).__ccOpened = cmd; if ((window as any).__mockCcStatus) (window as any).__mockCcStatus = { ...(window as any).__mockCcStatus, logged_in: true, account: "me@example.com", plan: "max", method: "claude.ai" }; return;
     case "cc_setup":

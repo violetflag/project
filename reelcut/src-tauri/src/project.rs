@@ -29,6 +29,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 pub const EXT: &str = "reelcut";
@@ -162,19 +163,24 @@ fn ok_id(id: &str) -> Result<&str, String> {
 
 // ---------------------------------------------------------------- writing
 
-/// A whole file or nothing: written beside, flushed to disk, then moved over the old one. Moving
-/// is retried a few times, as antivirus and sync programs hold new files open for a moment.
+static TMP_N: AtomicU64 = AtomicU64::new(0);
+
+/// A whole file or nothing: written beside (under a name no other write uses), flushed to disk,
+/// then moved over the old one. Moving is retried a few times, as antivirus and sync programs
+/// hold new files open for a moment.
 pub fn write_atomic(p: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
     let mut tmp = p.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}-{}.tmp", std::process::id(), TMP_N.fetch_add(1, Ordering::Relaxed)));
     let tmp = PathBuf::from(tmp);
-    let mut f = std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
-    drop(f);
+    let wrote = std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display())).and_then(|mut f| f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| e.to_string()));
+    if let Err(e) = wrote {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     let mut last = String::new();
     for i in 0..6 {
         match std::fs::rename(&tmp, p) {
@@ -185,6 +191,7 @@ pub fn write_atomic(p: &Path, bytes: &[u8]) -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+    let _ = std::fs::remove_file(&tmp);
     Err(format!("{}: {last}", p.display()))
 }
 
@@ -324,6 +331,9 @@ pub fn write_folder(dir: &Path, img: &Path, project: &Value, app: &str, saved_at
             }
         }
     }
+    // Pictures anywhere else (the single `chat` of projects last saved before 2.3) never stay in
+    // the project file either.
+    pictures_out(&mut proj, img, &mut out.pictures)?;
     if let Some(assets) = proj.get_mut("assets").and_then(Value::as_array_mut) {
         for a in assets.iter_mut() {
             if let Some(r) = a.pointer("/info/path").and_then(Value::as_str).and_then(|p| relative(dir, Path::new(p))) {
@@ -387,9 +397,59 @@ fn read_doc(p: &Path) -> Result<Value, String> {
     Ok(v)
 }
 
-/// The id written in the folder's project file.
+/// The project id of a project file, from its first bytes (the id is written before the project,
+/// so a large file is not read whole), else from the whole file.
+fn file_id(p: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut head = vec![0u8; 4096];
+    let n = std::fs::File::open(p).and_then(|mut f| f.read(&mut head)).ok()?;
+    let s = String::from_utf8_lossy(&head[..n]);
+    let quick = s.find("\"id\":\"").and_then(|i| {
+        let rest = &s[i + 6..];
+        rest.find('"').map(|j| rest[..j].to_string())
+    });
+    match quick {
+        Some(id) if s.trim_start().starts_with('{') && ok_id(&id).is_ok() => Some(id),
+        _ => read_doc(p).ok().and_then(|d| d["id"].as_str().map(String::from)),
+    }
+}
+
+/// The project a folder belongs to: the id in its project file, or in that file's `.bak` when the
+/// file itself was moved away.
 pub fn folder_id(dir: &Path) -> Option<String> {
-    project_files(dir).iter().find_map(|p| read_doc(p).ok()).and_then(|d| d["id"].as_str().map(String::from))
+    project_files(dir).iter().find_map(|p| file_id(p)).or_else(|| {
+        let base = dir.file_name()?.to_string_lossy().into_owned();
+        file_id(&dir.join(format!("{base}.{EXT}.bak")))
+    })
+}
+
+/// A folder Reelcut made for a project (`<folder>.reelcut` or its `.bak`, a 대화 folder, or its
+/// README), not some folder a lone `.reelcut` file was dropped into (the Desktop, Downloads, a
+/// drive). Only such folders are written into, renamed or moved to the trash.
+pub fn is_project_folder(dir: &Path) -> bool {
+    let Some(base) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else { return false };
+    if dir.parent().is_none() || !dir.is_dir() {
+        return false;
+    }
+    dir.join(format!("{base}.{EXT}")).is_file()
+        || dir.join(format!("{base}.{EXT}.bak")).is_file()
+        || dir.join(CHATS).is_dir()
+        || std::fs::read_to_string(dir.join("README.txt")).is_ok_and(|t| t.starts_with("Reelcut 프로젝트 폴더"))
+}
+
+/// Inside a `_휴지통` folder (a deleted project, or pruned backups).
+fn in_trash(p: &Path) -> bool {
+    p.components().any(|c| c.as_os_str() == TRASH)
+}
+
+fn canon(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Under the system's temporary folder (a `.reelcut` opened from inside a zip is extracted there,
+/// and Windows clears it).
+fn in_temp(p: &Path, temp: &Path) -> bool {
+    canon(p).starts_with(canon(temp))
 }
 
 /// Reads a project file: falls back to its `.bak` and then to the newest backup, saying so;
@@ -452,6 +512,7 @@ pub fn read_folder(path: &Path, private: &Path) -> Result<Opened, String> {
             }
         }
     }
+    pictures_in(&mut proj, &places);
     // Media found again through its path relative to the project folder (the folder moved
     // together with the footage, or another drive letter).
     if let Some(assets) = proj.get_mut("assets").and_then(Value::as_array_mut) {
@@ -535,6 +596,8 @@ pub fn backup(dir: &Path, file: &Path, reason: &str, time: &str) -> Result<Optio
         n += 1;
     }
     std::fs::copy(file, bdir.join(&name)).map_err(|e| e.to_string())?;
+    // Windows keeps the project file's time on a copy; a backup's time is when it was made.
+    let _ = std::fs::File::options().write(true).open(bdir.join(&name)).and_then(|f| f.set_modified(SystemTime::now()));
     Ok(Some(name))
 }
 
@@ -598,6 +661,14 @@ pub struct RegFile {
     /// Project id → its folder.
     #[serde(default)]
     pub folders: HashMap<String, String>,
+    /// Project id → the project name its folder last followed. The folder is renamed only when the
+    /// project is renamed in the app, never because the user renamed the folder in Explorer.
+    #[serde(default)]
+    pub names: HashMap<String, String>,
+    /// Projects whose folder vanished and was made again by a save; when the user then opens the
+    /// moved folder, it takes over instead of opening as a copy.
+    #[serde(default)]
+    pub recreated: HashSet<String>,
 }
 
 pub struct Reg {
@@ -618,57 +689,146 @@ impl Reg {
     pub fn root(&self, docs: Option<&Path>, home: &Path) -> PathBuf {
         if self.file.root.is_empty() { default_root(docs, home).0 } else { PathBuf::from(&self.file.root) }
     }
+    /// The project's registered folder, when it is still there and still this project's (another
+    /// project may have been given the same path after the user renamed or deleted the folder).
     pub fn folder(&self, id: &str) -> Option<PathBuf> {
-        self.file.folders.get(id).map(PathBuf::from).filter(|p| p.is_dir())
-    }
-    pub fn bind(&mut self, id: &str, dir: &Path) -> Result<(), String> {
-        if self.file.folders.get(id).map(String::as_str) != Some(&*dir.to_string_lossy()) {
-            self.file.folders.insert(id.to_string(), dir.to_string_lossy().into_owned());
-            self.store()?;
-        }
-        Ok(())
+        self.file.folders.get(id).map(PathBuf::from).filter(|p| p.is_dir() && folder_id(p).is_none_or(|x| x == id))
     }
     pub fn unbind(&mut self, id: &str) -> Result<(), String> {
-        if self.file.folders.remove(id).is_some() {
+        let a = self.file.folders.remove(id).is_some();
+        let b = self.file.names.remove(id).is_some();
+        let c = self.file.recreated.remove(id);
+        if a || b || c {
             self.store()?;
         }
         Ok(())
     }
+    /// Takes a folder the user moved, renamed or opened as this project's folder, as it is named.
+    pub fn adopt(&mut self, id: &str, dir: &Path, name: &str) -> Result<(), String> {
+        self.file.folders.insert(id.to_string(), dir.to_string_lossy().into_owned());
+        self.file.names.insert(id.to_string(), folder_name(name));
+        self.file.recreated.remove(id);
+        self.store()
+    }
+    /// The project's folder when it has one: where it was registered, or (after it was renamed or
+    /// moved in Explorer, or deleted with the project and brought back from Home's 휴지통) found
+    /// again by its id. Nothing is made.
+    pub fn locate(&mut self, root: &Path, id: &str, name: Option<&str>) -> Option<PathBuf> {
+        if let Some(d) = self.folder(id) {
+            return Some(d);
+        }
+        let old = self.file.folders.get(id).map(PathBuf::from);
+        let found = find_folder(root, id, old.as_deref())?;
+        let name = name.map(String::from).unwrap_or_else(|| name_in(&found));
+        let found = if in_trash(&found) { untrash(&found, root, &folder_name(&name), id, &self.file.folders)? } else { found };
+        self.adopt(id, &found, &name).ok()?;
+        Some(found)
+    }
     /// The project's folder, made under `root` the first time ("이름 (2)" when the name is taken
-    /// by another project), and renamed when the project was renamed.
+    /// by another project), and renamed when the project was renamed in the app.
     pub fn folder_for(&mut self, root: &Path, id: &str, name: &str) -> Result<PathBuf, String> {
         ok_id(id)?;
         let want = folder_name(name);
-        if let Some(dir) = self.folder(id) {
-            let base = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let named = base == want || (base.starts_with(&format!("{want} (")) && base.ends_with(')'));
-            if named || !self.renames_tried.insert((id.to_string(), want.clone())) {
-                return Ok(dir);
-            }
-            let parent = dir.parent().map(Path::to_path_buf).unwrap_or_else(|| root.to_path_buf());
-            let Some(to) = free_name(&parent, &want, id) else { return Ok(dir) };
-            if to.exists() || std::fs::rename(&dir, &to).is_err() {
-                return Ok(dir);
-            }
-            // The project file follows the folder's name.
-            let new_base = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            for (old, new) in [(format!("{base}.{EXT}"), format!("{new_base}.{EXT}")), (format!("{base}.{EXT}.bak"), format!("{new_base}.{EXT}.bak"))] {
-                let _ = std::fs::rename(to.join(old), to.join(new));
-            }
-            self.bind(id, &to)?;
-            return Ok(to);
+        if let Some(dir) = self.locate(root, id, Some(name)) {
+            return self.follow_name(root, id, &want, dir);
         }
+        let vanished = self.file.folders.contains_key(id);
         std::fs::create_dir_all(root).map_err(|e| format!("{}: {e}", root.display()))?;
-        let dir = free_name(root, &want, id).ok_or("폴더 이름을 정하지 못했습니다")?;
+        let dir = free_name(root, &want, id, &self.file.folders).ok_or("폴더 이름을 정하지 못했습니다")?;
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        self.bind(id, &dir)?;
+        self.file.folders.insert(id.to_string(), dir.to_string_lossy().into_owned());
+        self.file.names.insert(id.to_string(), want);
+        if vanished {
+            self.file.recreated.insert(id.to_string());
+        }
+        self.store()?;
         Ok(dir)
+    }
+    /// Renames the folder (and its project file) after the project was renamed in the app.
+    fn follow_name(&mut self, root: &Path, id: &str, want: &str, dir: PathBuf) -> Result<PathBuf, String> {
+        let last = self.file.names.get(id).cloned();
+        if last.as_deref() == Some(want) {
+            return Ok(dir);
+        }
+        let base = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let named = base == want || (base.starts_with(&format!("{want} (")) && base.ends_with(')'));
+        // Already so named, or a folder from before names were kept: it stays as it is.
+        if named || last.is_none() {
+            self.file.names.insert(id.to_string(), want.to_string());
+            self.store()?;
+            return Ok(dir);
+        }
+        if !self.renames_tried.insert((id.to_string(), want.to_string())) || !is_project_folder(&dir) || root.starts_with(&dir) {
+            return Ok(dir);
+        }
+        let parent = dir.parent().map(Path::to_path_buf).unwrap_or_else(|| root.to_path_buf());
+        let Some(to) = free_name(&parent, want, id, &self.file.folders) else { return Ok(dir) };
+        if to.exists() || std::fs::rename(&dir, &to).is_err() {
+            return Ok(dir);
+        }
+        // The project file follows the folder's name.
+        let new_base = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        for (old, new) in [(format!("{base}.{EXT}"), format!("{new_base}.{EXT}")), (format!("{base}.{EXT}.bak"), format!("{new_base}.{EXT}.bak"))] {
+            let _ = std::fs::rename(to.join(old), to.join(new));
+        }
+        self.file.folders.insert(id.to_string(), to.to_string_lossy().into_owned());
+        self.file.names.insert(id.to_string(), want.to_string());
+        self.store()?;
+        Ok(to)
     }
 }
 
-/// `<parent>\<name>`, or "<name> (2)", … : the first that does not exist or already is this project.
-fn free_name(parent: &Path, name: &str, id: &str) -> Option<PathBuf> {
-    (1..1000).map(|n| parent.join(if n == 1 { name.to_string() } else { format!("{name} ({n})") })).find(|p| !p.exists() || (p.is_dir() && folder_id(p).as_deref() == Some(id)))
+/// `<parent>\<name>`, or "<name> (2)", … : the first that does not exist (and is not another
+/// project's registered folder) or already is this project.
+fn free_name(parent: &Path, name: &str, id: &str, folders: &HashMap<String, String>) -> Option<PathBuf> {
+    let taken: HashSet<PathBuf> = folders.iter().filter(|(k, _)| k.as_str() != id).map(|(_, v)| PathBuf::from(v)).collect();
+    (1..1000)
+        .map(|n| parent.join(if n == 1 { name.to_string() } else { format!("{name} ({n})") }))
+        .find(|p| !taken.contains(p) && (!p.exists() || (p.is_dir() && folder_id(p).as_deref() == Some(id))))
+}
+
+/// A project folder whose registered place is gone: renamed or moved within the projects folder
+/// or its old parent folder, or (newest first) in `_휴지통` after the project was deleted.
+fn find_folder(root: &Path, id: &str, old: Option<&Path>) -> Option<PathBuf> {
+    let mut parents = vec![root.to_path_buf()];
+    if let Some(p) = old.and_then(Path::parent).filter(|p| *p != root && !in_trash(p)) {
+        parents.push(p.to_path_buf());
+    }
+    for parent in &parents {
+        for e in std::fs::read_dir(parent).into_iter().flatten().flatten() {
+            let p = e.path();
+            if e.file_name() != TRASH && p.is_dir() && is_project_folder(&p) && folder_id(&p).as_deref() == Some(id) {
+                return Some(p);
+            }
+        }
+    }
+    let mut trashed: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(root.join(TRASH))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && folder_id(p).as_deref() == Some(id))
+        .map(|p| (std::fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH), p))
+        .collect();
+    trashed.sort_by(|a, b| b.0.cmp(&a.0));
+    trashed.into_iter().next().map(|x| x.1)
+}
+
+/// The project name written in a folder's project file.
+fn name_in(dir: &Path) -> String {
+    project_files(dir).iter().find_map(|p| read_doc(p).ok()).and_then(|d| d.pointer("/project/name").and_then(Value::as_str).map(String::from)).unwrap_or_else(|| "프로젝트".into())
+}
+
+/// Moves a project folder back out of `_휴지통` (the project was restored), noting it beside the
+/// deletion record.
+fn untrash(dir: &Path, root: &Path, want: &str, id: &str, folders: &HashMap<String, String>) -> Option<PathBuf> {
+    let to = free_name(root, want, id, folders)?;
+    if to.exists() {
+        return None;
+    }
+    std::fs::rename(dir, &to).ok()?;
+    let _ = append(&root.join(TRASH).join("삭제 기록.txt"), &[format!("되살림  {}  →  {}", dir.display(), to.display())]);
+    Some(to)
 }
 
 /// Where the pictures of a project go: inside the folder, or in the app data when the folder is
@@ -708,13 +868,25 @@ pub fn mirror_path(dir: &Path, kind: &str, name: &str) -> Option<PathBuf> {
     }
 }
 
-/// Copies of the Claude Code conversations this project's chats use, from `claude-archive`.
-pub fn copy_transcripts(data: &Path, dir: &Path, project: &Value) {
-    let sessions: Vec<String> = project["chats"].as_array().into_iter().flatten().filter_map(|c| c["ccSession"].as_str().map(String::from)).filter(|s| ok_id(s).is_ok()).collect();
+/// Where the copies of the Claude Code conversations go. They hold the frames the AI looked at,
+/// so, like the pictures, they stay in the app data when the folder is synced to a cloud service.
+pub fn transcripts_dir(data: &Path, dir: &Path, id: &str) -> PathBuf {
+    if synced_by(dir).is_some() { data.join("private").join(id).join("claude-code") } else { dir.join(CHATS).join(PRIVATE).join("claude-code") }
+}
+
+/// Copies of the Claude Code conversations this project's chats use (now and before a
+/// compaction), from `claude-archive` into `to`.
+pub fn copy_transcripts(data: &Path, to: &Path, project: &Value) {
+    let sessions: Vec<String> = project["chats"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|c| c["ccSession"].as_str().into_iter().chain(c["ccPast"].as_array().into_iter().flatten().filter_map(Value::as_str)).map(String::from).collect::<Vec<_>>())
+        .filter(|s| ok_id(s).is_ok())
+        .collect();
     if sessions.is_empty() {
         return;
     }
-    let to = dir.join(CHATS).join(PRIVATE).join("claude-code");
     for d in std::fs::read_dir(data.join("claude-archive")).into_iter().flatten().flatten() {
         for s in &sessions {
             let f = d.path().join(format!("{s}.jsonl"));
@@ -798,19 +970,34 @@ pub async fn relink_search_cmd(folder: String, wanted: Vec<Wanted>) -> Result<Ha
     super::blocking(move || Ok(relink_search(Path::new(&folder), &wanted))).await
 }
 
-/// Which of these paths exist (one call for a whole project's media).
+/// Which of these paths exist (one call for a whole project's media). Off the window's thread: a
+/// sleeping external drive or a lost network drive can take seconds to answer.
 #[tauri::command]
-pub fn paths_exist(paths: Vec<String>) -> Vec<bool> {
-    paths.iter().map(|p| Path::new(p).exists()).collect()
+pub async fn paths_exist(paths: Vec<String>) -> Result<Vec<bool>, String> {
+    super::blocking(move || Ok(paths.iter().map(|p| Path::new(p).exists()).collect())).await
+}
+
+/// The project file in the first of these folders that holds one (a project folder dropped on
+/// the window or opened from Explorer).
+#[tauri::command]
+pub async fn project_file_in(paths: Vec<String>) -> Result<Option<String>, String> {
+    super::blocking(move || Ok(paths.iter().map(PathBuf::from).filter(|p| p.is_dir()).find_map(|p| project_files(&p).into_iter().next()).map(|f| f.to_string_lossy().into_owned()))).await
 }
 
 // ---------------------------------------------------------------- commands
 
 static REG: Mutex<Option<Reg>> = parking_lot::const_mutex(None);
 static WRITTEN: Mutex<Option<Written>> = parking_lot::const_mutex(None);
-/// One save at a time; the registry lock is held only briefly, so log appends never wait for a save.
+/// One project save at a time, from the store file to the last folder file: two saves never
+/// share a file, and an older one never lands after a newer one.
+static STORE_WRITE: Mutex<()> = parking_lot::const_mutex(());
+/// One folder change at a time (saves, migration, backups, trash, open). Lock order:
+/// STORE_WRITE, SAVING, REG; the others are taken alone and briefly.
 static SAVING: Mutex<()> = parking_lot::const_mutex(());
-static SYNCED: Mutex<Option<HashSet<String>>> = parking_lot::const_mutex(None);
+/// Project id → the folder its last save wrote. Log lines are mirrored only there (never into a
+/// folder that is gone or now another project's), and a folder new to the project gets the logs
+/// whole.
+static OWNED: Mutex<Option<HashMap<String, PathBuf>>> = parking_lot::const_mutex(None);
 static CC_COPIED: Mutex<Option<HashMap<String, Instant>>> = parking_lot::const_mutex(None);
 
 fn with_reg<T>(data: &Path, f: impl FnOnce(&mut Reg) -> T) -> T {
@@ -827,34 +1014,43 @@ fn places(h: &tauri::AppHandle) -> (Option<PathBuf>, PathBuf) {
     (h.path().document_dir().ok(), home)
 }
 
+/// The project's folder if it has one (found again when it was moved), without making one.
+fn located(data: &Path, docs: Option<&Path>, home: &Path, id: &str) -> (Option<PathBuf>, PathBuf) {
+    with_reg(data, |r| {
+        let root = r.root(docs, home);
+        (r.locate(&root, id, None), root)
+    })
+}
+
 /// Writes the project's folder (after the store); the folder's own logs are filled the first time.
 pub fn save_folder(data: &Path, docs: Option<&Path>, home: &Path, project: &Value, saved_at: &str) -> Result<Wrote, String> {
     let id = ok_id(project["id"].as_str().unwrap_or(""))?.to_string();
     let name = project["name"].as_str().unwrap_or("프로젝트").to_string();
+    let _one = SAVING.lock();
     let dir = with_reg(data, |r| {
         let root = r.root(docs, home);
         r.folder_for(&root, &id, &name)
     })?;
-    let _one = SAVING.lock();
     let img = img_dir(data, &dir, &id);
     let wrote = {
         let mut w = WRITTEN.lock();
         write_folder(&dir, &img, project, env!("CARGO_PKG_VERSION"), saved_at, w.get_or_insert_with(HashMap::new))?
     };
-    if SYNCED.lock().get_or_insert_with(HashSet::new).insert(id.clone()) {
+    let fresh = OWNED.lock().get_or_insert_with(HashMap::new).insert(id.clone(), dir.clone()).as_ref() != Some(&dir);
+    if fresh {
         sync_logs(data, &dir, &id);
     }
     let due = {
         let mut g = CC_COPIED.lock();
         let m = g.get_or_insert_with(HashMap::new);
-        let due = m.get(&id).is_none_or(|t| t.elapsed() > Duration::from_secs(60));
+        let due = fresh || m.get(&id).is_none_or(|t| t.elapsed() > Duration::from_secs(60));
         if due {
             m.insert(id.clone(), Instant::now());
         }
         due
     };
     if due {
-        copy_transcripts(data, &dir, project);
+        copy_transcripts(data, &transcripts_dir(data, &dir, &id), project);
     }
     Ok(wrote)
 }
@@ -866,13 +1062,14 @@ pub async fn project_save(app: super::St<'_>, handle: tauri::AppHandle, id: Stri
     let app = app.inner().clone();
     super::blocking(move || {
         let id = ok_id(&id)?.to_string();
+        let project: Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        let _one = STORE_WRITE.lock();
         let safe = super::safe_name(&format!("project-{id}"))?;
         let p = app.store_dir().join(format!("{safe}.json"));
         if let Err(e) = super::back_up(&app.data_dir, &safe, &p, super::now_ms()) {
             app.log("backup", &format!("{safe}: {e}"));
         }
         super::write_atomic(&p, json.as_bytes())?;
-        let project: Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
         let (docs, home) = places(&handle);
         match save_folder(&app.data_dir, docs.as_deref(), &home, &project, &saved_at) {
             Ok(w) => Ok(json!({ "file": w.file.to_string_lossy(), "folder": w.file.parent().map(|d| d.to_string_lossy().into_owned()) })),
@@ -885,70 +1082,145 @@ pub async fn project_save(app: super::St<'_>, handle: tauri::AppHandle, id: Stri
     .await
 }
 
+/// A file in a project's `백업` folder: the project file beside that folder, when it is the same
+/// project.
+fn backup_of(p: &Path) -> Option<PathBuf> {
+    let b = p.parent()?;
+    if b.file_name()? != BACKUPS {
+        return None;
+    }
+    let dir = b.parent()?;
+    let main = project_files(dir).into_iter().next()?;
+    (file_id(&main).is_some() && file_id(&main) == file_id(p)).then_some(main)
+}
+
 /// Opens a `.reelcut` file. `conflict` is set when another folder already holds this project (a
-/// copied folder): the app then opens it as a copy with a new id.
+/// copied folder): the app then opens it as a copy with a new id. A folder the user moved or
+/// renamed becomes the project's folder; a lone file (on the Desktop, from a zip) is read but its
+/// folder is never taken; a deleted project's folder opened from `_휴지통` comes back. A backup
+/// opens its project, with `backup` naming the file to offer.
 #[tauri::command]
-pub async fn project_open(app: super::St<'_>, path: String) -> Result<Value, String> {
+pub async fn project_open(app: super::St<'_>, handle: tauri::AppHandle, path: String, time: String) -> Result<Value, String> {
     let app = app.inner().clone();
     super::blocking(move || {
-        let p = PathBuf::from(&path);
-        let p = if p.is_dir() { project_files(&p).into_iter().next().ok_or("이 폴더에 .reelcut 파일이 없습니다")? } else { p };
-        let probe = read_doc(&p).ok().or_else(|| {
-            let mut b = p.as_os_str().to_owned();
-            b.push(".bak");
-            read_doc(Path::new(&b)).ok()
-        });
-        let id = probe.as_ref().and_then(|d| d["id"].as_str().map(String::from)).unwrap_or_default();
-        let private = app.data_dir.join("private").join(if ok_id(&id).is_ok() { id.as_str() } else { "_" }).join("img");
-        let o = read_folder(&p, &private)?;
-        let id = o.project["id"].as_str().map(String::from).unwrap_or_default();
-        ok_id(&id)?;
-        let canon = |d: &Path| std::fs::canonicalize(d).unwrap_or_else(|_| d.to_path_buf());
-        let conflict = with_reg(&app.data_dir, |r| -> Result<bool, String> {
-            match r.folder(&id) {
-                Some(other) if canon(&other) != canon(&o.folder) && folder_id(&other).as_deref() == Some(id.as_str()) => Ok(true),
-                _ => {
-                    r.bind(&id, &o.folder)?;
-                    Ok(false)
-                }
-            }
-        })?;
-        if !o.warnings.is_empty() {
-            app.log("project", &format!("open {}: {}", p.display(), o.warnings.join(" / ")));
+        let (docs, home) = places(&handle);
+        let (v, notes) = open_file(&app.data_dir, docs.as_deref(), &home, Path::new(&path), &time, &std::env::temp_dir())?;
+        for n in notes {
+            app.log("project", &n);
         }
-        Ok(json!({ "project": o.project, "folder": o.folder.to_string_lossy(), "from": o.from, "warnings": o.warnings, "conflict": conflict }))
+        Ok(v)
     })
     .await
 }
 
+/// `project_open` without the app: what it returns, and lines for the log.
+pub fn open_file(data: &Path, docs: Option<&Path>, home: &Path, path: &Path, time: &str, temp: &Path) -> Result<(Value, Vec<String>), String> {
+    let mut notes = Vec::new();
+    let p = path.to_path_buf();
+    let p = if p.is_dir() { project_files(&p).into_iter().next().ok_or("이 폴더에 .reelcut 파일이 없습니다")? } else { p };
+    let (p, backup) = match backup_of(&p) {
+        Some(main) => (main, p.file_name().map(|n| n.to_string_lossy().into_owned())),
+        None => (p, None),
+    };
+    let probe = file_id(&p).or_else(|| {
+        let mut b = p.as_os_str().to_owned();
+        b.push(".bak");
+        file_id(Path::new(&b))
+    });
+    let id = probe.unwrap_or_default();
+    let private = data.join("private").join(if ok_id(&id).is_ok() { id.as_str() } else { "_" }).join("img");
+    let o = read_folder(&p, &private)?;
+    let id = o.project["id"].as_str().map(String::from).unwrap_or_default();
+    ok_id(&id)?;
+    let name = o.project["name"].as_str().unwrap_or("프로젝트").to_string();
+    let ours = is_project_folder(&o.folder) && !in_temp(&o.folder, temp);
+    let _one = SAVING.lock();
+    let (conflict, folder, gone) = with_reg(data, |r| -> Result<(bool, PathBuf, Option<PathBuf>), String> {
+        let root = r.root(docs, home);
+        let reg = r.folder(&id);
+        let here = canon(&o.folder);
+        // A lone file somewhere (the Desktop, a zip) is read, and its folder never taken.
+        if !ours || reg.as_ref().is_some_and(|d| canon(d) == here) {
+            return Ok((false, o.folder.clone(), None));
+        }
+        match reg {
+            // A deleted project's folder opened from _휴지통 comes back to the projects folder.
+            None if in_trash(&o.folder) => match untrash(&o.folder, &root, &folder_name(&name), &id, &r.file.folders) {
+                Some(back) => {
+                    r.adopt(&id, &back, &name)?;
+                    Ok((false, back, None))
+                }
+                None => Ok((false, o.folder.clone(), None)),
+            },
+            // Moved or renamed while the app was closed, or first opened on this PC.
+            None => {
+                r.adopt(&id, &o.folder, &name)?;
+                Ok((false, o.folder.clone(), None))
+            }
+            Some(_) if in_trash(&o.folder) => Ok((true, o.folder.clone(), None)),
+            // The folder the user moved, opened after a save had made a new one: it takes over,
+            // and the new one goes to the trash.
+            Some(made) if r.file.recreated.contains(&id) => {
+                r.adopt(&id, &o.folder, &name)?;
+                let gone = (is_project_folder(&made) && !root.starts_with(&made)).then(|| trash_folder(&made, &root, time).ok()).flatten();
+                Ok((false, o.folder.clone(), gone))
+            }
+            Some(_) => Ok((true, o.folder.clone(), None)),
+        }
+    })?;
+    if folder != o.folder || gone.is_some() {
+        OWNED.lock().get_or_insert_with(HashMap::new).remove(&id);
+        notes.push(format!("open {}: folder {}{}", p.display(), folder.display(), gone.map(|g| format!(", the one made meanwhile moved to {}", g.display())).unwrap_or_default()));
+    }
+    if !o.warnings.is_empty() {
+        notes.push(format!("open {}: {}", p.display(), o.warnings.join(" / ")));
+    }
+    let v = json!({ "project": o.project, "folder": folder.to_string_lossy(), "from": o.from, "warnings": o.warnings, "conflict": conflict, "backup": backup });
+    Ok((v, notes))
+}
+
 /// The project's folder and file, if it has one.
 #[tauri::command]
-pub fn project_info(app: super::St<'_>, id: String) -> Option<Value> {
-    let dir = with_reg(&app.data_dir, |r| r.folder(&id))?;
-    let file = project_files(&dir).into_iter().next();
-    Some(json!({ "folder": dir.to_string_lossy(), "file": file.map(|f| f.to_string_lossy().into_owned()) }))
+pub async fn project_info(app: super::St<'_>, handle: tauri::AppHandle, id: String) -> Result<Option<Value>, String> {
+    let app = app.inner().clone();
+    super::blocking(move || {
+        let (docs, home) = places(&handle);
+        let _one = SAVING.lock();
+        let Some(dir) = located(&app.data_dir, docs.as_deref(), &home, &id).0 else { return Ok(None) };
+        let file = project_files(&dir).into_iter().next();
+        Ok(Some(json!({ "folder": dir.to_string_lossy(), "file": file.map(|f| f.to_string_lossy().into_owned()) })))
+    })
+    .await
 }
 
 /// Where new project folders go, the default, and why the default is not Documents.
 #[tauri::command]
-pub fn project_root(app: super::St<'_>, handle: tauri::AppHandle) -> Value {
-    let (docs, home) = places(&handle);
-    let (def, synced) = default_root(docs.as_deref(), &home);
-    let root = with_reg(&app.data_dir, |r| r.root(docs.as_deref(), &home));
-    json!({ "root": root.to_string_lossy(), "default": def.to_string_lossy(), "custom": root != def, "docsSyncedBy": synced, "rootSyncedBy": synced_by(&root) })
+pub async fn project_root(app: super::St<'_>, handle: tauri::AppHandle) -> Result<Value, String> {
+    let app = app.inner().clone();
+    super::blocking(move || {
+        let (docs, home) = places(&handle);
+        let (def, synced) = default_root(docs.as_deref(), &home);
+        let root = with_reg(&app.data_dir, |r| r.root(docs.as_deref(), &home));
+        Ok(json!({ "root": root.to_string_lossy(), "default": def.to_string_lossy(), "custom": root != def, "docsSyncedBy": synced, "rootSyncedBy": synced_by(&root) }))
+    })
+    .await
 }
 
 /// Changes where new project folders go ("" = the default). Folders already made stay put.
 #[tauri::command]
-pub fn project_set_root(app: super::St<'_>, path: String) -> Result<(), String> {
-    let path = path.trim().to_string();
-    if !path.is_empty() {
-        std::fs::create_dir_all(&path).map_err(|e| format!("{path}: {e}"))?;
-    }
-    with_reg(&app.data_dir, |r| {
-        r.file.root = path;
-        r.store()
+pub async fn project_set_root(app: super::St<'_>, path: String) -> Result<(), String> {
+    let app = app.inner().clone();
+    super::blocking(move || {
+        let path = path.trim().to_string();
+        if !path.is_empty() {
+            std::fs::create_dir_all(&path).map_err(|e| format!("{path}: {e}"))?;
+        }
+        with_reg(&app.data_dir, |r| {
+            r.file.root = path;
+            r.store()
+        })
     })
+    .await
 }
 
 /// A dated copy of the project file in `백업\`, then the old ones are thinned out.
@@ -957,9 +1229,9 @@ pub async fn project_backup(app: super::St<'_>, handle: tauri::AppHandle, id: St
     let app = app.inner().clone();
     super::blocking(move || {
         let (docs, home) = places(&handle);
-        let (dir, root) = with_reg(&app.data_dir, |r| (r.folder(&id), r.root(docs.as_deref(), &home)));
-        let Some(dir) = dir else { return Ok(None) };
         let _one = SAVING.lock();
+        let (dir, root) = located(&app.data_dir, docs.as_deref(), &home, &id);
+        let Some(dir) = dir else { return Ok(None) };
         let Some(file) = project_files(&dir).into_iter().next() else { return Ok(None) };
         let made = backup(&dir, &file, &reason, &time)?;
         if made.is_some() {
@@ -972,16 +1244,30 @@ pub async fn project_backup(app: super::St<'_>, handle: tauri::AppHandle, id: St
 }
 
 #[tauri::command]
-pub fn project_backups(app: super::St<'_>, id: String) -> Vec<Backup> {
-    with_reg(&app.data_dir, |r| r.folder(&id)).map(|d| list_backups(&d)).unwrap_or_default()
+pub async fn project_backups(app: super::St<'_>, handle: tauri::AppHandle, id: String) -> Result<Vec<Backup>, String> {
+    let app = app.inner().clone();
+    super::blocking(move || {
+        let (docs, home) = places(&handle);
+        let _one = SAVING.lock();
+        Ok(located(&app.data_dir, docs.as_deref(), &home, &id).0.map(|d| list_backups(&d)).unwrap_or_default())
+    })
+    .await
 }
 
 /// The project as a backup holds it (its pictures and conversations are not part of a backup).
 #[tauri::command]
-pub fn project_backup_read(app: super::St<'_>, id: String, file: String) -> Result<Value, String> {
-    let dir = with_reg(&app.data_dir, |r| r.folder(&id)).ok_or("프로젝트 폴더가 없습니다")?;
-    let p = inside(&dir.join(BACKUPS), &file).ok_or("잘못된 파일")?;
-    Ok(read_doc(&p)?["project"].clone())
+pub async fn project_backup_read(app: super::St<'_>, handle: tauri::AppHandle, id: String, file: String) -> Result<Value, String> {
+    let app = app.inner().clone();
+    super::blocking(move || {
+        let (docs, home) = places(&handle);
+        let dir = {
+            let _one = SAVING.lock();
+            located(&app.data_dir, docs.as_deref(), &home, &id).0.ok_or("프로젝트 폴더가 없습니다")?
+        };
+        let p = inside(&dir.join(BACKUPS), &file).ok_or("잘못된 파일")?;
+        Ok(read_doc(&p)?["project"].clone())
+    })
+    .await
 }
 
 /// Gives every project in the app store its folder (first start of 2.18, or again from 설정).
@@ -1022,18 +1308,30 @@ pub fn migrate(store: &Path, data: &Path, docs: Option<&Path>, home: &Path, save
     json!({ "saved": saved, "skipped": skipped, "failed": failed })
 }
 
-/// Moves a deleted project's folder to the trash (the store copy has its own trash).
+/// Moves a deleted project's folder to the trash (the store copy has its own trash). Only a
+/// folder Reelcut made is moved; the project is let go of either way.
 #[tauri::command]
-pub fn project_trash(app: super::St<'_>, handle: tauri::AppHandle, id: String, time: String) -> Result<(), String> {
-    let (docs, home) = places(&handle);
-    let (dir, root) = with_reg(&app.data_dir, |r| (r.folder(&id), r.root(docs.as_deref(), &home)));
-    let Some(dir) = dir else { return Ok(()) };
-    let _one = SAVING.lock();
-    let to = trash_folder(&dir, &root, &time)?;
-    with_reg(&app.data_dir, |r| r.unbind(&id))?;
-    SYNCED.lock().get_or_insert_with(HashSet::new).remove(&id);
-    app.log("delete", &format!("project folder {} → {}", dir.display(), to.display()));
-    Ok(())
+pub async fn project_trash(app: super::St<'_>, handle: tauri::AppHandle, id: String, time: String) -> Result<(), String> {
+    let app = app.inner().clone();
+    super::blocking(move || {
+        let (docs, home) = places(&handle);
+        let _one = SAVING.lock();
+        let moved = with_reg(&app.data_dir, |r| {
+            let root = r.root(docs.as_deref(), &home);
+            let dir = r.folder(&id);
+            let moved = match dir {
+                Some(d) if is_project_folder(&d) && !root.starts_with(&d) && !in_trash(&d) => trash_folder(&d, &root, &time).map(|to| Some((d, to))),
+                _ => Ok(None),
+            };
+            r.unbind(&id).and(moved)
+        });
+        OWNED.lock().get_or_insert_with(HashMap::new).remove(&id);
+        if let Some((from, to)) = moved? {
+            app.log("delete", &format!("project folder {} → {}", from.display(), to.display()));
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// For 다른 이름으로 저장: the copy starts with the original's action log.
@@ -1047,12 +1345,12 @@ pub fn project_copy_logs(app: super::St<'_>, from: String, to: String) -> Result
     Ok(())
 }
 
-/// Called by `jsonl_append` after the app-data copy is written.
-pub fn mirror(data: &Path, kind: &str, name: &str, lines: &[String]) {
+/// Called by `jsonl_append` after the app-data copy is written: the same lines go into the folder
+/// the project's last save wrote, while that folder is there. Never makes the folder itself.
+pub fn mirror(_data: &Path, kind: &str, name: &str, lines: &[String]) {
     let id = name.split('.').next().unwrap_or(name);
-    let Some(dir) = with_reg(data, |r| r.file.folders.get(id).map(PathBuf::from)) else { return };
-    // Until the first save has filled the folder's logs, `sync_logs` copies them whole.
-    if !SYNCED.lock().as_ref().is_some_and(|s| s.contains(id)) {
+    let Some(dir) = OWNED.lock().as_ref().and_then(|m| m.get(id).cloned()) else { return };
+    if !dir.is_dir() {
         return;
     }
     if let Some(p) = mirror_path(&dir, kind, name) {
@@ -1300,7 +1598,7 @@ mod tests {
         // Claude Code transcripts the chats use are copied into the private folder.
         std::fs::create_dir_all(data.join("claude-archive/C--x")).unwrap();
         std::fs::write(data.join("claude-archive/C--x/abc-1.jsonl"), "t").unwrap();
-        copy_transcripts(&data, &dir, &p);
+        copy_transcripts(&data, &transcripts_dir(&data, &dir, "l1"), &p);
         assert!(dir.join("대화/비공개/claude-code/abc-1.jsonl").is_file());
         // Deleting moves the folder to the trash with a readable note.
         let to = trash_folder(&dir, &root.join("Docs/Reelcut"), "2026-11-05 1200").unwrap();
@@ -1330,5 +1628,195 @@ mod tests {
         let data = Path::new("/d");
         assert_eq!(img_dir(data, Path::new("/u/OneDrive/Reelcut/a"), "p"), PathBuf::from("/d/private/p/img"));
         assert_eq!(img_dir(data, Path::new("/u/Reelcut/a"), "p"), PathBuf::from("/u/Reelcut/a/대화/비공개/img"));
+    }
+
+    fn reg_folder(data: &Path, id: &str) -> Option<PathBuf> {
+        with_reg(data, |r| r.folder(id))
+    }
+
+    #[test]
+    fn a_lone_file_never_takes_the_folder_it_was_dropped_in() {
+        let root = tmp("lone");
+        let (data, docs, temp) = (root.join("data"), root.join("Docs"), root.join("tmp"));
+        let p = sample("lone1", "여행", Path::new("/x"));
+        let w = save_folder(&data, Some(&docs), &root, &p, "t").unwrap();
+        let dir = w.file.parent().unwrap().to_path_buf();
+        // The user drags 여행.reelcut onto the Desktop, next to their own files, and opens it there.
+        let desk = root.join("Desktop");
+        std::fs::create_dir_all(&desk).unwrap();
+        std::fs::write(desk.join("가족사진.jpg"), b"j").unwrap();
+        std::fs::rename(&w.file, desk.join("여행.reelcut")).unwrap();
+        let (v, _) = open_file(&data, Some(&docs), &root, &desk.join("여행.reelcut"), "2026-11-05 1200", &temp).unwrap();
+        assert_eq!((v["conflict"].as_bool(), v["project"]["name"].as_str()), (Some(false), Some("여행")));
+        assert_eq!(reg_folder(&data, "lone1"), Some(dir.clone()));
+        // Saves go on into the project's own folder; the Desktop is left as it was.
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t2").unwrap().file, w.file);
+        let mut names: Vec<String> = std::fs::read_dir(&desk).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["가족사진.jpg", "여행.reelcut"]);
+        // A whole project folder opened from the temporary folder (inside a zip): read, not taken.
+        let z = temp.join("zip").join("여행");
+        std::fs::create_dir_all(&z).unwrap();
+        std::fs::copy(&w.file, z.join("여행.reelcut")).unwrap();
+        std::fs::create_dir_all(z.join(CHATS)).unwrap();
+        let (v, _) = open_file(&data, Some(&docs), &root, &z.join("여행.reelcut"), "t", &temp).unwrap();
+        assert_eq!(v["conflict"].as_bool(), Some(false));
+        assert_eq!(reg_folder(&data, "lone1"), Some(dir));
+    }
+
+    #[test]
+    fn a_folder_taken_by_another_project_is_never_written_for_the_first() {
+        let root = tmp("stale");
+        let (data, docs) = (root.join("data"), root.join("Docs"));
+        let a = sample("stA", "새 프로젝트", Path::new("/x"));
+        let da = save_folder(&data, Some(&docs), &root, &a, "t").unwrap().file.parent().unwrap().to_path_buf();
+        // The user renames A's folder in Explorer, then makes B with the same default name.
+        let renamed = da.with_file_name("제주도");
+        std::fs::rename(&da, &renamed).unwrap();
+        let b = sample("stB", "새 프로젝트", Path::new("/x"));
+        let db = save_folder(&data, Some(&docs), &root, &b, "t").unwrap().file.parent().unwrap().to_path_buf();
+        assert_eq!(db.file_name().unwrap(), "새 프로젝트 (2)");
+        // A's next save finds its folder by its id and keeps the user's name for it.
+        let wa = save_folder(&data, Some(&docs), &root, &a, "t").unwrap();
+        assert_eq!(wa.file, renamed.join("제주도.reelcut"));
+        // Even a registration that points at B's folder is not used for A.
+        with_reg(&data, |r| {
+            r.file.folders.insert("stA".into(), db.to_string_lossy().into_owned());
+            r.store()
+        })
+        .unwrap();
+        assert_eq!(reg_folder(&data, "stA"), None);
+        assert_eq!(save_folder(&data, Some(&docs), &root, &a, "t").unwrap().file, renamed.join("제주도.reelcut"));
+        assert_eq!((folder_id(&db).as_deref(), folder_id(&renamed).as_deref()), (Some("stB"), Some("stA")));
+    }
+
+    #[test]
+    fn a_renamed_or_moved_folder_is_followed_not_made_again() {
+        let root = tmp("moved");
+        let (data, docs, temp) = (root.join("data"), root.join("Docs"), root.join("tmp"));
+        let mut p = sample("mvA", "여행", Path::new("/x"));
+        let dir = save_folder(&data, Some(&docs), &root, &p, "t").unwrap().file.parent().unwrap().to_path_buf();
+        // Renamed in Explorer while the app is open: a log line does not make a new 여행 folder…
+        let renamed = dir.with_file_name("여행 최종");
+        std::fs::rename(&dir, &renamed).unwrap();
+        mirror(&data, "actions", "mvA", &["{\"seq\":2}".into()]);
+        assert!(!dir.exists());
+        // …and the next save finds it and leaves the user's name.
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t").unwrap().file, renamed.join("여행 최종.reelcut"));
+        assert!(!dir.exists());
+        // Renaming the project in the app still renames its folder.
+        p["name"] = json!("제주");
+        let named = save_folder(&data, Some(&docs), &root, &p, "t").unwrap().file.parent().unwrap().to_path_buf();
+        assert_eq!(named.file_name().unwrap(), "제주");
+        // Moved next to the footage elsewhere: a save makes a new folder; opening the moved one makes
+        // it the project's folder again, and the one made meanwhile goes to the trash.
+        let away = root.join("D").join("영상").join("제주");
+        std::fs::create_dir_all(away.parent().unwrap()).unwrap();
+        std::fs::rename(&named, &away).unwrap();
+        let made = save_folder(&data, Some(&docs), &root, &p, "t").unwrap().file.parent().unwrap().to_path_buf();
+        assert_eq!(made, named);
+        let (v, _) = open_file(&data, Some(&docs), &root, &away.join("제주.reelcut"), "2026-11-05 1300", &temp).unwrap();
+        assert_eq!(v["conflict"].as_bool(), Some(false));
+        assert!(!made.exists() && docs.join("Reelcut/_휴지통/제주 (2026-11-05 1300)").is_dir());
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t").unwrap().file, away.join("제주.reelcut"));
+        // A real copy of the folder still opens as a copy.
+        let copy = root.join("USB").join("제주");
+        std::fs::create_dir_all(copy.join(CHATS)).unwrap();
+        std::fs::copy(away.join("제주.reelcut"), copy.join("제주.reelcut")).unwrap();
+        let (v, _) = open_file(&data, Some(&docs), &root, &copy.join("제주.reelcut"), "t", &temp).unwrap();
+        assert_eq!(v["conflict"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn a_deleted_projects_folder_comes_back_with_its_backups() {
+        let root = tmp("trash");
+        let (data, docs, temp) = (root.join("data"), root.join("Docs"), root.join("tmp"));
+        let r = docs.join("Reelcut");
+        let p = sample("dlA", "가족", Path::new("/x"));
+        let w = save_folder(&data, Some(&docs), &root, &p, "t").unwrap();
+        let dir = w.file.parent().unwrap().to_path_buf();
+        backup(&dir, &w.file, "수동", "2026-11-05 1000").unwrap().unwrap();
+        // Deleted from Home: the folder goes to _휴지통 and the project lets go of it.
+        let to = trash_folder(&dir, &r, "2026-11-05 1100").unwrap();
+        with_reg(&data, |g| g.unbind("dlA")).unwrap();
+        // Brought back from Home's 휴지통: the next save brings the folder, and its backups, back.
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t").unwrap().file, w.file);
+        assert!(!to.exists());
+        assert_eq!(list_backups(&dir).len(), 1);
+        // Deleted again, then opened from _휴지통 by a double click: back as well.
+        let to = trash_folder(&dir, &r, "2026-11-05 1200").unwrap();
+        with_reg(&data, |g| g.unbind("dlA")).unwrap();
+        let (v, _) = open_file(&data, Some(&docs), &root, &to.join("가족.reelcut"), "t", &temp).unwrap();
+        assert_eq!((v["conflict"].as_bool(), v["folder"].as_str()), (Some(false), Some(&*dir.to_string_lossy())));
+        assert!(w.file.is_file() && !to.exists());
+        assert!(std::fs::read_to_string(r.join("_휴지통/삭제 기록.txt")).unwrap().contains("되살림"));
+    }
+
+    #[test]
+    fn a_backup_opened_from_explorer_opens_its_project() {
+        let root = tmp("bkopen");
+        let (data, docs, temp) = (root.join("data"), root.join("Docs"), root.join("tmp"));
+        let w = save_folder(&data, Some(&docs), &root, &sample("bkA", "여행", Path::new("/x")), "t").unwrap();
+        let dir = w.file.parent().unwrap().to_path_buf();
+        let b = backup(&dir, &w.file, "수동", "2026-11-05 1000").unwrap().unwrap();
+        let (v, _) = open_file(&data, Some(&docs), &root, &dir.join(BACKUPS).join(&b), "t", &temp).unwrap();
+        assert_eq!((v["backup"].as_str(), v["conflict"].as_bool()), (Some(b.as_str()), Some(false)));
+        // Its conversations come from the project folder, not from 백업.
+        assert_eq!(v["project"]["chats"][0]["messages"].as_array().map(Vec::len), Some(3));
+        assert!(v["warnings"].as_array().is_some_and(Vec::is_empty));
+    }
+
+    #[test]
+    fn no_picture_reaches_a_synced_folder_or_the_project_file() {
+        let d = Path::new("/d");
+        assert_eq!(transcripts_dir(d, Path::new("/u/OneDrive/Reelcut/a"), "p"), PathBuf::from("/d/private/p/claude-code"));
+        assert_eq!(transcripts_dir(d, Path::new("/u/Reelcut/a"), "p"), PathBuf::from("/u/Reelcut/a/대화/비공개/claude-code"));
+        // A project last saved before 2.3 keeps its one conversation in `chat`, pictures and all.
+        let root = tmp("legacy");
+        let mut p = sample("lgA", "옛 프로젝트", Path::new("/x"));
+        p["chat"] = json!([{ "role": "user", "content": [{ "type": "tool_result", "content": [{ "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": PNG } }] }] }]);
+        let dir = root.join("R").join("옛 프로젝트");
+        std::fs::create_dir_all(&dir).unwrap();
+        let w = write_folder(&dir, &img_dir(&root, &dir, "lgA"), &p, "v", "t", &mut Written::new()).unwrap();
+        assert!(!std::fs::read_to_string(&w.file).unwrap().contains(PNG));
+        assert_eq!(read_folder(&w.file, &root).unwrap().project, p);
+        // Transcripts the chats used before a compaction are copied too.
+        let data = root.join("data");
+        std::fs::create_dir_all(data.join("claude-archive/C--x")).unwrap();
+        std::fs::write(data.join("claude-archive/C--x/old-1.jsonl"), "o").unwrap();
+        let mut q = p.clone();
+        q["chats"][0]["ccPast"] = json!(["old-1"]);
+        let to = transcripts_dir(&data, &dir, "lgA");
+        copy_transcripts(&data, &to, &q);
+        assert!(to.join("old-1.jsonl").is_file());
+    }
+
+    #[test]
+    fn a_backup_is_dated_when_it_is_made() {
+        let root = tmp("btime");
+        let f = root.join("p.reelcut");
+        std::fs::write(&f, "{}").unwrap();
+        std::fs::File::options().write(true).open(&f).unwrap().set_modified(SystemTime::now() - Duration::from_secs(40 * 86_400)).unwrap();
+        backup(&root, &f, "열기", "2026-11-05 1000").unwrap().unwrap();
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
+        assert!(now - list_backups(&root)[0].time < 60_000);
+    }
+
+    #[test]
+    fn writes_at_the_same_moment_never_mix() {
+        let root = tmp("race");
+        let f = root.join("project-x.json");
+        let hs: Vec<_> = (0..4u8)
+            .map(|i| {
+                let f = f.clone();
+                std::thread::spawn(move || (0..8).map(|_| write_atomic(&f, &vec![b'a' + i; 1 << 20])).collect::<Vec<_>>())
+            })
+            .collect();
+        for h in hs {
+            assert!(h.join().unwrap().iter().all(Result::is_ok));
+        }
+        let b = std::fs::read(&f).unwrap();
+        assert!(b.len() == 1 << 20 && b.iter().all(|x| *x == b[0]));
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "no temporary file is left");
     }
 }

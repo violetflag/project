@@ -259,6 +259,9 @@ export type ChatSession = {
   context?: ChatMsg[];
   /** Claude Code conversation id ("Claude 계정" mode), resumed on the next message. */
   ccSession?: string;
+  /** Claude Code conversations this chat used before (until a compaction or a lost session), so
+   *  대화 복구 knows they are not orphans and the project folder keeps their transcripts. */
+  ccPast?: string[];
   /** Summary + recent turns to open a fresh Claude Code conversation with (after a compaction). */
   seed?: string;
   /** Choices the AI has put to the user in this conversation. */

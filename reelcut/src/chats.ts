@@ -127,4 +127,22 @@ export function seedText(summary: string, messages: ChatMsg[], budget: number): 
   return recent ? `${head}\n\n<recent-turns>\n${recent}\n</recent-turns>` : head;
 }
 
+/** A chat that leaves its Claude Code conversation (`ccSession` cleared or replaced): the old one is remembered. */
+export function retire(c: ChatSession, ...ids: (string | null | undefined)[]): string[] | undefined {
+  const add = ids.filter((x): x is string => !!x && !(c.ccPast ?? []).includes(x));
+  return add.length ? [...(c.ccPast ?? []), ...add] : c.ccPast;
+}
+
+/**
+ * A copy of a chat for another project (다른 이름으로 저장, a copied folder): without its Claude
+ * Code conversation, which stays the original's, but carrying what was said, so the AI of the copy
+ * starts from it.
+ */
+export function copyChat(c: ChatSession): ChatSession {
+  const recent = recentWithin(c.messages, 60_000);
+  // A summary waiting for the next fresh conversation already holds the history.
+  const seed = !c.ccSession && c.seed ? c.seed : recent ? `<이전 대화>\n${recent}\n</이전 대화>` : undefined;
+  return { ...structuredClone(c), ccSession: undefined, ccPast: undefined, seed };
+}
+
 export const fmtK = (n: number) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));

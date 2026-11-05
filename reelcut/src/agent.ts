@@ -17,7 +17,7 @@ import { aiExportSound, exportAndWait } from "./exporter";
 import { CAPTION_PRESETS, TEXT_KINDS } from "./graphics";
 import { applyVerdicts, badSpans, capView, cleanKeys, closeShortPieces, easePitch, frameGroup, frameSubject, lookSummary, normView, percentOk, sampleKeys, saneMarks, snapRanges, subjectLooks, thinMarks, type Mark, type Subject, type SubjectLook } from "./framing";
 import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSkillName, cleanSummary, findSkill, isChain, laterStepOf, looksForPeople, mergeSkills, NOT_IN_BATCH, panoramaTimes, parseSkillCommand, rangeFromText, runChainSteps, skillCatalog, stepLabel, upsertSkill, type Step, type StepResult } from "./skills";
-import { compactBudget, ctxLimit, estTokens, fmtK, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
+import { compactBudget, ctxLimit, estTokens, fmtK, needsCompaction, newSession, recentWithin, retire, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
 import { activeChat, asset, assetMap, editDraft, saveSkills, syncAssets, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves, backupProject } from "./store";
 import SDK_TYPES from "../sdk/reelcut.d.ts?raw";
 import { LEVEL_VIEW_RULE, PEOPLE_360_RULE } from "./playbook";
@@ -1477,8 +1477,13 @@ export async function compactIfNeeded(sid: string, mode: "account" | "api", forc
   if (c.messages.length - since < 2) return;
   set({ agentStatus: "대화가 길어 요약하는 중…" });
   let summary = "";
+  let summarySession: string | null = null;
   try {
-    summary = mode === "account" ? await summariseAccount(c) : await summariseApi(c);
+    if (mode === "account") {
+      const r = await summariseAccount(c);
+      summary = r.text;
+      summarySession = r.session;
+    } else summary = await summariseApi(c);
   } catch (e) {
     toast(`대화 요약에 실패해서 그대로 이어 갑니다: ${String((e as Error)?.message ?? e).slice(0, 120)}`);
     return;
@@ -1495,7 +1500,7 @@ export async function compactIfNeeded(sid: string, mode: "account" | "api", forc
       context: [{ role: "user", content: [{ type: "text", text: seed }] }, { role: "assistant", content: [{ type: "text", text: "요약과 최근 대화를 이어받았습니다. 계속하겠습니다." }] }],
     }), sid);
   } else {
-    mutateChat((x) => ({ ...x, ctxTokens: to, marks: [...(x.marks ?? []), mark], ccSession: undefined, seed, skillsSent: [] }), sid);
+    mutateChat((x) => ({ ...x, ctxTokens: to, marks: [...(x.marks ?? []), mark], ccSession: undefined, ccPast: retire(x, x.ccSession, summarySession), seed, skillsSent: [] }), sid);
   }
   set({ agentStatus: "생각하는 중…" });
 }
@@ -1514,10 +1519,11 @@ async function summariseApi(c: ChatSession): Promise<string> {
 }
 
 /** One Claude Code turn whose reply is collected (not shown): the summary request. */
-async function summariseAccount(c: ChatSession): Promise<string> {
+async function summariseAccount(c: ChatSession): Promise<{ text: string; session: string | null }> {
   const s = st.settings;
   const offs: (() => void)[] = [];
   let text = "";
+  let session: string | null = null;
   let resolve!: (v: { ok: boolean; err: string }) => void;
   const done = new Promise<{ ok: boolean; err: string }>((r) => { resolve = r; });
   ccRunning = true;
@@ -1525,6 +1531,7 @@ async function summariseAccount(c: ChatSession): Promise<string> {
     offs.push(await onEvent("cc", (e) => {
       if (e.kind === "exit") { resolve({ ok: e.ok, err: e.err }); return; }
       const v = e.data ?? {};
+      if (v.session_id) session = v.session_id;
       if (v.parent_tool_use_id) return;
       if (v.type === "assistant") text += (v.message?.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
     }));
@@ -1534,7 +1541,7 @@ async function summariseAccount(c: ChatSession): Promise<string> {
     await api.ccRun({ model: c.model ?? s.model, effort: "low", system: sysCc(), prompt, session: c.ccSession ?? null, tools: TOOLS });
     const end = await done;
     if (!text.trim() && !end.ok) throw new Error(end.err.slice(-200) || "요약을 받지 못했습니다");
-    return text;
+    return { text, session };
   } finally {
     ccRunning = false;
     offs.forEach((f) => f());
@@ -1613,7 +1620,7 @@ async function askAccount(sid: string, text: string) {
         if (e.kind === "exit") { archive(pid, sid, { kind: "cc_exit", ok: e.ok, err: e.err }); resolve({ ok: e.ok, err: e.err }); return; }
         const v = e.data ?? {};
         archive(pid, sid, { kind: "cc", event: v });
-        if (v.session_id && chatById(sid)?.ccSession !== v.session_id) mutateChat((x) => ({ ...x, ccSession: v.session_id, seed: undefined }), sid);
+        if (v.session_id && chatById(sid)?.ccSession !== v.session_id) mutateChat((x) => ({ ...x, ccSession: v.session_id, ccPast: retire(x, x.ccSession), seed: undefined }), sid);
         if (v.parent_tool_use_id) return;
         if (v.type === "assistant") {
           const n = usageTokens(v.message?.usage);
@@ -1654,7 +1661,7 @@ async function askAccount(sid: string, text: string) {
     if (resultErr) throw new Error(loginHint(resultErr) || `Claude 오류: ${resultErr.slice(0, 300)}`);
     if (!end.ok && !gotResult) {
       // A conversation that can no longer be resumed: start fresh next time.
-      if (/No conversation found|session/i.test(end.err)) mutateChat((x) => ({ ...x, ccSession: undefined }), sid);
+      if (/No conversation found|session/i.test(end.err)) mutateChat((x) => ({ ...x, ccSession: undefined, ccPast: retire(x, x.ccSession) }), sid);
       throw new Error(loginHint(end.err) || `Claude Code가 멈췄습니다: ${end.err.slice(-300) || "알 수 없는 오류"}`);
     }
   } finally {

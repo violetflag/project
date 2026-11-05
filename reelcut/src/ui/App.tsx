@@ -2,7 +2,7 @@ import { Film, Home as HomeIcon, Minus, Settings as Gear, Square, X } from "luci
 import { useEffect } from "preact/hooks";
 import { api, beforeClose, onFileDrop, onOpenFiles, windowCmd } from "../api";
 import { flush, flushArchive } from "../actionlog";
-import { openPaths, startProjectFiles } from "../project";
+import { queueOpen, startProjectFiles, takeHanded } from "../project";
 import { BackupsDialog, RelinkDialog, SaveAsDialog } from "./ProjectDialogs";
 import { handleKey } from "../commands";
 import { initJobs, loadProjects, loadPrompts, loadSettings, loadSkills, refreshModels, refreshCc, refreshQwen, saveNow, set, st, useStore } from "../store";
@@ -22,6 +22,8 @@ let booted = false;
 async function boot() {
   if (booted) return;
   booted = true;
+  // First of all: files a later start hands over wait in the app until the window is ready below.
+  onOpenFiles(() => { void takeHanded(); });
   await initJobs();
   await loadSettings();
   applyKeymap(st.settings.keys);
@@ -32,12 +34,12 @@ async function boot() {
   refreshQwen(false);
   refreshCc();
   api.appInfo().then((info) => set({ info })).catch(() => {});
-  // A .reelcut opens its project; videos are imported (into a new project when none is open).
-  onFileDrop(openPaths);
-  // Opened with files (double-click on a .reelcut, .osv or .lrf), or handed over by a second start.
+  // A .reelcut (or a project folder) opens its project; videos are imported (into a new project when none is open).
+  onFileDrop((paths) => { void queueOpen(paths); });
+  // Opened with files (double-click on a .reelcut, .osv or .lrf), then those later starts handed over meanwhile.
   const files = await api.initialFiles().catch(() => [] as string[]);
-  if (files.length) await openPaths(files);
-  onOpenFiles(openPaths);
+  if (files.length) await queueOpen(files);
+  await takeHanded(true);
   // Every project gets its folder in Documents\Reelcut (once), and the hourly backup starts.
   void startProjectFiles();
   // Closing (X, Alt+F4, the taskbar) waits for the last save and log lines.

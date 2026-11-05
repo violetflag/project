@@ -2,8 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../src/api";
 import { newDraft } from "../src/edit";
-import { hourlyTick, HOURLY_MS, isProjectFile, openPaths, openProjectFile, recoverConversations, recoverGroup, relinkFrom, restoreBackup, saveProjectAs } from "../src/project";
-import { canUndo, checkMissing, localIso, localStamp, mutate, SAVE_DEBOUNCE, SAVE_MAX, set, st, undo } from "../src/store";
+import { hourlyTick, HOURLY_MS, isProjectFile, openPaths, openProjectFile, queueOpen, recoverConversations, recoverGroup, relinkFrom, restoreBackup, saveProjectAs, takeHanded } from "../src/project";
+import { canUndo, checkMissing, deleteProject, localIso, localStamp, mutate, SAVE_DEBOUNCE, SAVE_MAX, saveNow, set, st, undo } from "../src/store";
+import { COMMANDS } from "../src/commands";
+import { copyChat, retire } from "../src/chats";
 import type { Project } from "../src/types";
 
 /** The app store and the folders, in memory. */
@@ -20,6 +22,9 @@ function fakeBackend() {
   vi.spyOn(api, "projectInfo").mockImplementation(async () => null);
   vi.spyOn(api, "projectBackup").mockImplementation(async (id, reason) => { backups.push({ id, reason }); return `2026-11-05 1000 ${reason}.reelcut`; });
   vi.spyOn(api, "projectCopyLogs").mockImplementation(async () => {});
+  vi.spyOn(api, "storeDelete").mockImplementation(async (n) => { store.delete(n); });
+  vi.spyOn(api, "projectTrash").mockImplementation(async () => {});
+  vi.spyOn(api, "projectFileIn").mockImplementation(async () => null);
 }
 
 const proj = (id: string, extra: Partial<Project> = {}): Project => {
@@ -91,7 +96,7 @@ describe("opening a .reelcut", () => {
   it("is chosen over media among dropped files", async () => {
     const open = vi.spyOn(api, "projectOpen").mockResolvedValue({ project: proj("p4"), folder: "C:/R/여행", from: "file", warnings: [], conflict: false });
     await openPaths(["C:/v/a.mp4", "C:/R/여행/여행.REELCUT"]);
-    expect(open).toHaveBeenCalledWith("C:/R/여행/여행.REELCUT");
+    expect(open).toHaveBeenCalledWith("C:/R/여행/여행.REELCUT", expect.stringMatching(/^\d{4}-\d\d-\d\d \d{4}$/));
     expect(isProjectFile("a.osv")).toBe(false);
   });
 });
@@ -171,5 +176,108 @@ describe("moved footage", () => {
     expect([a.info.path, a.info.lrf]).toEqual(["F:/옮김/CAM_1.OSV", "F:/옮김/CAM_1.LRF"]);
     expect(st.missing).toEqual([]);
     expect(JSON.parse(saves[saves.length - 1].json).assets[0].info.path).toBe("F:/옮김/CAM_1.OSV");
+  });
+});
+
+describe("saving", () => {
+  it("runs one save at a time and the last one carries the newest state", async () => {
+    set({ project: proj("s1"), draftId: "d1" });
+    let running = 0, most = 0;
+    const gates: (() => void)[] = [];
+    vi.spyOn(api, "projectSave").mockImplementation(async (id, json) => {
+      running++;
+      most = Math.max(most, running);
+      await new Promise<void>((r) => gates.push(r));
+      running--;
+      saves.push({ id, json });
+      return { file: "C:/R/여행/여행.reelcut" };
+    });
+    const a = saveNow();
+    mutate((p) => ({ ...p, name: "둘째" }));
+    const b = saveNow();
+    mutate((p) => ({ ...p, name: "셋째" }));
+    const c = saveNow();
+    expect(b).toBe(c);
+    await vi.waitFor(() => expect(gates.length).toBe(1));
+    gates.shift()!();
+    await a;
+    await vi.waitFor(() => expect(gates.length).toBe(1));
+    gates.shift()!();
+    await c;
+    expect(most).toBe(1);
+    expect(saves.map((x) => JSON.parse(x.json).name)).toEqual(["여행", "셋째"]);
+  });
+
+  it("never brings back a project deleted from Home while it was the last one open", async () => {
+    set({ project: proj("s2"), draftId: "d1", route: "home" });
+    await saveNow();
+    await deleteProject("s2");
+    expect(st.project).toBeNull();
+    expect(store.has("project-s2")).toBe(false);
+    await saveNow();
+    expect(store.has("project-s2")).toBe(false);
+    expect(st.projects.some((m) => m.id === "s2")).toBe(false);
+  });
+
+  it("says so on Ctrl+S when the folder could not be written", async () => {
+    set({ project: proj("s3"), draftId: "d1", route: "project", projectFile: "C:/R/여행/여행.reelcut" });
+    vi.spyOn(api, "projectSave").mockResolvedValue({ error: "C:/R/여행: 액세스가 거부되었습니다" });
+    await COMMANDS.find((c) => c.id === "save")!.run();
+    expect(st.toast).toContain("프로젝트 폴더에는 저장하지 못했습니다");
+    expect(st.projectFile).toBe("");
+  });
+});
+
+describe("opening from Explorer", () => {
+  it("opens a dropped project folder instead of making an empty project", async () => {
+    vi.spyOn(api, "projectFileIn").mockResolvedValue("C:/R/여행/여행.reelcut");
+    const open = vi.spyOn(api, "projectOpen").mockResolvedValue({ project: proj("o1"), folder: "C:/R/여행", from: "file", warnings: [], conflict: false });
+    await openPaths(["C:/R/여행"]);
+    expect(open).toHaveBeenCalledWith("C:/R/여행/여행.reelcut", expect.any(String));
+    expect(st.project?.id).toBe("o1");
+  });
+
+  it("opens a backup file's project with that backup picked", async () => {
+    vi.spyOn(api, "projectOpen").mockResolvedValue({ project: proj("o2"), folder: "C:/R/여행", from: "file", warnings: [], conflict: false, backup: "2026-11-05 0900 수동.reelcut" });
+    await openProjectFile("C:/R/여행/백업/2026-11-05 0900 수동.reelcut");
+    expect(st.project?.id).toBe("o2");
+    expect([st.dialog, st.backupPick]).toEqual(["backups", "2026-11-05 0900 수동.reelcut"]);
+  });
+
+  it("keeps files handed over while starting, and opens them in order once ready", async () => {
+    const handed = [["C:/v/1.osv"], ["C:/v/2.osv"]];
+    vi.spyOn(api, "takeOpenFiles").mockImplementation(async () => handed.shift() ?? []);
+    const order: string[] = [];
+    vi.spyOn(api, "projectFileIn").mockImplementation(async (ps) => { order.push(ps[0]); return null; });
+    set({ project: proj("o3"), draftId: "d1" });
+    vi.spyOn(await import("../src/store"), "importPaths").mockImplementation(async () => {});
+    await takeHanded();
+    expect(order).toEqual([]);
+    await takeHanded(true);
+    await takeHanded();
+    await queueOpen(["C:/v/3.osv"]);
+    expect(order).toEqual(["C:/v/1.osv", "C:/v/2.osv", "C:/v/3.osv"]);
+  });
+});
+
+describe("copies of a project", () => {
+  it("carry the conversation for the AI, without the original's Claude Code session", () => {
+    const c = { id: "s1", title: "대화", created: 1, updated: 2, messages: [{ role: "user" as const, content: "둘 다 나오게 해 줘" }, { role: "assistant" as const, content: "네, 둘 다 넣었습니다" }], ccSession: "cc-1", ccPast: ["cc-0"] };
+    const k = copyChat(c);
+    expect([k.ccSession, k.ccPast]).toEqual([undefined, undefined]);
+    expect(k.seed).toContain("둘 다 나오게 해 줘");
+    expect(k.messages).toEqual(c.messages);
+    // A summary waiting for the next fresh conversation is kept as it is.
+    expect(copyChat({ ...c, ccSession: undefined, seed: "<compacted-summary>요약</compacted-summary>" }).seed).toBe("<compacted-summary>요약</compacted-summary>");
+    expect(retire(c, "cc-1", null, "cc-0")).toEqual(["cc-0", "cc-1"]);
+  });
+
+  it("restoring a backup keeps every media folder in use", async () => {
+    const now = proj("c1", { folders: ["인물"], assets: [{ id: "x", folder: "인물", tState: "idle", added: 0, info: { path: "C:/v/x.mp4" } as any }] });
+    set({ project: now, draftId: "d1" });
+    vi.spyOn(api, "projectBackupRead").mockResolvedValue(proj("c1", { folders: ["풍경"], chats: [] }));
+    expect(await restoreBackup("2026-11-05 0900 AI 작업 전.reelcut")).toBe(true);
+    expect(st.project?.folders).toEqual(["인물", "풍경"]);
+    expect(st.project?.assets.find((a) => a.id === "x")?.folder).toBe("인물");
   });
 });

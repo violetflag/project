@@ -1,9 +1,9 @@
 // 파일 > 다른 이름으로 저장 and 파일 > 백업에서 되살리기 (2.18 project files).
 import { Archive, FolderOpen, FolderSearch, MessagesSquare, RotateCcw } from "lucide-preact";
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { api, pickFiles, pickFolder, type FoundChat, type ProjectBackup } from "../api";
 import { backupNow, recoverConversations, recoverGroup, relinkAssets, relinkFrom, restoreBackup, revealProjectFolder, saveProjectAs } from "../project";
-import { st, toast, useStore } from "../store";
+import { set, st, toast, useStore } from "../store";
 import { Modal } from "./Modal";
 
 export function SaveAsDialog({ onClose }: { onClose: () => void }) {
@@ -44,7 +44,10 @@ const REASON_TIP: Record<string, string> = {
 export function BackupsDialog({ onClose }: { onClose: () => void }) {
   useStore();
   const [list, setList] = useState<ProjectBackup[] | null>(null);
-  const [pick, setPick] = useState<string | null>(null);
+  // A backup file opened from Explorer starts picked (and is scrolled to once).
+  const [pick, setPick] = useState<string | null>(st.backupPick || null);
+  const shown = useRef(!st.backupPick);
+  useEffect(() => { set({ backupPick: "" }); }, []);
   const load = () => { const id = st.project?.id; if (id) api.projectBackups(id).then(setList).catch(() => setList([])); };
   useEffect(load, []);
   return (
@@ -61,7 +64,7 @@ export function BackupsDialog({ onClose }: { onClose: () => void }) {
       {list?.length === 0 && <p class="muted">아직 백업이 없습니다. 프로젝트를 열 때, AI에게 요청할 때, 작업 중 한 시간마다 자동으로 만들어집니다.</p>}
       <div class="backup-list" role="listbox" aria-label="백업">
         {list?.map((b) => (
-          <button role="option" aria-selected={pick === b.file} class={`backup-row ${pick === b.file ? "on" : ""}`} onClick={() => setPick(b.file)} onDblClick={async () => { if (await restoreBackup(b.file)) onClose(); }} title={b.file}>
+          <button role="option" aria-selected={pick === b.file} class={`backup-row ${pick === b.file ? "on" : ""}`} ref={(el) => { if (el && pick === b.file && !shown.current) { shown.current = true; el.scrollIntoView({ block: "nearest" }); } }} onClick={() => setPick(b.file)} onDblClick={async () => { if (await restoreBackup(b.file)) onClose(); }} title={b.file}>
             <span class="b-when">{when(b.time)}</span>
             <span class="b-why" title={REASON_TIP[b.reason] ?? ""}>{b.reason || "백업"}</span>
             <span class="muted b-size">{size(b.size)}</span>
@@ -74,10 +77,18 @@ export function BackupsDialog({ onClose }: { onClose: () => void }) {
 
 /** 홈 > 대화 복구: AI conversations whose project was deleted, made readable again. */
 export function RecoverDialog({ onClose }: { onClose: () => void }) {
+  const s = useStore();
   const [found, setFound] = useState<FoundChat[] | null>(null);
   const [off, setOff] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
-  useEffect(() => { api.recoverScan().then(setFound).catch((e) => { setFound([]); toast(String(e)); }); }, []);
+  const scan = () => api.recoverScan().then((f) => {
+    // A conversation naming a project that still exists is most likely that project's older talk:
+    // listed, but not picked.
+    const live = new Set(s.projects.map((p) => p.name));
+    setOff(new Set(f.filter((x) => x.project && live.has(x.project)).map((x) => x.session)));
+    setFound(f);
+  }).catch((e) => { setFound([]); toast(String(e)); });
+  useEffect(() => { void scan(); }, []);
   const groups = new Map<string, FoundChat[]>();
   for (const f of found ?? []) groups.set(recoverGroup(f), [...(groups.get(recoverGroup(f)) ?? []), f]);
   const chosen = (found ?? []).filter((f) => !off.has(f.session));
@@ -88,7 +99,13 @@ export function RecoverDialog({ onClose }: { onClose: () => void }) {
       const n = await recoverConversations(chosen);
       toast(`대화 ${chosen.length}개를 프로젝트 ${n}개로 되살렸습니다`);
       onClose();
-    } catch (e) { toast(`되살리지 못했습니다: ${String(e)}`); setBusy(false); }
+    } catch (e) {
+      // Some groups may have been made already: list again, so none is made twice.
+      toast(`되살리지 못했습니다: ${String(e)}`);
+      setFound(null);
+      await scan();
+      setBusy(false);
+    }
   };
   return (
     <Modal title="대화 복구" wide onClose={onClose}
@@ -96,6 +113,7 @@ export function RecoverDialog({ onClose }: { onClose: () => void }) {
       <p class="muted">프로젝트를 지워도 AI(Claude 계정)와 나눈 대화는 이 PC에 남아 있습니다. 어느 프로젝트에도 연결되지 않은 대화를 찾아, 대화에 적힌 프로젝트 이름별로 새 프로젝트에 넣습니다. 미디어와 편집본은 대화에 없어서 빈 편집본으로 시작합니다. 원래 파일은 그대로 둡니다.</p>
       {found === null && <p class="muted">찾는 중…</p>}
       {found?.length === 0 && <p class="muted">되살릴 대화가 없습니다. 모든 대화가 프로젝트에 연결되어 있습니다.</p>}
+      {!!found?.some((f) => f.project && s.projects.some((p) => p.name === f.project)) && <p class="muted">지금 있는 프로젝트 이름이 적힌 대화는 그 프로젝트의 예전 대화일 수 있어서 처음에는 고르지 않았습니다.</p>}
       <div class="backup-list">
         {[...groups].map(([name, fs]) => (
           <div class="recover-group">

@@ -62,6 +62,8 @@ type S = {
   /** Media of the open project whose file is not where it was (moved or on a drive not plugged in). */
   missing: string[];
   dialog: "" | "shortcuts" | "export" | "newProject" | "pasteAttrs" | "saveAs" | "backups" | "relink";
+  /** The backup the backups dialog starts on (a backup file opened from Explorer). */
+  backupPick: string;
   showSafe: boolean;
   /** Timeline shows where silence removal would cut. */
   showSilence: boolean;
@@ -81,7 +83,7 @@ export const st: S = {
   route: "home", projects: [], project: null, draftId: null, sourceId: null, folder: "", playhead: 0, selClip: null,
   settings: { ...DEFAULT_SETTINGS }, info: null, models: [], qwen: null, cc: null, ccConnect: null, qwenSetup: null, downloads: {}, exportJob: null, brokenProjects: [], toast: "",
   agentBusy: false, agentStatus: "", rightTab: "inspect", leftTab: "media",
-  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, projectFile: "", missing: [], dialog: "", showSafe: false, showSilence: false, motion: {}, scans: {}, motionRev: 0, prompts: [], skills: [],
+  selItem: null, tool: "select", snap: true, workspace: "edit", trRanges: [], exportQueue: [], aiRuns: [], savedAt: 0, projectFile: "", missing: [], dialog: "", backupPick: "", showSafe: false, showSilence: false, motion: {}, scans: {}, motionRev: 0, prompts: [], skills: [],
 };
 
 const subs = new Set<() => void>();
@@ -138,18 +140,37 @@ export function localIso(d = new Date()): string {
 /** What is saved: no running-job flags. */
 export const cleanProject = (p: Project): Project => ({ ...p, assets: p.assets.map((a) => ({ ...a, stitching: false, tState: a.tState === "running" ? "idle" : a.tState })) });
 let folderError = "";
-/** Saves to the app store and to the project's folder (Documents\Reelcut\<이름>). */
-export async function saveNow() {
+export type SaveResult = { file?: string; folder?: string; error?: string } | null;
+let inFlight: Promise<SaveResult> | null = null;
+let queued: Promise<SaveResult> | null = null;
+/** Projects deleted in this run: a late save never brings one back. */
+const deletedIds = new Set<string>();
+/**
+ * Saves to the app store and to the project's folder (Documents\Reelcut\<이름>). One save at a
+ * time: asked for while one runs, one more follows it with the state as it is then, so an older
+ * state never lands after a newer one.
+ */
+export function saveNow(): Promise<SaveResult> {
   clearTimeout(saveT);
   firstUnsaved = 0;
+  if (!inFlight) {
+    inFlight = saveOnce().finally(() => { inFlight = null; });
+    return inFlight;
+  }
+  queued ??= inFlight.catch(() => null).then(() => { queued = null; return saveNow(); });
+  return queued;
+}
+async function saveOnce(): Promise<SaveResult> {
   const p = st.project;
-  if (!p) return;
+  if (!p || deletedIds.has(p.id)) return null;
   const r = await api.projectSave(p.id, JSON.stringify(cleanProject(p)), localIso());
   // The store copy is saved even when the folder cannot be written; say so once per problem.
   if (r?.error && r.error !== folderError) toast(`프로젝트 폴더에 저장하지 못했습니다 (앱 안에는 저장됨): ${r.error}`);
   folderError = r?.error ?? "";
   const meta = metaOf(p);
-  set({ projects: [meta, ...st.projects.filter((m) => m.id !== p.id)].sort((a, b) => b.updated - a.updated), savedAt: Date.now(), projectFile: r?.file ?? st.projectFile });
+  set({ projects: [meta, ...st.projects.filter((m) => m.id !== p.id)].sort((a, b) => b.updated - a.updated) });
+  if (st.project?.id === p.id) set({ savedAt: Date.now(), projectFile: r?.error ? "" : r?.file ?? st.projectFile });
+  return r ?? null;
 }
 /** Which media files are not where the project expects them; `ask` opens the relink dialog. */
 export async function checkMissing(ask = false): Promise<string[]> {
@@ -210,7 +231,7 @@ export async function createProject(name: string, aspect = "16:9", fps = 30): Pr
   const d = newDraft("첫 편집본", aspect, fps);
   const c = newSession();
   const p: Project = { id: uid(), name: name || "새 프로젝트", created: now, updated: now, assets: [], folders: [], drafts: [d], chats: [c], activeChat: c.id };
-  set({ project: p, draftId: d.id, route: "project", sourceId: null, playhead: 0, selClip: null, selItem: null, folder: "", aiRuns: [] });
+  set({ project: p, draftId: d.id, route: "project", sourceId: null, playhead: 0, selClip: null, selItem: null, folder: "", aiRuns: [], projectFile: "", missing: [], backupPick: "" });
   undoStack.length = 0; redoStack.length = 0;
   await saveNow();
   return p;
@@ -219,13 +240,15 @@ export async function createProject(name: string, aspect = "16:9", fps = 30): Pr
 export async function openProject(id: string) {
   const raw = await api.storeGet("project-" + id);
   if (!raw) return toast("프로젝트를 찾을 수 없습니다");
+  // Brought back from the trash, or made again.
+  deletedIds.delete(id);
   const p: Project = migrateChats(JSON.parse(raw));
   p.folders ??= [];
   // Projects from before 2.5.0 carry preview-copy (proxy) fields; the preview plays the files now.
   p.assets = p.assets.map(({ proxy: _p, proxyState: _s, proxyPct: _c, proxyError: _e, proxyStage: _g, ...a }: any) => a);
   if (!p.drafts.length) p.drafts.push(newDraft("첫 편집본"));
   undoStack.length = 0; redoStack.length = 0;
-  set({ project: p, draftId: p.drafts[0].id, route: "project", sourceId: null, playhead: 0, selClip: null, selItem: null, folder: "", aiRuns: [], projectFile: "" });
+  set({ project: p, draftId: p.drafts[0].id, route: "project", sourceId: null, playhead: 0, selClip: null, selItem: null, folder: "", aiRuns: [], projectFile: "", missing: [], dialog: "", backupPick: "" });
   // The folder's file, and the first backup of the day ("열기").
   api.projectInfo(p.id).then((f) => { if (st.project?.id === p.id) set({ projectFile: f?.file ?? "" }); }).catch(() => {});
   void backupProject("열기");
@@ -245,6 +268,14 @@ export const isEmptyProject = (p: Meta) => !p.assets && !p.clips && !p.chats;
 
 /** Moves the project to the trash; Home can bring it back. */
 export async function deleteProject(id: string, by: "user" | "cleanup" = "user") {
+  // The project last open stays loaded behind Home; it must not be saved back after this.
+  deletedIds.add(id);
+  if (st.project?.id === id) {
+    clearTimeout(saveT);
+    firstUnsaved = 0;
+    set({ project: null, draftId: null, missing: [], projectFile: "", dialog: "", backupPick: "", route: st.route === "project" ? "home" : st.route });
+  }
+  await inFlight?.catch(() => null);
   await api.storeDelete("project-" + id, by, by === "cleanup" ? "빈 프로젝트 정리" : "홈에서 삭제");
   // Its folder goes to Reelcut\_휴지통 too (nothing is erased).
   await api.projectTrash(id, localStamp()).catch((e) => api.logEvent("delete", `${id} folder: ${String(e)}`).catch(() => {}));

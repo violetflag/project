@@ -5,9 +5,10 @@
 // restores a backup, and keeps the hourly backup.
 import { api, pickProject, type FoundChat } from "./api";
 import { flush, logAction } from "./actionlog";
+import { copyChat } from "./chats";
 import { newDraft, uid } from "./edit";
 import {
-  backupProject, checkMissing, checkpoint, cleanProject, createProject, importPaths, loadProjects, localIso, mutate, openProject, saveNow, set, st, toast,
+  backupProject, checkMissing, checkpoint, cleanProject, createProject, importPaths, loadProjects, localIso, localStamp, mutate, openProject, saveNow, set, st, toast,
 } from "./store";
 import type { Project } from "./types";
 
@@ -16,18 +17,19 @@ const msg = (e: unknown) => String((e as Error)?.message ?? e);
 
 /**
  * Opens a .reelcut file. The newer of the file and the app's own copy wins; a project whose
- * folder was copied (another folder already holds it) opens as a copy with its own id.
+ * folder was copied (another folder already holds it) opens as a copy with its own id. A backup
+ * (from a 백업 folder) opens its project with that backup picked in 백업에서 되살리기.
  */
 export async function openProjectFile(path: string): Promise<boolean> {
   let r: Awaited<ReturnType<typeof api.projectOpen>>;
   try {
-    r = await api.projectOpen(path);
+    r = await api.projectOpen(path, localStamp());
   } catch (e) {
     toast(`프로젝트를 열 수 없습니다: ${msg(e)}`);
     return false;
   }
   let p = r.project as Project;
-  if (r.conflict) p = { ...p, id: uid(), name: `${p.name} (사본)`, chats: p.chats?.map((c) => ({ ...c, ccSession: undefined })) };
+  if (r.conflict) p = { ...p, id: uid(), name: `${p.name} (사본)`, chats: p.chats?.map(copyChat) };
   if (st.project) await saveNow();
   let cur: Project | null = null;
   try { const raw = await api.storeGet("project-" + p.id); cur = raw ? JSON.parse(raw) : null; } catch { cur = null; }
@@ -36,7 +38,10 @@ export async function openProjectFile(path: string): Promise<boolean> {
   if (!cur || (p.updated ?? 0) > (cur.updated ?? 0)) await api.projectSave(p.id, JSON.stringify(p), localIso());
   await loadProjects();
   await openProject(p.id);
-  if (r.from !== "file") toast(`프로젝트 파일이 손상되어 ${r.from === "bak" ? "바로 전에 저장한 내용" : "가장 최근 백업"}으로 열었습니다`);
+  if (r.backup && st.project?.id === p.id) {
+    set({ dialog: "backups", backupPick: r.backup });
+    toast("백업 파일은 프로젝트를 연 뒤 '되살리기'로 되돌립니다");
+  } else if (r.from !== "file") toast(`프로젝트 파일이 손상되어 ${r.from === "bak" ? "바로 전에 저장한 내용" : "가장 최근 백업"}으로 열었습니다`);
   else if (r.conflict) toast("다른 폴더에 같은 프로젝트가 있어 사본으로 열었습니다");
   else if (r.warnings.length) toast(r.warnings[0]);
   return true;
@@ -47,16 +52,36 @@ export async function openProjectDialog() {
   if (p) await openProjectFile(p);
 }
 
-/** Files from Explorer, a drop or a second start: a project opens, media is imported. */
+/** Files from Explorer, a drop or a second start: a project (file or folder) opens, media is imported. */
 export async function openPaths(paths: string[]) {
-  const proj = paths.find(isProjectFile);
+  if (!paths.length) return;
+  const proj = paths.find(isProjectFile) ?? (await api.projectFileIn(paths).catch(() => null));
   if (proj) {
     await openProjectFile(proj);
     return;
   }
-  if (!paths.length) return;
   if (!st.project) await createProject(paths[0].split(/[\\/]/).pop()!.replace(/\.[^.]+$/, ""));
   await importPaths(paths);
+}
+
+let openChain: Promise<unknown> = Promise.resolve();
+/** Drops, the first start and later starts open one batch at a time, in order. */
+export function queueOpen(paths: string[]): Promise<void> {
+  const run = openChain.then(() => openPaths(paths));
+  openChain = run.catch((e) => toast(`열지 못했습니다: ${msg(e)}`));
+  return openChain.then(() => {});
+}
+
+let handedReady = false;
+/**
+ * Files later starts handed over (Explorer starts the app once per selected file). They wait in
+ * the app until the window is ready (`ready` marks that), then open in order.
+ */
+export async function takeHanded(ready = false) {
+  if (ready) handedReady = true;
+  if (!handedReady) return;
+  const files = await api.takeOpenFiles().catch(() => [] as string[]);
+  if (files.length) await queueOpen(files);
 }
 
 /**
@@ -72,7 +97,7 @@ export async function saveProjectAs(name: string): Promise<boolean> {
   const now = Date.now();
   const copy: Project = {
     ...structuredClone(cleanProject(p)), id, name: name.trim() || `${p.name} 사본`, created: now, updated: now,
-    chats: p.chats?.map((c) => ({ ...structuredClone(c), ccSession: undefined })),
+    chats: p.chats?.map(copyChat),
   };
   try {
     await api.projectCopyLogs(p.id, id).catch(() => {});
@@ -109,7 +134,9 @@ export async function restoreBackup(file: string): Promise<boolean> {
   // The media list only grows: media added since stays, media the backup had comes back.
   const have = new Set(p.assets.map((a) => a.id));
   const assets = [...p.assets, ...(b.assets ?? []).filter((a) => !have.has(a.id))];
-  mutate((x) => ({ ...x, drafts: b!.drafts, assets, folders: b!.folders ?? x.folders }), `백업에서 되살리기: ${file}`);
+  // Media folders only grow too: media keeps its folder, so every folder in use stays listed.
+  const folders = [...new Set([...(p.folders ?? []), ...(b.folders ?? [])])];
+  mutate((x) => ({ ...x, drafts: b!.drafts, assets, folders }), `백업에서 되살리기: ${file}`);
   set({ draftId: b.drafts.some((d) => d.id === st.draftId) ? st.draftId : b.drafts[0].id, selClip: null, selItem: null });
   await saveNow();
   toast("백업을 되살렸습니다. 되돌리기(Ctrl+Z)로 취소할 수 있습니다");
@@ -155,9 +182,13 @@ export async function startProjectFiles() {
       const root = await api.projectRoot().catch(() => null);
       toast(`프로젝트 ${r.saved}개를 ${root?.root ?? "문서\\Reelcut"} 폴더에 파일로 저장했습니다`);
     }
-    if (r.failed.length) api.logEvent("project", `migrate failed: ${r.failed.join(" / ")}`).catch(() => {});
+    if (r.failed.length) {
+      api.logEvent("project", `migrate failed: ${r.failed.join(" / ")}`).catch(() => {});
+      toast(`프로젝트 ${r.failed.length}개는 폴더에 저장하지 못했습니다 (앱 안에는 그대로 있음): ${r.failed[0]}`);
+    }
   } catch (e) {
     api.logEvent("project", `migrate: ${msg(e)}`).catch(() => {});
+    toast(`프로젝트 폴더를 만들지 못했습니다 (앱 안에는 그대로 있음): ${msg(e)}`);
   }
 }
 

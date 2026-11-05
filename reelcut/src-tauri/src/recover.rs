@@ -51,21 +51,57 @@ pub fn transcripts(dirs: &[PathBuf]) -> HashMap<String, PathBuf> {
     out
 }
 
-/// Sessions the projects (and the projects in the trash) refer to.
+/// Every string value of `"<key>":"…"` in a text.
+fn values_of(text: &str, key: &str, out: &mut HashSet<String>) {
+    let key = format!("\"{key}\":\"");
+    let mut rest = text;
+    while let Some(i) = rest.find(&key) {
+        rest = &rest[i + key.len()..];
+        if let Some(j) = rest.find('"') {
+            if ok_session(&rest[..j]) {
+                out.insert(rest[..j].to_string());
+            }
+            rest = &rest[j..];
+        }
+    }
+}
+
+/// Sessions the projects (and the projects in the trash) refer to: each chat's current one, the
+/// ones it used before a compaction (`ccPast`), and every session the app's own records of that
+/// project show (older chats moved to a new session without keeping the old one's name).
 pub fn referenced(store: &Path) -> HashSet<String> {
     let mut out = HashSet::new();
-    let key = "\"ccSession\":\"";
+    let mut ids = HashSet::new();
     for dir in [store.to_path_buf(), store.join("_trash")] {
         for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            let Some(id) = n.strip_prefix("project-").map(|r| r.split("--").next().unwrap_or(r).trim_end_matches(".json").to_string()) else { continue };
             let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
+            ids.insert(id);
+            values_of(&text, "ccSession", &mut out);
+            let key = "\"ccPast\":[";
             let mut rest = text.as_str();
             while let Some(i) = rest.find(key) {
                 rest = &rest[i + key.len()..];
-                if let Some(j) = rest.find('"') {
-                    out.insert(rest[..j].to_string());
-                    rest = &rest[j..];
+                let end = rest.find(']').unwrap_or(rest.len());
+                for s in rest[..end].split(',').map(|x| x.trim().trim_matches('"')) {
+                    if ok_session(s) {
+                        out.insert(s.to_string());
+                    }
                 }
+                rest = &rest[end..];
             }
+        }
+    }
+    if let Some(logs) = store.parent().map(|d| d.join("logs").join("chats")) {
+        for e in std::fs::read_dir(logs).into_iter().flatten().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if !n.split('.').next().is_some_and(|pid| ids.contains(pid)) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
+            values_of(&text, "session_id", &mut out);
+            values_of(&text, "session", &mut out);
         }
     }
     out
@@ -267,6 +303,16 @@ mod tests {
         std::fs::write(store.join("_trash/project-p2--5.json"), r#"{"chats":[{"ccSession":"ccc-3"}]}"#).unwrap();
         // No messages at all: not listed.
         std::fs::write(cfg.join("ddd-4.jsonl"), line(json!({ "type": "mode", "mode": "normal" }))).unwrap();
+        // A live project's chat before a compaction (kept in ccPast), and one only the app's own
+        // record of that project names: not listed either.
+        for s in ["eee-5", "fff-6", "ggg-7"] {
+            std::fs::write(cfg.join(format!("{s}.jsonl")), line(json!({ "type": "user", "message": { "role": "user", "content": "z" } }))).unwrap();
+        }
+        std::fs::write(store.join("project-p3.json"), r#"{"chats":[{"ccPast":["eee-5", "fff-6"]}]}"#).unwrap();
+        std::fs::create_dir_all(d.join("logs/chats")).unwrap();
+        std::fs::write(d.join("logs/chats/p3.s1.jsonl"), line(json!({ "t": 1, "raw": { "kind": "cc", "event": { "type": "system", "session_id": "ggg-7" } } }))).unwrap();
+        // The same record for a project that no longer exists anywhere does not count.
+        std::fs::write(d.join("logs/chats/gone.s1.jsonl"), line(json!({ "t": 1, "raw": { "kind": "cc", "event": { "session_id": "aaa-1" } } }))).unwrap();
 
         let dirs = [d.join("config/projects"), d.join("archive")];
         let f = scan(&dirs, &store);
