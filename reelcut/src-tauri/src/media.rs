@@ -282,12 +282,20 @@ pub struct View {
     pub roll: f64,
     /// Horizontal field of view of the flat picture, degrees.
     pub hfov: f64,
+    /// Projection: 0 keeps lines straight, 1 keeps shapes natural at wide angles (`proj`).
+    #[serde(default)]
+    pub dist: f64,
 }
 
 /// v360 to a flat w×h picture looking along `view` (normalised first: v360 refuses a yaw of 195).
 pub fn v360_flat(lens: &Lens, view: &View, w: u32, h: u32) -> String {
     let v = crate::framing::norm_view(view);
     let hf = v.hfov;
+    // ffmpeg has only the two ends of the range: the nearer is close enough for this fallback.
+    if v.dist >= 0.5 {
+        let vf = 4.0 * ((hf.to_radians() / 4.0).tan() * h as f64 / w as f64).atan().to_degrees();
+        return format!("v360={}:output=sg:h_fov={hf:.3}:v_fov={vf:.3}:yaw={:.3}:pitch={:.3}:roll={:.3}:w={w}:h={h}:interp=lanczos", v360_in(lens), v.yaw, v.pitch, v.roll);
+    }
     let vf = 2.0 * ((hf.to_radians() / 2.0).tan() * h as f64 / w as f64).atan().to_degrees();
     format!("v360={}:output=flat:h_fov={hf:.3}:v_fov={vf:.3}:yaw={:.3}:pitch={:.3}:roll={:.3}:w={w}:h={h}:interp=lanczos", v360_in(lens), v.yaw, v.pitch, v.roll)
 }
@@ -532,7 +540,7 @@ mod tests {
 
     #[test]
     fn flat_view_args() {
-        let f = v360_flat(&Lens { layout: "dfisheye".into(), swap: false, fov: 190.0, stitch: None, stab: None }, &View { yaw: 30.0, pitch: -10.0, roll: 0.0, hfov: 90.0 }, 1920, 1080);
+        let f = v360_flat(&Lens { layout: "dfisheye".into(), swap: false, fov: 190.0, stitch: None, stab: None }, &View { yaw: 30.0, pitch: -10.0, roll: 0.0, hfov: 90.0, dist: 0.0 }, 1920, 1080);
         assert!(f.starts_with("v360=input=dfisheye:ih_fov=190:iv_fov=190:output=flat:h_fov=90.000:v_fov=58.716"), "{f}");
         assert!(f.contains("yaw=30.000:pitch=-10.000"));
     }
@@ -541,7 +549,7 @@ mod tests {
     fn views_out_of_range_are_normalised() {
         let l = Lens { layout: "dfisheye".into(), swap: false, fov: 190.0, stitch: None, stab: None };
         for (yaw, want) in [(195.0, "yaw=-165.000"), (-190.0, "yaw=170.000"), (540.0, "yaw=180.000")] {
-            let f = v360_flat(&l, &View { yaw, pitch: 120.0, roll: 365.0, hfov: 400.0 }, 1280, 720);
+            let f = v360_flat(&l, &View { yaw, pitch: 120.0, roll: 365.0, hfov: 400.0, dist: 0.0 }, 1280, 720);
             assert!(f.contains(want) && f.contains("pitch=89.000") && f.contains("roll=5.000") && f.contains("h_fov=160.000"), "{f}");
         }
     }

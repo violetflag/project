@@ -10,6 +10,7 @@ mod jsonl;
 mod live;
 mod media;
 mod probe;
+mod proj;
 mod qwen;
 mod render;
 mod shots;
@@ -548,7 +549,7 @@ async fn find_faces(app: St<'_>, req: FindFaces) -> Result<Vec<Value>, String> {
     blocking(move || {
         let gen = app.jobs.generation("faces");
         let (info, lens, m) = engine_for(&app, "faces", gen, &req.path, req.lens)?;
-        let items: Vec<(f64, pano::M3, Option<f64>)> = req.times.iter().copied().filter(|t| t.is_finite()).take(16).map(|t| (t, pano::I3, None)).collect();
+        let items: Vec<(f64, pano::M3, Option<(f64, f64)>)> = req.times.iter().copied().filter(|t| t.is_finite()).take(16).map(|t| (t, pano::I3, None)).collect();
         let mut out = Vec::new();
         let mut err = None;
         motion::look_at(&app.bins.ffmpeg, &app.jobs, "faces", gen, &info, &lens, m.as_ref(), &items, 1920, 960, &mut |_, t, f| match app.faces.detect_sphere(f) {
@@ -678,7 +679,7 @@ async fn scan_gaze(app: St<'_>, req: GazeReq) -> Result<Vec<Value>, String> {
         let mut out = Vec::new();
         if matches!(info.layout360.as_str(), "dual" | "dfisheye") {
             let (info, lens, m) = engine_for(&app, "gaze", gen, &req.path, req.lens)?;
-            let items: Vec<(f64, pano::M3, Option<f64>)> = times.iter().copied().map(|t| (t, pano::I3, None)).collect();
+            let items: Vec<(f64, pano::M3, Option<(f64, f64)>)> = times.iter().copied().map(|t| (t, pano::I3, None)).collect();
             let mut err = None;
             let mut seen = std::collections::HashSet::new();
             motion::look_at(&app.bins.ffmpeg, &app.jobs, "gaze", gen, &info, &lens, m.as_ref(), &items, 1920, 960, &mut |_, t, f| {
@@ -778,9 +779,9 @@ async fn face_check(app: St<'_>, req: FaceCheck) -> Result<Vec<Value>, String> {
     blocking(move || {
         let gen = app.jobs.generation("faces");
         let (info, lens, m) = engine_for(&app, "faces", gen, &req.path, req.lens)?;
-        let items: Vec<(f64, pano::M3, Option<f64>)> = req.items.iter().take(16).map(|(t, v)| {
+        let items: Vec<(f64, pano::M3, Option<(f64, f64)>)> = req.items.iter().take(16).map(|(t, v)| {
             let v = framing::norm_view(v);
-            (*t, stitch::matrix(stitch::ypr(v.yaw, v.pitch, v.roll)), Some(v.hfov))
+            (*t, stitch::matrix(stitch::ypr(v.yaw, v.pitch, v.roll)), Some((v.hfov, v.dist)))
         }).collect();
         let mut out = Vec::new();
         motion::look_at(&app.bins.ffmpeg, &app.jobs, "faces", gen, &info, &lens, m.as_ref(), &items, 640, 360, &mut |_, t, f| {
@@ -913,7 +914,7 @@ async fn auto_color(app: St<'_>, req: AutoColorReq) -> Result<Value, String> {
             let (info, lens, m) = engine_for(&app, "color", gen, &req.path, Some(lens))?;
             let v = framing::norm_view(v);
             let rot = stitch::matrix(stitch::ypr(v.yaw, v.pitch, v.roll));
-            let items: Vec<(f64, pano::M3, Option<f64>)> = times.iter().map(|t| (*t, rot, Some(v.hfov))).collect();
+            let items: Vec<(f64, pano::M3, Option<(f64, f64)>)> = times.iter().map(|t| (*t, rot, Some((v.hfov, v.dist)))).collect();
             motion::look_at(&app.bins.ffmpeg, &app.jobs, "color", gen, &info, &lens, m.as_ref(), &items, 320, 180, &mut |_, _, f| pics.push((faces::crop_bgr(f, 0, 0, f.w, f.h), f.w, f.h)))?;
         } else {
             for t in &times {
@@ -952,7 +953,7 @@ async fn frames(app: St<'_>, req: FrameReq) -> Result<Vec<String>, String> {
                     let h = ((w as f64 * 9.0 / 16.0).round() as u32) & !1;
                     let v = framing::norm_view(v);
                     let rot = stitch::matrix(stitch::ypr(v.yaw, v.pitch, v.roll));
-                    let look = move |_t: f64| (rot, Some(v.hfov));
+                    let look = move |_t: f64| (rot, Some((v.hfov, v.dist)));
                     let dir = app.dir("frames").join(format!("{:x}", hash(&(&req.path, std::time::SystemTime::now()))));
                     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                     let times: Vec<f64> = req.times.iter().copied().filter(|t| t.is_finite()).take(16).collect();
@@ -1248,10 +1249,11 @@ fn engine_prepass(app: &App, tag: &str, gen: u64, plan: &render::Plan, work: &Pa
         let Some((info, m)) = &prepared[n] else { continue };
         let mut keys = j.keys.clone();
         keys.sort_by(|a, b| a.t.total_cmp(&b.t));
-        let still = j.view.clone().unwrap_or(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0 });
+        let still = j.view.clone().unwrap_or(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0, dist: 0.0 });
         let hfov_min = keys.iter().map(|k| k.view.hfov).fold(if keys.is_empty() { still.hfov } else { f64::MAX }, f64::min);
+        let dist_min = keys.iter().map(|k| k.view.dist).fold(if keys.is_empty() { still.dist } else { 1.0 }, f64::min);
         let lens_files = info.videos.first().map(|v| v.width).unwrap_or(info.width / 2);
-        let how = motion::FlatOptions { lens_px: Some(motion::lens_px_for(stitch::params(&j.lens).fov, w, hfov_min, lens_files)), gpu, lossless };
+        let how = motion::FlatOptions { lens_px: Some(motion::lens_px_for(stitch::params(&j.lens).fov, w, hfov_min, dist_min, lens_files)), gpu, lossless };
         // Prepared once: the engine asks for the view on every frame (clips may carry 20 000 keys).
         let curve = framing::Curve::new(&keys);
         let view_at = move |t: f64| if keys.len() >= 2 { curve.at(t) } else if keys.len() == 1 { framing::norm_view(&keys[0].view) } else { framing::norm_view(&still) };

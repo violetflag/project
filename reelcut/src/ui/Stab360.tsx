@@ -22,7 +22,7 @@ function lensOf(a: Asset): Lens {
 }
 
 function setStab(a: Asset, s: Stab) {
-  patchAsset(a.id, { lens: { ...lensOf(a), stab: s } });
+  patchAsset(a.id, { lens: { ...lensOf(a), stab: s } }, "흔들림 설정");
 }
 
 export function Stab360({ a }: { a: Asset }) {
@@ -54,7 +54,7 @@ export function Stab360({ a }: { a: Asset }) {
               onChange={(e) => setStab(a, { ...s, strength: Number((e.target as HTMLInputElement).value) })} />
           </label>
           <label class="check" title="빠르게 돌 때 화면이 젤리처럼 휘는 것(롤링 셔터)을 바로잡습니다. 카메라의 자이로 기록이 있을 때 쓰입니다.">
-            <input type="checkbox" checked={s.rs} onChange={(e) => setStab(a, { ...s, rs: (e.target as HTMLInputElement).checked })} />
+            <input type="checkbox" checked={false} disabled title="검증 중 (2.18에서는 꺼짐)" />
             젤리 현상(롤링 셔터) 보정
           </label>
           <p class="muted tip">

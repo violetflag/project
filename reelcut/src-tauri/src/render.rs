@@ -477,7 +477,7 @@ fn stitched(p: &Pic, l: &Lens, ls: &str, w: u32, h: u32) -> (String, bool) {
     let moving = p.keys.len() >= 2 && view_anim(l, p.keys, &p.vname, w, h, p.len).is_some();
     let mut keys = p.keys.to_vec();
     keys.sort_by(|a, b| a.t.total_cmp(&b.t));
-    let still = framing::norm_view(&if p.keys.len() >= 2 { view_at(&keys, 0.0) } else { p.view.clone().unwrap_or(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0 }) });
+    let still = framing::norm_view(&if p.keys.len() >= 2 { view_at(&keys, 0.0) } else { p.view.clone().unwrap_or(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0, dist: 0.0 }) });
     let moves = moving.then(|| {
         let (v0, steps) = view_steps(&keys, p.len);
         stitch::Moves { v0, steps }
@@ -538,7 +538,7 @@ fn shape(p: &Pic, w: u32, h: u32, pad: bool) -> (String, String, Vec<String>, bo
                 k.sort_by(|a, b| a.t.total_cmp(&b.t));
                 view_at(&k, 0.0)
             } else {
-                p.view.clone().unwrap_or(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0 })
+                p.view.clone().unwrap_or(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0, dist: 0.0 })
             };
             chain.push(media::v360_flat(l, &view, w, h));
         }
@@ -1124,7 +1124,7 @@ mod tests {
     #[test]
     fn osv_is_stitched_by_default() {
         let lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: None, stab: None });
-        let mut s = Seg { lens: lens.clone(), view: Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0 }), ..seg("c.osv", 0.0, 4.0) };
+        let mut s = Seg { lens: lens.clone(), view: Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0, dist: 0.0 }), ..seg("c.osv", 0.0, 4.0) };
         s.speed = 2.0;
         let g = graph(&Plan { segs: vec![s], width: 1280, height: 720, ..plan(vec![]) }).graph;
         assert!(g.starts_with("[0:v:0]null[ls0_fa];[0:v:1]split=2[ls0_fb][ls0_ft];"), "{g}");
@@ -1151,11 +1151,11 @@ mod tests {
     }
 
     fn osv(start: f64, dur: f64) -> Seg {
-        Seg { lens: Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off(), stab: None }), view: Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0 }), ..seg("c.osv", start, dur) }
+        Seg { lens: Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off(), stab: None }), view: Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0, dist: 0.0 }), ..seg("c.osv", start, dur) }
     }
 
     fn key(t: f64, yaw: f64, hfov: f64) -> ViewKey {
-        ViewKey { t, view: View { yaw, pitch: 0.0, roll: 0.0, hfov } }
+        ViewKey { t, view: View { yaw, pitch: 0.0, roll: 0.0, hfov, dist: 0.0 } }
     }
 
     #[test]
@@ -1174,7 +1174,7 @@ mod tests {
         let mut s = seg("c.osv", 0.0, 4.0);
         s.speed = 2.0;
         s.lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off(), stab: None });
-        s.view = Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0 });
+        s.view = Some(View { yaw: 10.0, pitch: 0.0, roll: 0.0, hfov: 90.0, dist: 0.0 });
         let p = Plan { segs: vec![s], width: 1280, height: 720, ..plan(vec![]) };
         let b = build(&p, &Hw::default(), "g.txt", true, false, "o.part.mp4").unwrap();
         assert!(b.graph.contains("[0:v:0][0:v:1]hstack[ls0]"));
@@ -1451,7 +1451,7 @@ mod tests {
 
         let lens = Some(Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: off(), stab: None });
         let clip = |s: f64, d: f64| Seg { path: walk.clone(), kind: "video".into(), start: s, dur: d, has_audio: true, fit: "fit".into(), ..Default::default() };
-        let vk = |t: f64, yaw: f64, pitch: f64, hfov: f64| ViewKey { t, view: View { yaw, pitch, roll: 0.0, hfov } };
+        let vk = |t: f64, yaw: f64, pitch: f64, hfov: f64| ViewKey { t, view: View { yaw, pitch, roll: 0.0, hfov, dist: 0.0 } };
         let segs = vec![
             Seg {
                 transform: Some(Transform { x: 0.2, y: -0.1, scale: 0.5, rotation: 8.0, crop_l: 0.05, crop_b: 0.1, ..Default::default() }),
@@ -1462,7 +1462,7 @@ mod tests {
             },
             Seg { kind: "gap".into(), path: String::new(), dur: 1.0, ..Default::default() },
             Seg { fit: "fill".into(), xin: 0.8, ..clip(3.0, 3.0) },
-            Seg { path: osv_path.clone(), lens: lens.clone(), view: Some(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0 }), view_keys: vec![vk(0.5, -60.0, -10.0, 100.0), vk(3.5, 60.0, 10.0, 70.0)], xin: 0.5, ..clip(0.0, 4.0) },
+            Seg { path: osv_path.clone(), lens: lens.clone(), view: Some(View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0, dist: 0.0 }), view_keys: vec![vk(0.5, -60.0, -10.0, 100.0), vk(3.5, 60.0, 10.0, 70.0)], xin: 0.5, ..clip(0.0, 4.0) },
         ];
         let overlays = vec![
             Overlay { path: still.to_string_lossy().into_owned(), kind: "image".into(), dur: 30.0, at: 2.0, track: 3, transform: Some(Transform { x: -0.3, y: 0.3, scale: 0.3, opacity: 0.5, ..Default::default() }), fade_in: 0.3, ..Default::default() },

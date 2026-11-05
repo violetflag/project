@@ -34,7 +34,8 @@ pub fn norm_view(v: &View) -> View {
         yaw: r3(wrap180(finite(v.yaw, 0.0))),
         pitch: r3(finite(v.pitch, 0.0).clamp(-PITCH_LIMIT, PITCH_LIMIT)),
         roll: r3(wrap180(finite(v.roll, 0.0))),
-        hfov: r3(finite(v.hfov, 100.0).clamp(FOV_MIN, FOV_MAX)),
+        hfov: r3(finite(v.hfov, 100.0).clamp(FOV_MIN, crate::proj::fov_max(finite(v.dist, 0.0)))),
+        dist: r3(finite(v.dist, 0.0).clamp(0.0, 1.0)),
     }
 }
 
@@ -126,16 +127,16 @@ pub fn unwrap_yaw(yaws: &[f64]) -> Vec<f64> {
 /// A key list prepared once so it can be sampled many times (every frame of an export).
 pub struct Curve {
     x: Vec<f64>,
-    ch: [Vec<f64>; 4],
-    m: [Vec<f64>; 4],
+    ch: [Vec<f64>; 5],
+    m: [Vec<f64>; 5],
 }
 
 impl Curve {
     pub fn new(keys: &[ViewKey]) -> Curve {
         let ks = clean_keys(keys);
         let x: Vec<f64> = ks.iter().map(|k| k.t).collect();
-        let ch = [unwrap_yaw(&ks.iter().map(|k| k.view.yaw).collect::<Vec<_>>()), ks.iter().map(|k| k.view.pitch).collect(), ks.iter().map(|k| k.view.roll).collect(), ks.iter().map(|k| k.view.hfov).collect()];
-        let m = [pchip_slopes(&x, &ch[0]), pchip_slopes(&x, &ch[1]), pchip_slopes(&x, &ch[2]), pchip_slopes(&x, &ch[3])];
+        let ch = [unwrap_yaw(&ks.iter().map(|k| k.view.yaw).collect::<Vec<_>>()), ks.iter().map(|k| k.view.pitch).collect(), ks.iter().map(|k| k.view.roll).collect(), ks.iter().map(|k| k.view.hfov).collect(), ks.iter().map(|k| k.view.dist).collect()];
+        let m = [pchip_slopes(&x, &ch[0]), pchip_slopes(&x, &ch[1]), pchip_slopes(&x, &ch[2]), pchip_slopes(&x, &ch[3]), pchip_slopes(&x, &ch[4])];
         Curve { x, ch, m }
     }
     pub fn is_empty(&self) -> bool {
@@ -143,10 +144,10 @@ impl Curve {
     }
     pub fn at(&self, t: f64) -> View {
         if self.x.is_empty() {
-            return norm_view(&View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0 });
+            return norm_view(&View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 100.0, dist: 0.0 });
         }
         let v = |i: usize| pchip_at(&self.x, &self.ch[i], &self.m[i], t);
-        norm_view(&View { yaw: v(0), pitch: v(1), roll: v(2), hfov: v(3) })
+        norm_view(&View { yaw: v(0), pitch: v(1), roll: v(2), hfov: v(3), dist: v(4) })
     }
 }
 
@@ -192,7 +193,7 @@ mod tests {
     #[test]
     fn dense_keys_are_cheap() {
         // 20 000 keys at 0.1 s; sampling every frame of the 33 minutes stays well under a second.
-        let keys: Vec<ViewKey> = (0..20000).map(|i| ViewKey { t: i as f64 * 0.1, view: View { yaw: (i as f64 * 7.0) % 400.0 - 200.0, pitch: 10.0, roll: 0.0, hfov: 90.0 } }).collect();
+        let keys: Vec<ViewKey> = (0..20000).map(|i| ViewKey { t: i as f64 * 0.1, view: View { yaw: (i as f64 * 7.0) % 400.0 - 200.0, pitch: 10.0, roll: 0.0, hfov: 90.0, dist: 0.0 } }).collect();
         let t0 = std::time::Instant::now();
         let c = Curve::new(&keys);
         let mut acc = 0.0;

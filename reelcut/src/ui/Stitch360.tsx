@@ -11,7 +11,7 @@ function lensOf(a: Asset): Lens {
 }
 
 function setStitch(a: Asset, s: Stitch) {
-  patchAsset(a.id, { lens: { ...lensOf(a), stitch: s } });
+  patchAsset(a.id, { lens: { ...lensOf(a), stitch: s } }, "이음새 설정");
   prepare360(a.id);
 }
 

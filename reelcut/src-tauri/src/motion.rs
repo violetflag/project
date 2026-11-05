@@ -872,7 +872,7 @@ pub fn targets(m: &Motion, s: &Stab) -> Vec<M3> {
 
 /// Builds the per-frame setup for the stitcher: stabilisation (frame `k0 + k` of the motion
 /// track) and the flat view at that moment (`view(t)` → rotation and hfov; None for the sphere).
-pub fn setup_fn<'a>(m: Option<&'a Motion>, tg: &'a [M3], k0: usize, s: &Stab, view: &'a dyn Fn(f64) -> (M3, Option<f64>)) -> impl Fn(usize, f64) -> FrameSetup + 'a {
+pub fn setup_fn<'a>(m: Option<&'a Motion>, tg: &'a [M3], k0: usize, s: &Stab, view: &'a dyn Fn(f64) -> (M3, Option<(f64, f64)>)) -> impl Fn(usize, f64) -> FrameSetup + 'a {
     let stab_on = s.mode != "off" && m.map(|m| !m.rot.is_empty()).unwrap_or(false);
     let rs_on = s.rs && m.map(|m| m.readout > 0.0).unwrap_or(false);
     move |k: usize, t: f64| {
@@ -979,8 +979,8 @@ pub const RS_VERIFIED: bool = false;
 
 /// The lens size a flat view needs: enough for its centre at the narrowest view of the clip, never
 /// more than the file has. A small or wide output decodes less.
-pub fn lens_px_for(fov: f64, w: u32, hfov_min: f64, lens_px: u32) -> u32 {
-    let r_e = (hfov_min.clamp(20.0, 160.0).to_radians() / 2.0).tan();
+pub fn lens_px_for(fov: f64, w: u32, hfov_min: f64, dist: f64, lens_px: u32) -> u32 {
+    let r_e = crate::proj::r_edge(hfov_min.max(20.0), dist);
     let want = fov.to_radians() * (w as f64 / 2.0) / r_e * 1.1;
     let n = want.clamp(1024.0_f64.min(lens_px as f64), lens_px as f64) as u32;
     n + n % 2
@@ -1002,7 +1002,7 @@ pub fn render_flat(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &Media
     let speed = speed.clamp(0.0625, 16.0);
     let view = move |t: f64| {
         let v = view_at(t / speed);
-        (crate::stitch::matrix(crate::stitch::ypr(v.yaw, v.pitch, v.roll)), Some(v.hfov.clamp(20.0, 160.0)))
+        (crate::stitch::matrix(crate::stitch::ypr(v.yaw, v.pitch, v.roll)), Some((v.hfov.clamp(20.0, crate::proj::fov_max(v.dist)), v.dist)))
     };
     let setup = setup_fn(m, &tg, k0, &stab, &view);
     let mut args: Vec<String> = vec!["-ss".into(), format!("{:.3}", start.max(0.0)), "-t".into(), format!("{dur:.3}"), "-i".into(), info.path.clone(), "-map".into(), "0:v".into(), "-map".into(), "1:a:0?".into()];
@@ -1023,7 +1023,7 @@ pub fn render_flat(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &Media
 /// and field of view (None = the whole sphere, equirectangular). `vf(t)` is applied before each
 /// JPEG is written (grid and labels).
 #[allow(clippy::too_many_arguments)]
-pub fn stills(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo, lens: &Lens, m: Option<&Motion>, times: &[f64], w: u32, h: u32, view: &dyn Fn(f64) -> (M3, Option<f64>), vf: &dyn Fn(f64) -> String, out_dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+pub fn stills(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo, lens: &Lens, m: Option<&Motion>, times: &[f64], w: u32, h: u32, view: &dyn Fn(f64) -> (M3, Option<(f64, f64)>), vf: &dyn Fn(f64) -> String, out_dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     let s = crate::stitch::params(lens);
     let stab = stab_of(lens);
     let tg = m.map(|m| targets(m, &stab)).unwrap_or_default();
@@ -1051,7 +1051,7 @@ pub fn stills(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo,
 
 /// Like `stills`, handing each picture to `each` instead of writing it (for looking at the pixels).
 #[allow(clippy::too_many_arguments)]
-pub fn look_at(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo, lens: &Lens, m: Option<&Motion>, items: &[(f64, M3, Option<f64>)], w: u32, h: u32, each: &mut dyn FnMut(usize, f64, &Frame<u8>)) -> Result<(), String> {
+pub fn look_at(ffmpeg: &Path, jobs: &Jobs, tag: &str, gen: u64, info: &MediaInfo, lens: &Lens, m: Option<&Motion>, items: &[(f64, M3, Option<(f64, f64)>)], w: u32, h: u32, each: &mut dyn FnMut(usize, f64, &Frame<u8>)) -> Result<(), String> {
     let s = crate::stitch::params(lens);
     let stab = stab_of(lens);
     let tg = m.map(|m| targets(m, &stab)).unwrap_or_default();
@@ -1103,13 +1103,13 @@ mod flat_tests {
     #[test]
     fn lens_size_follows_the_view() {
         // 1080p at 91° needs nearly all of a 3840 lens; a wide view or a small output much less.
-        let full = lens_px_for(193.4, 1920, 91.0, 3840);
+        let full = lens_px_for(193.4, 1920, 91.0, 0.0, 3840);
         assert!(full > 3300 && full <= 3840, "{full}");
-        assert!(lens_px_for(193.4, 1280, 91.0, 3840) < full);
-        assert!(lens_px_for(193.4, 1920, 130.0, 3840) < full);
-        assert_eq!(lens_px_for(193.4, 3840, 60.0, 3840), 3840);
-        assert_eq!(lens_px_for(193.4, 320, 130.0, 3840), 1024);
-        assert_eq!(lens_px_for(193.4, 1920, 91.0, 800) % 2, 0);
+        assert!(lens_px_for(193.4, 1280, 91.0, 0.0, 3840) < full);
+        assert!(lens_px_for(193.4, 1920, 130.0, 0.0, 3840) < full);
+        assert_eq!(lens_px_for(193.4, 3840, 60.0, 0.0, 3840), 3840);
+        assert_eq!(lens_px_for(193.4, 320, 130.0, 0.0, 3840), 1024);
+        assert_eq!(lens_px_for(193.4, 1920, 91.0, 0.0, 800) % 2, 0);
     }
 }
 
@@ -1368,10 +1368,10 @@ mod tests {
         println!("turn from frame 0: worst difference {worst:.2}°, per frame {wstep:.2}°");
         assert!(worst < 0.6, "{worst}");
         // Flat views with and without stabilisation; frame-to-frame change.
-        let view = |_t: f64| crate::media::View { yaw: 30.0, pitch: 0.0, roll: 0.0, hfov: 90.0 };
+        let view = |_t: f64| crate::media::View { yaw: 30.0, pitch: 0.0, roll: 0.0, hfov: 90.0, dist: 0.0 };
         let jitter = |name: &str, l: &Lens, m: Option<&Motion>| {
             let out = work.join(name);
-            render_flat(&ffmpeg, &jobs, "t", 0, &info, l, m, 0.5, 3.0, 1.0, 640, 360, &view, &out, |_| {}).unwrap();
+            render_flat(&ffmpeg, &jobs, "t", 0, &info, l, m, 0.5, 3.0, 1.0, 640, 360, &FlatOptions::default(), &view, &out, |_| {}).unwrap();
             let o = ff::command(&ffmpeg).args(["-v", "error", "-i", &out.to_string_lossy(), "-vf", "format=gray", "-f", "rawvideo", "-"]).output().unwrap();
             let fr: Vec<&[u8]> = o.stdout.chunks(640 * 360).filter(|c| c.len() == 640 * 360).collect();
             let d: f64 = fr.windows(2).map(|w| w[0].iter().zip(w[1]).map(|(a, b)| (*a as f64 - *b as f64).abs()).sum::<f64>() / (640.0 * 360.0)).sum::<f64>() / (fr.len() - 1) as f64;

@@ -268,7 +268,7 @@ pub fn graph(i: usize, lens: &Lens, scale_each: Option<u32>, pre: &str, out: &Ou
             )
         }
         Out::Equi { w, h } => {
-            let (y, p, r) = back_angles(&View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 90.0 }, &s);
+            let (y, p, r) = back_angles(&View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 90.0, dist: 0.0 }, &s);
             (format!("output=equirect:w={w}:h={h}:yaw={:.3}:pitch={:.3}:roll={:.3}", wrap180(y), p, r), format!("output=equirect:w={w}:h={h}"), None, format!(",scale={w}:{h}:flags=bilinbor"))
         }
     };
@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn back_lens_looks_the_other_way() {
         let s = Stitch::default();
-        let (y, p, r) = back_angles(&View { yaw: 30.0, pitch: 10.0, roll: 0.0, hfov: 90.0 }, &s);
+        let (y, p, r) = back_angles(&View { yaw: 30.0, pitch: 10.0, roll: 0.0, hfov: 90.0, dist: 0.0 }, &s);
         assert!((wrap180(y) - -150.0).abs() < 1e-6 && (p - 10.0).abs() < 1e-6 && r.abs() < 1e-6, "{y} {p} {r}");
     }
 
@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn flat_graph_blends_two_lenses() {
-        let v = View { yaw: 90.0, pitch: 0.0, roll: 0.0, hfov: 100.0 };
+        let v = View { yaw: 90.0, pitch: 0.0, roll: 0.0, hfov: 100.0, dist: 0.0 };
         let g = graph(0, &lens("dual"), None, "", &Out::Flat { view: &v, w: 1280, h: 720 }, None, "x");
         assert!(g.starts_with("[0:v:0]null[x_fa];[0:v:1]split=2[x_fb][x_ft];"), "{g}");
         assert!(g.contains("v360@xa=input=fisheye:ih_fov=190.000:iv_fov=190.000:output=flat:h_fov=100.000:v_fov=67.673:yaw=-90.000"), "{g}");
@@ -710,7 +710,7 @@ mod tests {
 
     #[test]
     fn moving_view_drives_all_three() {
-        let v0 = View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 90.0 };
+        let v0 = View { yaw: 0.0, pitch: 0.0, roll: 0.0, hfov: 90.0, dist: 0.0 };
         let m = Moves { v0: v0.clone(), steps: vec![(0.5, View { yaw: 10.0, ..v0.clone() })] };
         let g = graph(0, &lens("dual"), None, "setpts=PTS-STARTPTS", &Out::Flat { view: &v0, w: 1280, h: 720 }, Some(&m), "k");
         assert!(g.contains("[0:v:0]setpts=PTS-STARTPTS,sendcmd=c='0.500 v360@ka yaw -170.000',null[k_fa]"), "{g}");
@@ -804,7 +804,7 @@ mod itest {
         let cal = calibrate(&bin("ffmpeg"), &bin("ffprobe"), &info, &lens).unwrap();
         println!("calibration {:.1}s: {cal:?}", t.elapsed().as_secs_f64());
         lens.stitch = Some(cal.clone());
-        let view = View { yaw: 90.0, pitch: 15.0, roll: 0.0, hfov: 100.0 };
+        let view = View { yaw: 90.0, pitch: 15.0, roll: 0.0, hfov: 100.0, dist: 0.0 };
         let (w, h) = (1280, 720);
         let osv = fx.join("CAM_0001.OSV").to_string_lossy().into_owned();
         let out = |n: &str| work.join(n);

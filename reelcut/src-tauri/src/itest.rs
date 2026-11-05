@@ -46,7 +46,7 @@ fn itest_real_ffmpeg() {
     assert_eq!(lrf.layout360, "dfisheye", "LRF alone is side-by-side fisheye");
 
     // frames for the agent straight from the 360 files (no preview copy): the .osv's two tracks and its .lrf
-    let ahead = View { yaw: 30.0, pitch: 0.0, roll: 0.0, hfov: 90.0 };
+    let ahead = View { yaw: 30.0, pitch: 0.0, roll: 0.0, hfov: 90.0, dist: 0.0 };
     for (info, layout) in [(&osv, "dual"), (&lrf, "dfisheye")] {
         let lens = Lens { layout: layout.into(), swap: false, fov: 190.0, stitch: None, stab: None };
         let shots = media::frames(&ffmpeg, &media::FrameReq { path: info.path.clone(), times: vec![1.0, 2.0], width: Some(320), view: Some(ahead.clone()), lens: Some(lens) }).unwrap();
@@ -60,7 +60,7 @@ fn itest_real_ffmpeg() {
     let seg = |info: &media::MediaInfo, start: f64, d: f64, speed: f64, r360: bool| Seg {
         path: info.path.clone(), kind: info.kind.clone(), start, dur: d, speed, volume: 1.0, has_audio: info.has_audio,
         lens: if r360 { Some(Lens { layout: info.layout360.clone(), swap: false, fov: 190.0, stitch: None, stab: None }) } else { None },
-        view: if r360 { Some(View { yaw: 45.0, pitch: -10.0, roll: 0.0, hfov: 100.0 }) } else { None },
+        view: if r360 { Some(View { yaw: 45.0, pitch: -10.0, roll: 0.0, hfov: 100.0, dist: 0.0 }) } else { None },
         fit: "fit".into(), fade_in: 0.3, fade_out: 0.3, ..Default::default()
     };
     let ass = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,80,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,4,1,2,60,60,120,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:00.50,0:00:02.00,Default,,0,0,0,,안녕하세요 자막\n";

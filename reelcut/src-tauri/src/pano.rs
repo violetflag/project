@@ -584,7 +584,8 @@ fn dp_seam(lo: &Low, nrl: usize, mrl: usize, fx: &[f32], fy: &[f32], prev: &[f32
 #[derive(Clone, Debug)]
 pub struct FrameSetup {
     pub rot: M3,
-    pub hfov: Option<f64>,
+    /// Flat view: field of view and projection (`proj`); None = the whole sphere.
+    pub hfov: Option<(f64, f64)>,
     pub omega: Option<[f64; 3]>,
 }
 
@@ -608,7 +609,7 @@ pub struct Stitcher {
     pub out_h: usize,
     step: usize,
     rs: Option<Rs>,
-    mesh_key: Option<(M3, Option<f64>, Option<[f64; 3]>)>,
+    mesh_key: Option<(M3, Option<(f64, f64)>, Option<[f64; 3]>)>,
     mesh: Vec<[f32; 6]>,
     gw: usize,
     gh: usize,
@@ -825,22 +826,21 @@ impl Stitcher {
         let geo = &self.geo;
         let nc = self.strip.nc;
         let rs = self.rs;
-        let tan = fs.hfov.map(|hf| {
-            let th = (hf.clamp(20.0, 160.0).to_radians() / 2.0).tan();
-            (th, th * h as f64 / w as f64)
-        });
+        let flat = fs.hfov.map(|(hf, d)| (crate::proj::r_edge(hf.max(20.0), d), d));
         let rot = fs.rot;
         let omega = fs.omega;
         par_rows(&mut mesh, gw, gh, |r0, chunk| {
             for (i, o) in chunk.iter_mut().enumerate() {
                 let (gy, gx) = (r0 + i / gw, i % gw);
                 let (x, y) = ((gx * step) as f64, (gy * step) as f64);
-                let d = match tan {
-                    Some((tx, ty)) => {
+                let d = match flat {
+                    Some((tx, 0.0)) => {
+                        let ty = tx * h as f64 / w as f64;
                         let v = [(2.0 * (x + 0.5) / w as f64 - 1.0) * tx, (2.0 * (y + 0.5) / h as f64 - 1.0) * ty, 1.0];
                         let l = (v[0] * v[0] + v[1] * v[1] + 1.0).sqrt();
                         [v[0] / l, v[1] / l, v[2] / l]
                     }
+                    Some((re, dd)) => crate::proj::view_dir(2.0 * (x + 0.5) / w as f64 - 1.0, 2.0 * (y + 0.5) / h as f64 - 1.0, re, dd, h as f64 / w as f64),
                     None => {
                         let phi = (2.0 * (x + 0.5) / w as f64 - 1.0) * std::f64::consts::PI;
                         let th = (2.0 * (y + 0.5) / h as f64 - 1.0) * std::f64::consts::FRAC_PI_2;

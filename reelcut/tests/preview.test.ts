@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
 import { captionLines, draftCaptions, keyWordIndex, moveWordPrev, setHidden, setLineText, spokenIndex, toAss, toSrt, wordKey } from "../src/captions";
 import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSummary, findSkill, laterStepOf, looksForPeople, panoramaTimes, rangeFromText, mergeSkills, parseSkillCommand, runChainSteps, skillFromText, skillToText, upsertSkill } from "../src/skills";
-import { applyVerdicts, badSpans, capView, easePitch, frameGroup, frameSubject, percentOk, pitchLimit, project, saneMarks, subjectLooks, thinMarks } from "../src/framing";
+import { applyVerdicts, badSpans, capView, easePitch, frameGroup, frameSubject, maxFov, normView, percentOk, pitchLimit, project, smoothViewAt, saneMarks, subjectLooks, thinMarks } from "../src/framing";
 import { PEOPLE_360_RULE, PLAYBOOK_360 } from "../src/playbook";
 import { TOOLS } from "../src/agent";
 import { aiExportSound, DEFAULT_CHOICE, rememberedChoice } from "../src/exporter";
@@ -601,5 +601,31 @@ describe("nothing is lost by accident", () => {
     const names = TOOLS.map((t) => t.name);
     for (const bad of ["delete_project", "delete_chat", "remove_project", "store_delete"]) expect(names).not.toContain(bad);
     expect(names.filter((n) => /delete|remove/.test(n)).every((n) => /draft|skill|text|silences|fillers/.test(n))).toBe(true);
+  });
+});
+
+describe("one projection", () => {
+  it("keeps the ordinary flat view at dist 0 and a wider limit above it", () => {
+    expect(maxFov(0)).toBeCloseTo(160);
+    expect(maxFov(1)).toBe(330);
+    const n = normView({ yaw: 0, pitch: 0, roll: 0, hfov: 200, dist: 1 });
+    expect(n.hfov).toBe(200);
+    expect(n.dist).toBe(1);
+    expect(normView({ yaw: 0, pitch: 0, roll: 0, hfov: 200 }).hfov).toBe(160);
+    expect("dist" in normView({ yaw: 0, pitch: 0, roll: 0, hfov: 90 })).toBe(false);
+  });
+  it("places a point at the frame edge when it is half the field of view away", () => {
+    for (const dist of [0.3, 0.6, 1]) {
+      const p = project(45, 0, { yaw: 0, pitch: 0, roll: 0, hfov: 90, dist }, 16 / 9)!;
+      expect(Math.abs(p.u)).toBeCloseTo(1, 6);
+      expect(p.v).toBeCloseTo(0, 6);
+    }
+    const flat = project(45, 0, { yaw: 0, pitch: 0, roll: 0, hfov: 90 }, 16 / 9)!;
+    expect(Math.abs(flat.u)).toBeCloseTo(1, 6);
+  });
+  it("carries dist along the view keys", () => {
+    const keys = [{ t: 0, view: { yaw: 0, pitch: 0, roll: 0, hfov: 90, dist: 0.2 } }, { t: 2, view: { yaw: 0, pitch: 0, roll: 0, hfov: 90, dist: 0.6 } }];
+    expect(smoothViewAt(keys, 1).dist).toBeGreaterThan(0.2);
+    expect(smoothViewAt(keys, 1).dist).toBeLessThan(0.6);
   });
 });

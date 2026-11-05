@@ -3,6 +3,7 @@
 // (output=flat, yaw/pitch/roll quaternion in "ypr" order; input=dfisheye puts the front lens on
 // the right half and the back lens mirrored on the left), so the preview looks where the export does.
 import type { View } from "./types";
+import { maxFov } from "./framing";
 
 type Q = [number, number, number, number]; // w x y z
 const qmul = (a: Q, b: Q): Q => [
@@ -53,13 +54,25 @@ const VS = `attribute vec2 p; varying vec2 uv; void main(){ uv = vec2(p.x*0.5+0.
 const FS = `precision highp float;
 varying vec2 uv; uniform sampler2D tex; uniform vec4 q; uniform vec2 rng;
 uniform float fish; uniform float frng; uniform float swp; uniform vec4 stab;
+uniform float dist; uniform float rE; uniform float asp;
 vec4 qm(vec4 a, vec4 b){ return vec4(
   a.x*b.x - a.y*b.y - a.z*b.z - a.w*b.w,
   a.x*b.y + a.y*b.x + a.z*b.w - a.w*b.z,
   a.x*b.z - a.y*b.w + a.z*b.x + a.w*b.y,
   a.x*b.w + a.y*b.z - a.z*b.y + a.w*b.x); }
 void main(){
-  vec3 d = normalize(vec3(rng.x*(2.0*uv.x-1.0), rng.y*(2.0*uv.y-1.0), 1.0));
+  vec3 d;
+  if (dist <= 0.0) d = normalize(vec3(rng.x*(2.0*uv.x-1.0), rng.y*(2.0*uv.y-1.0), 1.0));
+  else {
+    vec2 pp = vec2(2.0*uv.x-1.0, (2.0*uv.y-1.0)*asp) * rE;
+    float rho = length(pp);
+    if (rho < 1e-6) d = vec3(0.0, 0.0, 1.0);
+    else {
+      float kk = rho / (1.0 + dist);
+      float aa = atan(kk) + asin(clamp(kk*dist/sqrt(1.0+kk*kk), -1.0, 1.0));
+      d = vec3(pp/rho*sin(aa), cos(aa));
+    }
+  }
   vec4 r = qm(qm(q, vec4(0.0, d)), vec4(q.x, -q.yzw));
   r = qm(qm(stab, r), vec4(stab.x, -stab.yzw));
   vec2 t;
@@ -123,7 +136,12 @@ export class Flat360 {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
     } catch { return; }
     const q = rotation(view);
+    const d = Math.max(0, Math.min(1, view.dist ?? 0));
     const tx = Math.tan((Math.max(20, Math.min(160, view.hfov)) * Math.PI) / 360);
+    const half = (Math.max(20, Math.min(maxFov(d), view.hfov)) * Math.PI) / 360;
+    gl.uniform1f(gl.getUniformLocation(this.prog, "dist"), d);
+    gl.uniform1f(gl.getUniformLocation(this.prog, "rE"), ((1 + d) * Math.sin(half)) / (d + Math.cos(half)));
+    gl.uniform1f(gl.getUniformLocation(this.prog, "asp"), canvas.height / Math.max(1, canvas.width));
     gl.uniform4f(gl.getUniformLocation(this.prog, "q"), q[0], q[1], q[2], q[3]);
     gl.uniform2f(gl.getUniformLocation(this.prog, "rng"), tx, (tx * canvas.height) / Math.max(1, canvas.width));
     gl.uniform4f(gl.getUniformLocation(this.prog, "stab"), stab ? stab[0] : 1, stab ? stab[1] : 0, stab ? stab[2] : 0, stab ? stab[3] : 0);

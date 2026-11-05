@@ -18,14 +18,18 @@ export function wrap180(a: number): number {
   return w === -180 && a > 0 ? 180 : w;
 }
 
-/** A view the renderer accepts: yaw/roll wrapped to [-180,180], pitch within ±89, field of view 20–160. */
+/** The widest view that makes sense at projection `d` (160 at 0, 330 at 1). */
+export const maxFov = (d: number) => Math.min(330, (2 * Math.acos(-Math.max(0, Math.min(1, d))) * 180) / Math.PI - 20);
+
+/** A view the renderer accepts: yaw/roll wrapped to [-180,180], pitch within ±89, field of view 20–160 (wider with `dist`). */
 export function normView(v: Partial<View> | null | undefined, base?: View): View {
   const b = base ?? { yaw: 0, pitch: 0, roll: 0, hfov: 100 };
   return {
     yaw: r3(wrap180(num(v?.yaw, b.yaw))),
     pitch: r3(Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, num(v?.pitch, b.pitch)))),
     roll: r3(wrap180(num(v?.roll, b.roll))),
-    hfov: r3(Math.max(FOV_MIN, Math.min(FOV_MAX, num(v?.hfov, b.hfov)))),
+    hfov: r3(Math.max(FOV_MIN, Math.min(maxFov(num(v?.dist, b.dist ?? 0)), num(v?.hfov, b.hfov)))),
+    ...(num(v?.dist, b.dist ?? 0) > 0 ? { dist: r3(Math.min(1, num(v?.dist, b.dist ?? 0))) } : {}),
   };
 }
 
@@ -108,9 +112,9 @@ export function viewCurve(keys: ViewKey[]): (t: number) => View {
   if (!ks.length) return () => normView(null);
   const x = ks.map((k) => k.t);
   const yaw = unwrapYaw(ks.map((k) => k.view.yaw));
-  const ch = [yaw, ks.map((k) => k.view.pitch), ks.map((k) => k.view.roll), ks.map((k) => k.view.hfov)];
+  const ch = [yaw, ks.map((k) => k.view.pitch), ks.map((k) => k.view.roll), ks.map((k) => k.view.hfov), ks.map((k) => k.view.dist ?? 0)];
   const ms = ch.map((c) => pchipSlopes(x, c));
-  return (t) => normView({ yaw: pchipAt(x, ch[0], ms[0], t), pitch: pchipAt(x, ch[1], ms[1], t), roll: pchipAt(x, ch[2], ms[2], t), hfov: pchipAt(x, ch[3], ms[3], t) });
+  return (t) => normView({ yaw: pchipAt(x, ch[0], ms[0], t), pitch: pchipAt(x, ch[1], ms[1], t), roll: pchipAt(x, ch[2], ms[2], t), hfov: pchipAt(x, ch[3], ms[3], t), dist: pchipAt(x, ch[4], ms[4], t) });
 }
 
 /** The smooth view at source time `t` (keys are in source seconds). */
@@ -255,7 +259,14 @@ export function project(yaw: number, pitch: number, view: View, aspect: number):
   const up = [-Math.sin(cp) * Math.sin(cy), Math.cos(cp), -Math.sin(cp) * Math.cos(cy)];
   const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
   const z = dot(d, f);
-  if (z <= 1e-6) return null;
+  if (z <= 1e-6 && !view.dist) return null;
+  const dd = view.dist ?? 0;
+  if (dd > 0) {
+    const cz = Math.max(-1, Math.min(1, z)), ang = Math.acos(cz), sn = Math.sin(ang);
+    if (sn < 1e-6) return { u: 0, v: 0 };
+    const rr = ((1 + dd) * sn) / (dd + cz), re = ((1 + dd) * Math.sin(rad(view.hfov) / 2)) / (dd + Math.cos(rad(view.hfov) / 2));
+    return { u: (dot(d, r) / sn * rr) / re, v: (-dot(d, up) / sn * rr) / (re / aspect) };
+  }
   const tx = Math.tan(rad(view.hfov) / 2), ty = tx / aspect;
   return { u: dot(d, r) / z / tx, v: -dot(d, up) / z / ty };
 }

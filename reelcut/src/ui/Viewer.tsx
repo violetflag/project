@@ -108,6 +108,7 @@ class Player {
 
   attach(v: HTMLVideoElement, img: HTMLImageElement, still: HTMLImageElement, canvas: HTMLCanvasElement, ov: NonNullable<Player["ov"]>) {
     this.video = v; this.img = img; this.still = still; this.ov = ov;
+    this.watchFrames(v);
     try { this.gl = new Flat360(canvas); } catch { this.gl = null; }
     v.onerror = () => this.failed();
     // A codec the WebView lacks (e.g. HEVC without the system extension) can still play its sound.
@@ -150,6 +151,14 @@ class Player {
   }
   /** Where the main video is, in seconds of its file. */
   pos() { return this.base + (this.video?.currentTime ?? 0); }
+  /** The time of the frame on screen: the turn for it must not lag the picture (same frame as the export). */
+  private shownAt = -1;
+  private watchFrames(v: HTMLVideoElement) {
+    const rv = v as HTMLVideoElement & { requestVideoFrameCallback?: (cb: (now: number, m: { mediaTime: number }) => void) => number };
+    if (!rv.requestVideoFrameCallback) return;
+    const each = (_: number, m: { mediaTime: number }) => { this.shownAt = m.mediaTime; rv.requestVideoFrameCallback!(each); };
+    rv.requestVideoFrameCallback(each);
+  }
   /** A live file whose stream has not shown its first picture yet. */
   waitingLive() { return !!this.liveKey && this.stillOn; }
 
@@ -186,7 +195,7 @@ class Player {
           entry.fps = r.fps;
           entry.q = new Float32Array(bytes.buffer);
           set({});
-        } else if (a.info.djmd && !this.analysed.has(a.info.path)) {
+        } else if (!this.analysed.has(a.info.path)) {
           this.analysed.add(a.info.path);
           analyzeMotion(a.id);
         }
@@ -303,12 +312,30 @@ class Player {
     return viewAt(hit.clip.view, hit.clip.viewKeys, hit.src);
   }
 
+  /** Volume above 1 (a clip made louder) goes through WebAudio; the element itself stops at 1. */
+  private audio: { ctx: AudioContext; gain: GainNode } | null = null;
+  private setVolume(v: HTMLVideoElement, vol: number) {
+    const x = Math.max(0, vol);
+    if (x <= 1 && !this.audio) { v.volume = x; return; }
+    try {
+      if (!this.audio) {
+        const ctx = new AudioContext(), gain = ctx.createGain();
+        ctx.createMediaElementSource(v).connect(gain);
+        gain.connect(ctx.destination);
+        this.audio = { ctx, gain };
+      }
+      if (this.audio.ctx.state === "suspended") this.audio.ctx.resume().catch(() => {});
+      v.volume = 1;
+      this.audio.gain.gain.value = x;
+    } catch { v.volume = Math.min(1, x); }
+  }
+
   /** Shows file `a` at `t` seconds (playing on if the player plays). */
   show(a: Asset, t: number, rate = 1, vol = 1) {
     const v = this.video!;
     if (a.info.kind === "image") { this.stopLive(); this.stillOn = false; const url = fileSrc(a.info.path); this.url = url; this.img!.src = url; v.pause(); return; }
     const speed = Math.min(16, rate * Math.max(1, this.rate));
-    v.volume = Math.min(1, Math.max(0, vol));
+    this.setVolume(v, vol);
     v.muted = vol <= 0 || this.rate > 2;
     const url = mediaUrl(a);
     if (!url) { this.loadLive(a, t, speed); return; }
@@ -463,7 +490,7 @@ class Player {
         t = hit.at + (this.pos() - c.start) / c.speed;
       }
       this.last = ts;
-      if (c.volKeys?.length && !c.detached && !trackState(d, "A1").mute) v.volume = Math.min(1, Math.max(0, volAt(c.volKeys, hit.src)));
+      if (c.volKeys?.length && !c.detached && !trackState(d, "A1").mute) this.setVolume(v, volAt(c.volKeys, hit.src));
       const ss = starts(d);
       const end = hit.index + 1 < d.clips.length ? ss[hit.index + 1] : hit.at + clipDur(c);
       if (t >= end - 0.015 || (ca && ca.info.kind !== "image" && v.ended)) {
@@ -480,7 +507,7 @@ class Player {
     if (a && is360(a) && this.gl) {
       const s = this.still;
       if (this.stillOn) { if (s && s.complete && s.naturalWidth) this.gl.draw(s, this.currentView(), projOf(a), this.stabOf(a, this.stillAt)); }
-      else if (v.readyState >= 2) this.gl.draw(v, this.currentView(), projOf(a), this.stabOf(a, this.pos()));
+      else if (v.readyState >= 2) this.gl.draw(v, this.currentView(), projOf(a), this.stabOf(a, this.playing && this.shownAt >= 0 ? this.base + this.shownAt : this.pos()));
     }
   }
 
