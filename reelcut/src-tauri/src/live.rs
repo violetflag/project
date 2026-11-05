@@ -45,6 +45,9 @@ pub struct Live {
     /// Intel Quick Sync works here: an .osv's two 4K HEVC tracks are decoded and shrunk on the GPU
     /// (software decoding of a real Osmo 360 file barely keeps up with real time).
     qsv: AtomicBool,
+    /// 미리보기 선명하게: a larger stitched sphere (still real time on John's PC: 56 pictures a
+    /// second at 6 cores against 65 at 3).
+    sharp: AtomicBool,
 }
 
 const KEEP_REQS: usize = 64;
@@ -54,7 +57,7 @@ impl Live {
     /// Starts the server on a free local port.
     pub fn start(ffmpeg: PathBuf) -> std::io::Result<Arc<Live>> {
         let l = TcpListener::bind("127.0.0.1:0")?;
-        let live = Arc::new(Live { port: l.local_addr()?.port(), ffmpeg, next: Mutex::new(1), reqs: Mutex::default(), slots: Mutex::default(), frames: Mutex::default(), qsv: AtomicBool::new(false) });
+        let live = Arc::new(Live { port: l.local_addr()?.port(), ffmpeg, next: Mutex::new(1), reqs: Mutex::default(), slots: Mutex::default(), frames: Mutex::default(), qsv: AtomicBool::new(false) , sharp: AtomicBool::new(true) });
         let me = live.clone();
         std::thread::spawn(move || {
             for c in l.incoming().flatten() {
@@ -68,6 +71,11 @@ impl Live {
     /// Whether streams may decode with Quick Sync (set once the encoders have been tested).
     pub fn set_qsv(&self, on: bool) {
         self.qsv.store(on, Ordering::Relaxed);
+    }
+
+    /// 설정 > 미리보기 선명하게: from the next stream or still.
+    pub fn set_sharp(&self, on: bool) {
+        self.sharp.store(on, Ordering::Relaxed);
     }
 
     /// Registers a request and returns the URL that answers it.
@@ -208,7 +216,7 @@ impl Live {
         a.extend(s(&["-ss", &format!("{:.3}", req.t.max(0.0))]));
         // Real time after a short head start, so ffmpeg works only as fast as the picture plays.
         a.extend(s(&["-readrate", &format!("{rate:.3}"), "-readrate_initial_burst", "2", "-i", &req.info.path]));
-        a.extend(picture_with(&req.info, req.lens.as_ref(), gpu));
+        a.extend(picture_with(&req.info, req.lens.as_ref(), gpu, self.sharp.load(Ordering::Relaxed)));
         if req.info.has_audio {
             a.extend(s(&["-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"]));
         }
@@ -220,13 +228,14 @@ impl Live {
 
     fn frame(&self, mut c: TcpStream, req: &Req) {
         let fps = req.info.fps.max(1.0);
-        let key = format!("{}|{}|{}", req.info.path, (req.t * fps).round() as i64, serde_json::to_string(&req.lens).unwrap_or_default());
+        let sharp = self.sharp.load(Ordering::Relaxed);
+        let key = format!("{}|{}|{}|{sharp}", req.info.path, (req.t * fps).round() as i64, serde_json::to_string(&req.lens).unwrap_or_default());
         let hit = self.frames.lock().iter().find(|(k, _)| *k == key).map(|(_, b)| b.clone());
         let jpg = match hit {
             Some(b) => Some(b),
             None => {
                 let mut a = s(&["-hide_banner", "-nostdin", "-loglevel", "error", "-ss", &format!("{:.3}", req.t.max(0.0)), "-i", &req.info.path]);
-                a.extend(picture(&req.info, req.lens.as_ref()));
+                a.extend(picture_with(&req.info, req.lens.as_ref(), false, sharp));
                 a.extend(s(&["-frames:v", "1", "-q:v", "3", "-f", "image2", "-c:v", "mjpeg", "-"]));
                 let slot = format!("{}:frame", req.slot);
                 self.spawn(&slot, &a).and_then(|(gen, mut out)| {
@@ -266,7 +275,7 @@ fn s(a: &[&str]) -> Vec<String> {
 /// the 2048×1024 stitched sphere (the viewer draws a flat view of it), anything else at most
 /// 1080 lines high.
 pub fn picture(info: &MediaInfo, lens: Option<&Lens>) -> Vec<String> {
-    picture_with(info, lens, false)
+    picture_with(info, lens, false, false)
 }
 
 /// Quick Sync is used for a stitched two-track recording (the heavy case).
@@ -277,7 +286,9 @@ fn qsv_fits(info: &MediaInfo, lens: Option<&Lens>) -> bool {
 
 /// `picture`, with each lens decoded and shrunk on the GPU when `gpu` (the input opened with
 /// `-hwaccel qsv -hwaccel_output_format qsv`).
-pub fn picture_with(info: &MediaInfo, lens: Option<&Lens>, gpu: bool) -> Vec<String> {
+pub fn picture_with(info: &MediaInfo, lens: Option<&Lens>, gpu: bool, sharp: bool) -> Vec<String> {
+    let (each, sw) = if sharp { (1536u32, 3072u32) } else { (1024, 2048) };
+    let sh = sw / 2;
     let layout = lens.map(|l| l.layout.as_str()).filter(|l| !l.is_empty() && *l != "none").unwrap_or(info.layout360.as_str()).to_string();
     let graph = if layout == "none" {
         "[0:v:0]scale=-2:'min(1080,ih)':flags=bilinear,format=yuv420p[pv]".to_string()
@@ -286,11 +297,11 @@ pub fn picture_with(info: &MediaInfo, lens: Option<&Lens>, gpu: bool) -> Vec<Str
         let g = if layout == "equirect" {
             "[0:v:0]scale=2048:1024:flags=bilinear,format=yuv420p[pv]".to_string()
         } else if crate::stitch::active(&l) {
-            // Both lenses at 1024 each, the seam blended; linear sampling is plenty for a preview.
+            // Both lenses shrunk, the seam blended; linear sampling is plenty for a preview.
             let g = if gpu && layout == "dual" {
-                crate::stitch::graph(0, &l, None, "vpp_qsv=w=1024:h=1024:format=nv12,hwdownload,format=nv12", &crate::stitch::Out::Equi { w: 2048, h: 1024 }, None, "sb")
+                crate::stitch::graph(0, &l, None, &format!("vpp_qsv=w={each}:h={each}:format=nv12,hwdownload,format=nv12"), &crate::stitch::Out::Equi { w: sw, h: sh }, None, "sb")
             } else {
-                crate::stitch::graph(0, &l, Some(1024), "", &crate::stitch::Out::Equi { w: 2048, h: 1024 }, None, "sb")
+                crate::stitch::graph(0, &l, Some(each), "", &crate::stitch::Out::Equi { w: sw, h: sh }, None, "sb")
             };
             format!("{};[sb]format=yuv420p[pv]", g.replace("interp=lanczos", "interp=linear"))
         } else {
@@ -308,6 +319,14 @@ mod tests {
 
     fn info(layout: &str) -> MediaInfo {
         MediaInfo { path: "x.osv".into(), kind: "video".into(), layout360: layout.into(), fps: 30.0, has_audio: true, ..Default::default() }
+    }
+
+    #[test]
+    fn the_sharp_preview_is_a_larger_sphere() {
+        let a = picture_with(&info("dual"), None, true, true);
+        assert!(a[1].contains("output=equirect:w=3072:h=1536") && a[1].contains("vpp_qsv=w=1536:h=1536"), "{}", a[1]);
+        let b = picture_with(&info("dual"), None, true, false);
+        assert!(b[1].contains("output=equirect:w=2048:h=1024") && b[1].contains("vpp_qsv=w=1024:h=1024"), "{}", b[1]);
     }
 
     #[test]

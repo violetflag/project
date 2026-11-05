@@ -842,6 +842,11 @@ fn live_url(app: St<'_>, req: live::Req) -> String {
     app.live.url(req)
 }
 
+#[tauri::command]
+fn live_sharp(app: St<'_>, on: bool) {
+    app.live.set_sharp(on);
+}
+
 /// Ends the live preview of a viewer slot (paused, or moved to another file).
 #[tauri::command]
 fn live_stop(app: St<'_>, slot: String) -> bool {
@@ -1652,6 +1657,7 @@ pub fn run() {
             project::project_save,
             project::project_open,
             project::project_info,
+            live_sharp,
             save_base64,
             save_text,
             project::project_root,

@@ -211,6 +211,7 @@ export async function loadSettings() {
   } catch { /* defaults */ }
 }
 export async function saveSettings(p: Partial<Settings>) {
+  if (p.previewSharp != null) api.liveSharp(p.previewSharp).catch(() => {});
   set({ settings: { ...st.settings, ...p } });
   await api.storeSet("settings", JSON.stringify(st.settings));
 }

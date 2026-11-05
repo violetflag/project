@@ -313,6 +313,8 @@ export type Settings = {
   lang: string;
   exportDir: string;
   autoTranscribe: boolean;
+  /** 미리보기 선명하게: a larger 360 preview; on unless turned off. */
+  previewSharp?: boolean;
   /** Export presets saved by the user. */
   exportPresets?: SavedExport[];
   /** What the AI should always keep in mind (added to its instructions), e.g. "our children are twins". */

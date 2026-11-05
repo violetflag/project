@@ -701,7 +701,7 @@ export function Viewer() {
     setCmpBusy(true);
     try {
       const [w, h] = (d?.aspect ?? "16:9").split(":").map(Number);
-      const [b64] = await api.frames(shown.info.path, [hit.src], 1280, player.currentView(), lensFor(hitClip, shown), w / h || 16 / 9);
+      const [b64] = await api.frames(shown.info.path, [hit.src], w >= h ? 1280 : 720, player.currentView(), lensFor(hitClip, shown), w / h || 16 / 9);
       if (b64) setCmp({ url: `data:image/jpeg;base64,${b64}`, pct: 50, at: st.playhead });
     } catch (e) {
       toast(`내보낼 화면을 만들지 못했습니다: ${String((e as Error)?.message ?? e)}`);

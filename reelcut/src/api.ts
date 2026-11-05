@@ -61,6 +61,7 @@ export const api = {
   projectPack: (id: string, dest: string, priv: boolean) => invoke<{ files: number; bytes: number }>("project_pack", { id, dest, private: priv }),
   projectUnpack: (path: string) => invoke<{ folder: string; file: string }>("project_unpack", { path }),
   projectUnpackDrop: (folder: string) => invoke<void>("project_unpack_drop", { folder }),
+  liveSharp: (on: boolean) => invoke<void>("live_sharp", { on }),
   saveBase64: (dest: string, b64: string) => invoke<void>("save_base64", { dest, b64 }),
   saveText: (dest: string, text: string) => invoke<void>("save_text", { dest, text }),
   diagBundle: (dest: string) => invoke<{ files: number; bytes: number }>("diag_bundle", { dest }),

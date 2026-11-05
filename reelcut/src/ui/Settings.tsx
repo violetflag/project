@@ -222,6 +222,7 @@ export function SettingsView() {
         </table>
         <button class="small" onClick={refreshModels}>새로 고침</button>
         </>}
+        <label class="check" title="360 영상 미리보기를 더 큰 그림으로 만듭니다. 재생이 끊기면 끄세요"><input type="checkbox" checked={cfg.previewSharp !== false} onChange={(e) => saveSettings({ previewSharp: (e.target as HTMLInputElement).checked })} /> 360 미리보기 선명하게</label>
         <label class="check"><input type="checkbox" checked={cfg.autoTranscribe} onChange={(e) => saveSettings({ autoTranscribe: (e.target as HTMLInputElement).checked })} /> 가져온 영상은 자동으로 받아쓰기</label>
       </section>
 
