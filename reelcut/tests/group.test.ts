@@ -36,10 +36,14 @@ describe("framing two people together (twins)", () => {
     expect(report.subjects[0].inFrame).toBe(100);
   });
 
-  it("holds a group to the normal width and says when they do not fit", () => {
-    const { keys, report } = frameGroup([{ name: "A", marks: marks(0, 10, () => -30) }, { name: "B", marks: marks(0, 10, () => 30) }], 0, 10);
-    expect(keys[50].view.hfov).toBeCloseTo(100, 0);
-    expect(report.tooFar.length).toBe(1);
+  it("opens a group with a wider projection, and says when they do not fit", () => {
+    const near = frameGroup([{ name: "A", marks: marks(0, 10, () => -30) }, { name: "B", marks: marks(0, 10, () => 30) }], 0, 10);
+    expect(near.keys[50].view.hfov).toBeCloseTo(110, 0);
+    expect(near.keys[50].view.dist).toBeGreaterThan(0.3);
+    expect(near.report.tooFar).toEqual([]);
+    const far = frameGroup([{ name: "A", marks: marks(0, 10, () => -50) }, { name: "B", marks: marks(0, 10, () => 50) }], 0, 10);
+    expect(far.keys[50].view.hfov).toBeCloseTo(118, 0);
+    expect(far.report.tooFar.length).toBe(1);
   });
 
   it("reports when they are too far apart to share one frame", () => {

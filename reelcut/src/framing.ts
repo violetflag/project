@@ -1,6 +1,7 @@
 // 360 reframing maths: view normalisation, smooth (monotone cubic) key interpolation, turning
 // "where is the person" marks into dense view keys, and snapping cut points into silences.
 // Pure functions only, so they can be unit tested and mirrored exactly in Rust (tests/fixtures/framing.json).
+import { clampDist, cornerStretch, fovMax, presetRow, vfovOf } from "./proj";
 import type { View, ViewKey } from "./types";
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -18,8 +19,7 @@ export function wrap180(a: number): number {
   return w === -180 && a > 0 ? 180 : w;
 }
 
-/** The widest view that makes sense at projection `d` (160 at 0, 330 at 1). */
-export const maxFov = (d: number) => Math.min(330, (2 * Math.acos(-Math.max(0, Math.min(1, d))) * 180) / Math.PI - 20);
+export const maxFov = fovMax;
 
 /** A view the renderer accepts: yaw/roll wrapped to [-180,180], pitch within ±89, field of view 20–160 (wider with `dist`). */
 export function normView(v: Partial<View> | null | undefined, base?: View): View {
@@ -133,22 +133,44 @@ export type Mark = { t: number; x: number; y: number; hfov?: number };
 /** How far a followed view tilts up or down, degrees. Further than this people look seen from a ceiling. */
 export const LEVEL_PITCH = 30;
 
-/** Fields of view that keep lines straight and bodies in proportion, by frame shape. hfov is the frame's width, so a tall frame needs far less. */
-export function viewLimits(aspect: number, free = false): { base: number; max: number } {
-  if (free) return aspect < 1 ? { base: 75, max: 105 } : { base: 90, max: 130 };
-  return aspect < 1 ? { base: 56, max: 70 } : { base: 91, max: 100 };
+/** The natural view for a frame shape and the widest a followed group may open to (`VIEW_PRESETS`): hfov is the frame's width, so a tall frame needs far less. Past the base the projection eases toward stereographic instead of stretching the corners. */
+export function viewLimits(aspect: number, free = false): { base: number; baseDist: number; max: number; maxDist: number } {
+  if (free) return aspect < 1 ? { base: 75, baseDist: 0, max: 105, maxDist: 0 } : { base: 90, baseDist: 0, max: 130, maxDist: 0 };
+  const row = presetRow(`${aspect}:1`);
+  return { base: row.best.hfov, baseDist: row.best.dist, max: row.wide.hfov, maxDist: row.wide.dist };
+}
+
+/** The projection that goes with a field of view between the natural view and the widest. */
+function distFor(hfov: number, lim: ReturnType<typeof viewLimits>): number {
+  if (lim.max <= lim.base) return lim.baseDist;
+  const k = Math.max(0, Math.min(1, (hfov - lim.base) / (lim.max - lim.base)));
+  return r3(lim.baseDist + (lim.maxDist - lim.baseDist) * k);
 }
 
 /** The steepest tilt that keeps the horizon in the picture, at most LEVEL_PITCH. */
-export function pitchLimit(hfov: number, aspect: number): number {
-  const v = (2 * Math.atan(Math.tan((hfov * Math.PI) / 360) / aspect) * 180) / Math.PI;
-  return Math.max(0, Math.min(LEVEL_PITCH, v / 2 - 5));
+export function pitchLimit(hfov: number, aspect: number, dist = 0): number {
+  return Math.max(0, Math.min(LEVEL_PITCH, vfovOf(hfov, dist, 1 / aspect) / 2 - 5));
 }
 
-/** A view kept near level and not too wide, unless the user asked otherwise. */
+/** Corner stretch an AI-set view may have once it uses the wider projection (the presets stay under it). */
+const MAX_STRETCH = 1.4;
+/** An ordinary lens's widest AI view, by frame shape. */
+const flatMax = (aspect: number) => (aspect < 1 ? 70 : 100);
+
+/** A view kept near level and not stretched, unless the user asked otherwise. Presets (광각, 초광각, 작은 행성) get through. */
 export function capView(v: View, aspect: number, free = false): View {
   if (free) return v;
-  const hfov = Math.min(v.hfov, viewLimits(aspect).max), lim = pitchLimit(hfov, aspect);
+  const d = clampDist(v.dist), hw = 1 / aspect;
+  // Past 170° it is a little planet, chosen on purpose, and has no horizon to keep.
+  if (d >= 1 && v.hfov > 170) return v;
+  let hfov = v.hfov;
+  if (d <= 0) hfov = Math.min(hfov, flatMax(aspect));
+  else if (cornerStretch(hfov, d, hw) > MAX_STRETCH) {
+    let lo = 20, hi = hfov;
+    for (let i = 0; i < 24; i++) { const m = (lo + hi) / 2; if (cornerStretch(m, d, hw) > MAX_STRETCH) hi = m; else lo = m; }
+    hfov = r3(lo);
+  }
+  const lim = pitchLimit(hfov, aspect, d);
   return { ...v, pitch: Math.max(-lim, Math.min(lim, v.pitch)), hfov };
 }
 
@@ -223,7 +245,7 @@ export function frameSubject(marks: Mark[], from: number, to: number, o: FrameOp
   const sg = o.sigma ?? 0.4;
   const sy = gaussian(ts, ys, sg), sp = gaussian(ts, ps, sg), sf = gaussian(ts, fs, sg);
   return ts.map((tt, i) =>
-    ({ t: r3(tt), view: normView(capView({ yaw: sy[i], pitch: sp[i] - headDrop(sf[i], aspect, headroom), roll: 0, hfov: sf[i] }, aspect, o.free)) }));
+    ({ t: r3(tt), view: normView(capView({ yaw: sy[i], pitch: sp[i] - headDrop(sf[i], aspect, headroom), roll: 0, hfov: sf[i], ...(o.free ? {} : { dist: distFor(sf[i], lim) }) }, aspect, o.free)) }));
 }
 
 // ---------------------------------------------------------------- following several people at once
@@ -366,13 +388,14 @@ export function frameGroup(subjects: Subject[], from: number, to: number, o: Gro
     const top = Math.max(...on.map((x) => x.pitch)), low = Math.min(...on.map((x) => x.pitch));
     const aim = top - headDrop(fov[i], aspect, headroom);
     if (on.length < 2) return aim;
-    const view = { yaw: wrap180(sy[i]), pitch: aim, roll: 0, hfov: fov[i] };
+    const view = { yaw: wrap180(sy[i]), pitch: aim, roll: 0, hfov: fov[i], ...(o.free ? {} : { dist: distFor(fov[i], lim) }) };
     const lowest = Math.max(...on.map((x) => project(x.yaw, x.pitch, view, aspect)?.v ?? 1));
     return lowest > 0.7 ? (top + low) / 2 : aim;
   });
   // The view stays near level; people lower down simply sit lower in the frame.
-  const sp = gaussian(ts, pt, sg).map((p, i) => { const limit = o.free ? 62 : pitchLimit(fov[i], aspect); return Math.max(-limit, Math.min(limit, p)); });
-  const keys = ts.map((tt, i) => ({ t: r3(tt), view: normView({ yaw: sy[i], pitch: sp[i], roll: 0, hfov: fov[i] }) }));
+  const dists = fov.map((f) => (o.free ? 0 : distFor(f, lim)));
+  const sp = gaussian(ts, pt, sg).map((p, i) => { const limit = o.free ? 62 : pitchLimit(fov[i], aspect, dists[i]); return Math.max(-limit, Math.min(limit, p)); });
+  const keys = ts.map((tt, i) => ({ t: r3(tt), view: normView({ yaw: sy[i], pitch: sp[i], roll: 0, hfov: fov[i], ...(dists[i] ? { dist: dists[i] } : {}) }) }));
   // How well everyone was kept in view, and where they could not all fit.
   const counts = people.map(() => ({ inFrame: 0, counted: 0 }));
   keys.forEach((k, i) => heads[i].forEach((h, j) => {
@@ -416,7 +439,7 @@ export function easePitch(keys: ViewKey[], target: number, people: { marks: Mark
   let shift = Math.max(-most, Math.min(most, target - keys[0].view.pitch));
   for (let i = 0; i < 4 && shift && !fits(shift); i++) shift = i === 3 ? 0 : shift / 2;
   if (!shift) return keys;
-  return keys.map((k) => { const lim = pitchLimit(k.view.hfov, aspect); return { ...k, view: { ...k.view, pitch: r3(Math.max(-lim, Math.min(lim, k.view.pitch + shift))) } }; });
+  return keys.map((k) => { const lim = pitchLimit(k.view.hfov, aspect, k.view.dist ?? 0); return { ...k, view: { ...k.view, pitch: r3(Math.max(-lim, Math.min(lim, k.view.pitch + shift))) } }; });
 }
 
 /** Head marks without those near the poles of the panorama or that jump faster than a person moves. */
@@ -477,6 +500,19 @@ export function applyVerdicts(looks: SubjectLook[], notOk: number[], ok: number[
 }
 
 export const percentOk = (looks: { ok: boolean }[]) => (looks.length ? Math.round((looks.filter((l) => l.ok).length / looks.length) * 100) : 0);
+
+/** Pieces shorter than `keep` seconds left between cuts go too: a flash of a shot looks like a mistake. */
+export function closeShortPieces(spans: [number, number][], from: number, to: number, keep = 1.5): [number, number][] {
+  const out: [number, number][] = [];
+  for (const sp of spans) {
+    const last = out[out.length - 1];
+    if (last && sp[0] - last[1] < keep) last[1] = sp[1];
+    else out.push([sp[0], sp[1]]);
+  }
+  if (out.length && out[0][0] - from < keep) out[0][0] = from;
+  if (out.length && to - out[out.length - 1][1] < keep) out[out.length - 1][1] = to;
+  return out;
+}
 
 /** The source-time stretches of a clip whose looks are not all right; a single stray look at a clip's edge counts whole. */
 export function badSpans(looks: { t: number; ok: boolean }[], step: number, from: number, to: number): [number, number][] {

@@ -44,19 +44,24 @@ fn field(text: &str, name: &str) -> Option<f64> {
     line.split(':').nth(1)?.split_whitespace().next()?.parse().ok()
 }
 
-/// Loudness by the broadcast measure (LUFS), the true peak, and a level for each second.
-pub fn loudness(ffmpeg: &Path, path: &str, from: f64, to: f64) -> Result<Value, String> {
+/// Loudness by the broadcast measure: LUFS (`i`, -70 for silence or no sound), range and true peak.
+pub fn integrated(ffmpeg: &Path, path: &str, from: f64, to: f64) -> Result<Value, String> {
     let o = ff::command(ffmpeg)
-        .args(["-hide_banner", "-nostdin", "-nostats", "-ss", &format!("{:.3}", from.max(0.0)), "-t", &format!("{:.3}", (to - from).max(0.0)), "-i", path, "-map", "0:a:0", "-af", "ebur128=peak=true", "-f", "null", "-"])
+        .args(["-hide_banner", "-nostdin", "-nostats", "-ss", &format!("{:.3}", from.max(0.0)), "-t", &format!("{:.3}", (to - from).max(0.0)), "-i", path, "-map", "0:a:0?", "-af", "ebur128=peak=true", "-f", "null", "-"])
         .stdin(Stdio::null())
         .output()
         .map_err(|e| e.to_string())?;
     let log = String::from_utf8_lossy(&o.stderr);
     let summary = log.rsplit("Summary:").next().unwrap_or("");
-    let lufs = field(summary, "I:").ok_or("소리 크기를 재지 못했습니다. 소리 트랙이 없을 수 있습니다.")?;
+    Ok(json!({ "i": field(summary, "I:").unwrap_or(-70.0), "range": field(summary, "LRA:"), "peak": field(summary, "Peak:") }))
+}
+
+/// `integrated`, and a level for each second.
+pub fn loudness(ffmpeg: &Path, path: &str, from: f64, to: f64) -> Result<Value, String> {
+    let r = integrated(ffmpeg, path, from, to)?;
     let s = pcm(ffmpeg, path, from, to)?;
     let series: Vec<Value> = s.chunks(RATE).enumerate().map(|(i, c)| json!({ "t": from + i as f64, "db": (db_of(c) as f64 * 10.0).round() / 10.0 })).collect();
-    Ok(json!({ "lufs": lufs, "range": field(summary, "LRA:"), "peak": field(summary, "Peak:"), "series": series }))
+    Ok(json!({ "lufs": r["i"], "range": r["range"], "peak": r["peak"], "series": series }))
 }
 
 /// How much new energy each hop brings, in a low and a high band, with the local average taken off.

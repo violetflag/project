@@ -134,7 +134,7 @@ pub fn clip_workers(avail_mb: u64, gpu: bool) -> usize {
     if !gpu {
         return 1;
     }
-    (avail_mb.saturating_sub(3000) / 1500).clamp(1, 2) as usize
+    (avail_mb.saturating_sub(3000) / 1500).clamp(1, 3) as usize
 }
 
 #[cfg(test)]
@@ -144,7 +144,8 @@ mod worker_tests {
     #[test]
     fn workers_fit_memory_and_need_the_gpu() {
         assert_eq!(clip_workers(16000, false), 1);
-        assert_eq!(clip_workers(16000, true), 2);
+        assert_eq!(clip_workers(16000, true), 3);
+        assert_eq!(clip_workers(6500, true), 2);
         assert_eq!(clip_workers(4000, true), 1);
         assert_eq!(clip_workers(1000, true), 1);
     }

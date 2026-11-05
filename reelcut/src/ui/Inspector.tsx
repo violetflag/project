@@ -1,6 +1,7 @@
 // Properties of the selection (Inspector): a main-track clip, a V2/V3 picture, a sound item,
 // or — with nothing selected — the draft itself. Sections fold; every number can be dragged on
 // its label, typed, or reset.
+import { fovMax } from "../proj";
 import { ChevronDown, ChevronRight, Diamond, RotateCcw, Trash2 } from "lucide-preact";
 import type { ComponentChildren } from "preact";
 import { useState } from "preact/hooks";

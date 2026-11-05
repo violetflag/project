@@ -5,7 +5,7 @@
 export const PEOPLE_360_RULE = "360 영상에서 사람을 찾을 때는 equirect_sheet나 find_faces로 파노라마 전체를 봅니다. contact_sheet는 어안이고 view_frames는 한 방향만 보여 주므로, 거기 없다고 영상에 없다고 판단하면 안 됩니다.";
 
 /** The look of a followed view. The app holds AI views to this unless the user asks for something else. */
-export const LEVEL_VIEW_RULE = "시점은 수평에 가깝게 두고 수평선이 화면에 보이게 합니다: pitch는 ±30° 안, 화각은 16:9에서 보통 91°(최대 100°), 9:16에서 보통 56°(최대 70°). 많이 내려다보거나 화각이 넓으면 선이 휘고 몸이 늘어납니다. 아이가 아래에 있으면 시점을 더 숙이지 말고 아이가 화면 아래쪽에 오게 둡니다. 앱이 이 범위로 맞추며, 사용자가 내려다보는 장면이나 광각을 직접 요청했을 때만 allow_steep을 켭니다.";
+export const LEVEL_VIEW_RULE = "시점은 수평에 가깝게 두고 수평선이 화면에 보이게 합니다: pitch는 ±30° 안, 화각은 16:9에서 보통 91°, 9:16에서 보통 56°. 더 넓어야 하면 hfov를 직접 키우지 말고 view_preset(wide/ultra)이나 quick_action을 씁니다. 많이 내려다보거나 화각이 넓으면 선이 휘고 몸이 늘어납니다. 아이가 아래에 있으면 시점을 더 숙이지 말고 아이가 화면 아래쪽에 오게 둡니다. 앱이 이 범위로 맞추며, 사용자가 내려다보는 장면이나 광각을 직접 요청했을 때만 allow_steep을 켭니다.";
 
 export const PLAYBOOK_360 = `# 360 영상 자동 편집 순서 (Reelcut 도구 기준)
 

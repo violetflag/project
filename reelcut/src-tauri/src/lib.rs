@@ -624,8 +624,7 @@ async fn script_files(req: ScriptFiles) -> Result<Value, String> {
 async fn loudness(app: St<'_>, path: String, start: f64, dur: f64) -> Result<Value, String> {
     let app = app.inner().clone();
     blocking(move || {
-        let r = analysis::loudness(&app.bins.ffmpeg, &path, start, start + dur)?;
-        Ok(json!({ "i": r["lufs"], "peak": r["peak"], "range": r["range"] }))
+        analysis::integrated(&app.bins.ffmpeg, &path, start, start + dur)
     })
     .await
 }
@@ -770,6 +769,9 @@ struct FaceCheck {
     lens: Option<Lens>,
     /// Source time and the view at that time.
     items: Vec<(f64, media::View)>,
+    /// Width / height of the picture (16:9 when missing).
+    #[serde(default)]
+    aspect: Option<f64>,
 }
 
 /// Faces in the flat picture each view shows, and which of them touch the frame edge.
@@ -784,9 +786,12 @@ async fn face_check(app: St<'_>, req: FaceCheck) -> Result<Vec<Value>, String> {
             (*t, stitch::matrix(stitch::ypr(v.yaw, v.pitch, v.roll)), Some((v.hfov, v.dist)))
         }).collect();
         let mut out = Vec::new();
-        motion::look_at(&app.bins.ffmpeg, &app.jobs, "faces", gen, &info, &lens, m.as_ref(), &items, 640, 360, &mut |_, t, f| {
+        // The detector takes up to 640 on a side.
+        let asp = req.aspect.unwrap_or(16.0 / 9.0).clamp(0.3, 4.0);
+        let (fw, fh) = if asp >= 1.0 { (640u32, ((640.0 / asp) as u32) & !1) } else { (((640.0 * asp) as u32) & !1, 640u32) };
+        motion::look_at(&app.bins.ffmpeg, &app.jobs, "faces", gen, &info, &lens, m.as_ref(), &items, fw, fh, &mut |_, t, f| {
             let found = app.faces.detect_frame(f).unwrap_or_default();
-            let edges: Vec<&str> = found.iter().filter_map(|m| faces::edge_of(m, 640.0, 360.0)).collect();
+            let edges: Vec<&str> = found.iter().filter_map(|m| faces::edge_of(m, fw as f32, fh as f32)).collect();
             out.push(json!({ "t": t, "faces": found.len(), "edges": edges }));
         })?;
         Ok(out)
@@ -950,7 +955,7 @@ async fn frames(app: St<'_>, req: FrameReq) -> Result<Vec<String>, String> {
                     let gen = app.jobs.generation(tag);
                     let m = motion::motion_for(&app.dir("motion"), &app.bins.ffmpeg, &app.bins.ffprobe, &app.jobs, tag, gen, &info, &lens, &file_key(&req.path), |_| {})?;
                     let w = req.width.unwrap_or(768).clamp(64, 1920) & !1;
-                    let h = ((w as f64 * 9.0 / 16.0).round() as u32) & !1;
+                    let h = ((w as f64 / req.aspect.unwrap_or(16.0 / 9.0).clamp(0.3, 4.0)).round() as u32) & !1;
                     let v = framing::norm_view(v);
                     let rot = stitch::matrix(stitch::ypr(v.yaw, v.pitch, v.roll));
                     let look = move |_t: f64| (rot, Some((v.hfov, v.dist)));

@@ -3,6 +3,7 @@
 // in/out marks. Files the WebView cannot decode (an Osmo .osv, 10-bit HEVC…) play through the live
 // preview: ffmpeg streams them from the asked time (an .osv's lenses stitched into a sphere), and
 // while paused a single decoded frame stands in. 360 media is drawn as a flat view with WebGL.
+import { fovMax } from "../proj";
 import { Grid3x3, Layers, Maximize, Pause, Play, Rewind, FastForward, SkipBack, SkipForward } from "lucide-preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api, fileSrc } from "../api";
@@ -10,7 +11,7 @@ import { draftCaptions } from "../captions";
 import { CaptionView } from "./CaptionView";
 import {
   animAt, audioTrack, clipAt, clipDur, DEFAULT_TRANSFORM, DEFAULT_VIEW, draftDuration, draftWords, fmtTCF, insertClips, is360, isDefaultColor, isGap, newClip, newOverlay, overlays,
-  parseTC, transitionLook, xinOf, playableInWebView, previewSource, setViewKey, starts, timedDur, trackState, updateClip, viewAt, volAt,
+  parseTC, stabFor, transitionLook, xinOf, playableInWebView, previewSource, setViewKey, starts, timedDur, trackState, updateClip, viewAt, volAt,
 } from "../edit";
 import { Flat360, type Proj } from "../gl360";
 import { STICKERS, stickerSvgPath, textLook } from "../graphics";
@@ -179,7 +180,11 @@ class Player {
    */
   stabOf(a: Asset, t: number): Float32Array | null {
     if (a.info.layout360 !== "dual" && a.info.layout360 !== "dfisheye") return null;
-    const lens = a.lens ?? { layout: a.info.layout360, swap: false, fov: 190 };
+    // The clip's own setting first, as the export does.
+    const d0 = st.sourceId ? null : draft();
+    const on = d0 && d0.clips.length ? clipAt(d0, st.playhead) : null;
+    const stab = on && on.clip.asset === a.id ? stabFor(on.clip, a) : a.lens?.stab ?? null;
+    const lens = { ...(a.lens ?? { layout: a.info.layout360, swap: false, fov: 190 }), ...(stab ? { stab } : {}) };
     if (lens.stab?.mode === "off") return null;
     const key = `${a.info.path}|${JSON.stringify(lens.stab ?? null)}|${st.motionRev}`;
     let tr = this.tracks.get(key);
@@ -717,7 +722,7 @@ export function Viewer() {
     if (!r360) return;
     e.preventDefault();
     const v = player.currentView();
-    commitView({ ...v, hfov: Math.max(20, Math.min(160, Math.round(v.hfov + e.deltaY * 0.05))) });
+    commitView({ ...v, hfov: Math.max(20, Math.min(fovMax(v.dist ?? 0), Math.round(v.hfov + e.deltaY * 0.05))) });
   };
 
   const srcClip = () => {

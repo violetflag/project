@@ -348,6 +348,9 @@ pub struct FrameReq {
     /// How that 360 file is laid out (equirect when missing).
     #[serde(default)]
     pub lens: Option<Lens>,
+    /// Width / height of the picture (16:9 when missing), so a tall draft is seen as it will be cut.
+    #[serde(default)]
+    pub aspect: Option<f64>,
 }
 
 pub fn jpeg_b64(bytes: &[u8]) -> String {
@@ -361,7 +364,7 @@ pub fn frames(ffmpeg: &Path, req: &FrameReq) -> Result<Vec<String>, String> {
     // A 360 view: the lenses put side by side (two tracks of an .osv are stacked), then v360.
     let graph = req.view.as_ref().map(|v| {
         let lens = req.lens.clone().filter(|l| !l.layout.is_empty() && l.layout != "none").unwrap_or(Lens { layout: "equirect".into(), swap: false, fov: 360.0, stitch: None, stab: None });
-        let h = (w as f64 * 9.0 / 16.0).round() as u32 / 2 * 2;
+        let h = (w as f64 / req.aspect.unwrap_or(16.0 / 9.0).clamp(0.3, 4.0)).round() as u32 / 2 * 2;
         format!("{};[s]{}[o]", lens_source(0, &lens, None, "s"), v360_flat(&lens, v, w, h))
     });
     for &t in req.times.iter().take(16) {

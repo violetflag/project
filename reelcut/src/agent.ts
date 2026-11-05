@@ -15,7 +15,7 @@ import {
 } from "./edit";
 import { aiExportSound, exportAndWait } from "./exporter";
 import { CAPTION_PRESETS, TEXT_KINDS } from "./graphics";
-import { applyVerdicts, badSpans, capView, cleanKeys, easePitch, frameGroup, frameSubject, lookSummary, normView, percentOk, sampleKeys, saneMarks, snapRanges, subjectLooks, thinMarks, type Mark, type Subject, type SubjectLook } from "./framing";
+import { applyVerdicts, badSpans, capView, cleanKeys, closeShortPieces, easePitch, frameGroup, frameSubject, lookSummary, normView, percentOk, sampleKeys, saneMarks, snapRanges, subjectLooks, thinMarks, type Mark, type Subject, type SubjectLook } from "./framing";
 import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSkillName, cleanSummary, findSkill, isChain, laterStepOf, looksForPeople, mergeSkills, NOT_IN_BATCH, panoramaTimes, parseSkillCommand, rangeFromText, runChainSteps, skillCatalog, stepLabel, upsertSkill, type Step, type StepResult } from "./skills";
 import { compactBudget, ctxLimit, estTokens, fmtK, needsCompaction, newSession, recentWithin, seedText, SUMMARY_REQUEST, titleFrom } from "./chats";
 import { activeChat, asset, assetMap, editDraft, saveSkills, syncAssets, loadWave, mutate, mutateChat, patchAsset, saveNow, scanShots, set, setDrafts, startTranscribe, st, toast, waitJob, waves } from "./store";
@@ -243,7 +243,7 @@ export const TOOLS = [
     input_schema: { type: "object", properties: { asset_id: str, times: { type: "array", items: num }, width: { ...num, description: "그림 가로 픽셀(기본 960)" } }, required: ["asset_id", "times"] },
   },
   {
-    name: "frame_subject", description: "사람(머리) 위치 표시를 따라가는 시점 키프레임을 만듭니다. 한 사람이면 marks에 equirect_sheet에서 읽은 [원본 초, x, y] 목록(빠르면 1초, 보통 2.5초 간격). 여러 사람을 함께 화면에 담으려면(쌍둥이 등) subjects에 사람마다 이름과 marks를 넣으세요. 화면이 모두의 가운데를 보고, 한도(16:9는 100°, 9:16은 70°) 안에서 모두 들어오도록 화각을 조금 넓힙니다. 시점은 수평선이 보이게(±30° 안) 둡니다. 0.1초 간격 키프레임으로 부드럽게 이어서 클립에 넣고, 가장 높은 머리가 화면 위에서 1/3 지점에 오게 합니다. 결과에 사람마다 화면 안에 있었던 비율과, 너무 멀리 떨어져 한 화면에 못 담은 구간을 알려 줍니다.",
+    name: "frame_subject", description: "사람(머리) 위치 표시를 따라가는 시점 키프레임을 만듭니다. 한 사람이면 marks에 equirect_sheet에서 읽은 [원본 초, x, y] 목록(빠르면 1초, 보통 2.5초 간격). 여러 사람을 함께 화면에 담으려면(쌍둥이 등) subjects에 사람마다 이름과 marks를 넣으세요. 화면이 모두의 가운데를 보고, 한도(16:9는 118°, 9:16은 75°) 안에서 모두 들어오도록 넓히고, 넓을수록 모서리가 덜 늘어나는 투영을 씁니다. 시점은 수평선이 보이게(±30° 안) 둡니다. 0.1초 간격 키프레임으로 부드럽게 이어서 클립에 넣고, 가장 높은 머리가 화면 위에서 1/3 지점에 오게 합니다. 결과에 사람마다 화면 안에 있었던 비율과, 너무 멀리 떨어져 한 화면에 못 담은 구간을 알려 줍니다.",
     input_schema: {
       type: "object",
       properties: {
@@ -255,7 +255,7 @@ export const TOOLS = [
         },
         track: { type: "boolean", description: "표시를 시작점으로 얼굴·머리를 자동 추적해 0.2초 단위로 다듬습니다(기본 켬, 구간 3분 이하). 표시가 몇 개뿐이어도 따라갑니다." },
         allow_steep,
-        hfov: { ...num, description: "화각. 보통 비워 둡니다(16:9는 91, 9:16은 56. 최대 100, 70)" }, headroom: { ...num, description: "머리 위 여백 비율(기본 0.33)" },
+        hfov: { ...num, description: "화각. 보통 비워 둡니다(16:9는 91, 9:16은 56)" }, headroom: { ...num, description: "머리 위 여백 비율(기본 0.33)" },
         step: { ...num, description: "키 간격 초(기본 0.1)" }, smooth: { ...num, description: "부드럽게 하는 정도 초(기본 0.4, 0이면 끔)" },
         from: num, to: num,
       },
@@ -880,11 +880,12 @@ async function runTool(name: string, inp: any): Promise<Out> {
       const times = [...new Set(picks.map(r3))].sort((x, y) => x - y).slice(0, 8);
       const head = "머리가 화면 위에서 약 1/3 선에 있고 위·아래가 잘리지 않아야 합니다. 어긋나면 marks를 고쳐 frame_subject를 다시 하세요.";
       const out: ChatBlock[] = [{ type: "text", text: c.subjects?.length ? `${head}\n${lookSummary(looks)}\n자동 판단은 얼굴 인식과 추적 기준이라 틀릴 수 있습니다. 아래 사진을 직접 보고 누가 있는지 판단하세요. 따라갈 사람이 빠졌거나 다른 어른이 화면을 차지하면 표시를 고쳐 frame_subject를 다시 하고, 고칠 수 없으면 trim_to_subjects로 그 부분을 뺍니다.` : head }];
-      const seen = await api.faceCheck(a.info.path, lens, times.map((t) => [t, viewAt(c.view, c.viewKeys, t)] as [number, View])).catch(() => []);
+      const [fw, fh] = d.aspect.split(":").map(Number);
+      const seen = await api.faceCheck(a.info.path, lens, times.map((t) => [t, viewAt(c.view, c.viewKeys, t)] as [number, View]), fw / fh || 16 / 9).catch(() => []);
       for (let i = 0; i < times.length; i++) {
         const t = times[i];
         const v = viewAt(c.view, c.viewKeys, t);
-        const [b] = await api.frames(a.info.path, [t], 640, v, lens);
+        const [b] = await api.frames(a.info.path, [t], 640, v, lens, fw / fh || 16 / 9);
         const f = seen[i];
         const faces = f ? ` | 얼굴 ${f.faces}개${f.edges.length ? ` · 가장자리에 걸림: ${f.edges.join(", ")}` : ""}` : "";
         const l = looks.length ? looks.reduce((x, y) => (Math.abs(y.t - t) < Math.abs(x.t - t) ? y : x)) : null;
@@ -904,7 +905,7 @@ async function runTool(name: string, inp: any): Promise<Out> {
       for (const c of clips) {
         const looks = applyVerdicts(await lookAtClip(d0, c), notOk, yes);
         const step = looks.length > 1 ? looks[1].t - looks[0].t : 1;
-        const spans = badSpans(looks, step, c.start, c.end);
+        const spans = closeShortPieces(badSpans(looks, step, c.start, c.end), c.start, c.end);
         before.push(...looks);
         const left = spans.reduce((n, [x, y]) => n - (y - x), c.end - c.start);
         if (inp.apply !== false && spans.length && left >= 1) {

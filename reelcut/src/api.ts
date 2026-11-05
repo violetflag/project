@@ -70,7 +70,7 @@ export const api = {
   findFaces: (path: string, lens: Lens, times: number[]) => invoke<{ t: number; faces: { x: number; y: number; w: number; h: number; score: number }[] }[]>("find_faces", { req: { path, lens, times } }),
   trackPeople: (path: string, lens: Lens, from: number, to: number, subjects: { name: string; seeds: [number, number, number][] }[]) =>
     invoke<{ name: string; tracked: number; marks: [number, number, number][] }[]>("track_people", { req: { path, lens, from, to, subjects } }),
-  faceCheck: (path: string, lens: Lens, items: [number, View][]) => invoke<{ t: number; faces: number; edges: string[] }[]>("face_check", { req: { path, lens, items } }),
+  faceCheck: (path: string, lens: Lens, items: [number, View][], aspect = 16 / 9) => invoke<{ t: number; faces: number; edges: string[] }[]>("face_check", { req: { path, lens, items, aspect } }),
   scanShots: (id: string, info: MediaInfo, from?: number, to?: number) => invoke<BadShot[]>("scan_shots", { id, info, from: from ?? null, to: to ?? null }),
   syncAudio: (a: string, b: string) => invoke<{ offset: number; clear: number }>("sync_audio", { a, b }),
   autoColor: (path: string, start: number, end: number, lens?: Lens, view?: View) => invoke<{ exposure: number; contrast: number; temperature: number }>("auto_color", { req: { path, start, end, lens: lens ?? null, view: view ?? null } }),
@@ -79,7 +79,7 @@ export const api = {
   filmstrip: (path: string, duration: number, count: number) => invoke<string>("filmstrip", { path, duration, count }),
   poster: (path: string, at: number) => invoke<string>("poster", { path, at }),
   waveform: (path: string) => invoke<number[]>("waveform", { path }),
-  frames: (path: string, times: number[], width?: number, view?: View, lens?: Lens) => invoke<string[]>("frames", { req: { path, times, width: width ?? null, view: view ?? null, lens: lens ?? null } }),
+  frames: (path: string, times: number[], width?: number, view?: View, lens?: Lens, aspect?: number) => invoke<string[]>("frames", { req: { path, times, width: width ?? null, view: view ?? null, lens: lens ?? null, aspect: aspect ?? null } }),
   eqSheet: (path: string, lens: Lens, times: number[], width: number) => invoke<string[]>("eq_sheet", { req: { path, lens, times, width, grid: true } }),
   contactSheet: (path: string, start: number, every: number, cols: number, rows: number, tileW: number) =>
     invoke<string>("contact_sheet", { path, start, every, cols, rows, tileW }),

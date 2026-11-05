@@ -62,21 +62,21 @@ mod tests {
         assert_eq!(fov_max(1.0), 330.0);
     }
 
-    /// Same answers as src/proj.ts on the shared fixture, when it is there.
+    /// Same answers as src/proj.ts on the shared fixture.
     #[test]
     fn matches_the_typescript_fixture() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/proj.json");
-        let Ok(text) = std::fs::read_to_string(path) else { return };
+        let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/proj.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let Some(rows) = v["viewDir"].as_array() else { return };
-        for r in rows {
-            let n = |k: &str| r[k].as_f64().unwrap_or(0.0);
-            let re = r_edge(n("hfov"), n("d"));
-            let got = view_dir(n("u"), n("v"), re, n("d"), n("hOverW"));
+        let n = |r: &serde_json::Value, k: &str| r[k].as_f64().unwrap_or(0.0);
+        for r in v["dir"].as_array().unwrap() {
+            let got = view_dir(n(r, "u"), n(r, "v"), r_edge(n(r, "hfov"), n(r, "d")), n(r, "d"), n(r, "hw"));
             let want = r["dir"].as_array().unwrap();
             for i in 0..3 {
                 assert!((got[i] - want[i].as_f64().unwrap()).abs() < 1e-6, "{r}");
             }
+        }
+        for r in v["fov_max"].as_array().unwrap() {
+            assert!((fov_max(n(r, "d")) - n(r, "max")).abs() < 1e-6, "{r}");
         }
     }
 }

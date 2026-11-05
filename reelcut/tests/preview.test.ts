@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { promptName } from "../src/chats";
 import { captionLines, draftCaptions, keyWordIndex, moveWordPrev, setHidden, setLineText, spokenIndex, toAss, toSrt, wordKey } from "../src/captions";
 import { activeBudget, activeNote, addActive, BUILTIN_SKILLS, chainSkills, chainStepNote, cleanSummary, findSkill, laterStepOf, looksForPeople, panoramaTimes, rangeFromText, mergeSkills, parseSkillCommand, runChainSteps, skillFromText, skillToText, upsertSkill } from "../src/skills";
-import { applyVerdicts, badSpans, capView, easePitch, frameGroup, frameSubject, maxFov, normView, percentOk, pitchLimit, project, smoothViewAt, saneMarks, subjectLooks, thinMarks } from "../src/framing";
+import { applyVerdicts, badSpans, capView, closeShortPieces, easePitch, frameGroup, frameSubject, maxFov, normView, percentOk, pitchLimit, project, smoothViewAt, saneMarks, subjectLooks, thinMarks } from "../src/framing";
 import { PEOPLE_360_RULE, PLAYBOOK_360 } from "../src/playbook";
 import { TOOLS } from "../src/agent";
 import { aiExportSound, DEFAULT_CHOICE, rememberedChoice } from "../src/exporter";
@@ -298,7 +298,7 @@ describe("skills and gaze", () => {
     const words = new Set<string>();
     for (const k of BUILTIN_SKILLS) for (const m of k.body.matchAll(/\b([a-z]+_[a-z_]+)\b/g)) words.add(m[1]);
     // Values and guide names that look like tool names.
-    const allowed = new Set([...BUILTIN_SKILLS.map((k) => k.name), "jump_cut", "break_by", "max_chars", "cut_source", "add_music", "add_overlay", "shrink_balanced", "shrink_small", "shrink_archive", "shrink_lecture", "break_before", "join_next", "move_word_prev", "fix_word", "set_line", "zoom_in", "zoom_out", "pan_left", "pan_right", "remove_range", "head_marks", "draft_id", "asset_id", "run_script", "set_view_keys", "not_ok_times", "ok_times", "allow_steep"]);
+    const allowed = new Set([...BUILTIN_SKILLS.map((k) => k.name), "jump_cut", "break_by", "max_chars", "cut_source", "add_music", "add_overlay", "shrink_balanced", "shrink_small", "shrink_archive", "shrink_lecture", "break_before", "join_next", "move_word_prev", "fix_word", "set_line", "zoom_in", "zoom_out", "pan_left", "pan_right", "remove_range", "head_marks", "draft_id", "asset_id", "run_script", "set_view_keys", "not_ok_times", "ok_times", "allow_steep", "view_preset", "quick_action"]);
     const unknown = [...words].filter((w) => !known.has(w) && !allowed.has(w));
     expect(unknown).toEqual([]);
     expect(BUILTIN_SKILLS).toHaveLength(33);
@@ -479,10 +479,10 @@ describe("who is in frame", () => {
     expect(thinMarks([m(0, 1, 2), m(0.2, 1, 2), m(0.5, 1, 2)]).map((x) => x.t)).toEqual([0, 0.5]);
     // Asked-for wide angles are held back by frame shape, unless the user asked for them.
     const pair = [{ name: "a", marks: [m(0, 480, 300), m(5, 480, 300)] }, { name: "b", marks: [m(0, 490, 300), m(5, 490, 300)] }];
-    expect(Math.max(...frameGroup(pair, 0, 5, { aspect: 9 / 16, hfov: 110 }).keys.map((k) => k.view.hfov))).toBeLessThanOrEqual(70);
-    expect(Math.max(...frameGroup(pair, 0, 5, { aspect: 16 / 9, hfov: 130 }).keys.map((k) => k.view.hfov))).toBeLessThanOrEqual(100);
+    expect(Math.max(...frameGroup(pair, 0, 5, { aspect: 9 / 16, hfov: 110 }).keys.map((k) => k.view.hfov))).toBeLessThanOrEqual(75);
+    expect(Math.max(...frameGroup(pair, 0, 5, { aspect: 16 / 9, hfov: 130 }).keys.map((k) => k.view.hfov))).toBeLessThanOrEqual(118);
     expect(frameGroup(pair, 0, 5, { aspect: 16 / 9, hfov: 110, free: true }).keys[0].view.hfov).toBeCloseTo(110);
-    expect(Math.max(...frameSubject(pair[0].marks, 0, 5, { aspect: 9 / 16 }).map((k) => k.view.hfov))).toBeLessThanOrEqual(70);
+    expect(Math.max(...frameSubject(pair[0].marks, 0, 5, { aspect: 9 / 16 }).map((k) => k.view.hfov))).toBeLessThanOrEqual(75);
   });
 });
 
@@ -627,5 +627,30 @@ describe("one projection", () => {
     const keys = [{ t: 0, view: { yaw: 0, pitch: 0, roll: 0, hfov: 90, dist: 0.2 } }, { t: 2, view: { yaw: 0, pitch: 0, roll: 0, hfov: 90, dist: 0.6 } }];
     expect(smoothViewAt(keys, 1).dist).toBeGreaterThan(0.2);
     expect(smoothViewAt(keys, 1).dist).toBeLessThan(0.6);
+  });
+});
+
+describe("presets survive AI edits", () => {
+  it("leaves the wide, ultra and planet presets alone and pulls back a stretched view", () => {
+    const wide = { yaw: 0, pitch: 0, roll: 0, hfov: 118, dist: 0.6 };
+    expect(capView(wide, 16 / 9).hfov).toBe(118);
+    expect(capView({ ...wide, hfov: 154, dist: 1 }, 16 / 9).hfov).toBe(154);
+    const planet = { yaw: 0, pitch: -89, roll: 0, hfov: 263, dist: 1 };
+    expect(capView(planet, 16 / 9)).toEqual(planet);
+    expect(capView({ yaw: 0, pitch: 0, roll: 0, hfov: 150, dist: 0.3 }, 16 / 9).hfov).toBeLessThan(150);
+    expect(normView(planet).hfov).toBe(263);
+  });
+  it("follows people with the natural preset's projection", () => {
+    const m = [{ t: 0, x: 480, y: 300 }, { t: 5, x: 480, y: 300 }];
+    const k = frameSubject(m, 0, 5, { aspect: 16 / 9 });
+    expect(k[0].view.hfov).toBeCloseTo(91);
+    expect(k[0].view.dist).toBeCloseTo(0.3);
+    expect(frameSubject(m, 0, 5, { aspect: 9 / 16 })[0].view.hfov).toBeCloseTo(56);
+    expect(frameSubject(m, 0, 5, { aspect: 16 / 9, free: true })[0].view.dist).toBeUndefined();
+  });
+  it("does not leave flashes of a shot between cuts", () => {
+    expect(closeShortPieces([[290.5, 293.5], [294.5, 298.5]], 284, 299)).toEqual([[290.5, 299]]);
+    expect(closeShortPieces([[284.5, 286]], 284, 299)).toEqual([[284, 286]]);
+    expect(closeShortPieces([], 0, 9)).toEqual([]);
   });
 });
