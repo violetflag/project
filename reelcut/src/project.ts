@@ -29,6 +29,12 @@ export async function openProjectFile(path: string): Promise<boolean> {
     return false;
   }
   let p = r.project as Project;
+  // A backup in a copied folder: the copy holds what that backup holds (as 되살리기 would).
+  const b = r.conflict ? (r.backupProject as Project | null | undefined) : null;
+  if (b?.drafts?.length) {
+    const have = new Set(p.assets.map((a) => a.id));
+    p = { ...p, drafts: b.drafts, assets: [...p.assets, ...(b.assets ?? []).filter((a) => !have.has(a.id))], folders: [...new Set([...(p.folders ?? []), ...(b.folders ?? [])])] };
+  }
   if (r.conflict) p = { ...p, id: uid(), name: `${p.name} (사본)`, chats: p.chats?.map(copyChat) };
   if (st.project) await saveNow();
   let cur: Project | null = null;
@@ -38,10 +44,11 @@ export async function openProjectFile(path: string): Promise<boolean> {
   if (!cur || (p.updated ?? 0) > (cur.updated ?? 0)) await api.projectSave(p.id, JSON.stringify(p), localIso());
   await loadProjects();
   await openProject(p.id);
-  if (r.backup && st.project?.id === p.id) {
+  if (r.backup && !r.conflict && st.project?.id === p.id) {
     set({ dialog: "backups", backupPick: r.backup });
     toast("백업 파일은 프로젝트를 연 뒤 '되살리기'로 되돌립니다");
-  } else if (r.from !== "file") toast(`프로젝트 파일이 손상되어 ${r.from === "bak" ? "바로 전에 저장한 내용" : "가장 최근 백업"}으로 열었습니다`);
+  } else if (r.conflict && b?.drafts?.length) toast(`다른 폴더에 같은 프로젝트가 있어, 그 백업(${r.backup})의 내용을 사본으로 열었습니다`);
+  else if (r.from !== "file") toast(`프로젝트 파일이 손상되어 ${r.from === "bak" ? "바로 전에 저장한 내용" : "가장 최근 백업"}으로 열었습니다`);
   else if (r.conflict) toast("다른 폴더에 같은 프로젝트가 있어 사본으로 열었습니다");
   else if (r.warnings.length) toast(r.warnings[0]);
   return true;

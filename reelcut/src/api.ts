@@ -59,7 +59,7 @@ export const api = {
   jsonlTail: (kind: "actions" | "chats", name: string, max: number) => invoke<string[]>("jsonl_tail", { kind, name, max }),
   // Project folders (2.18): Documents\Reelcut\<이름>\<이름>.reelcut with chats, logs and backups.
   projectSave: (id: string, json: string, savedAt: string) => invoke<{ file?: string; folder?: string; error?: string }>("project_save", { id, json, savedAt }),
-  projectOpen: (path: string, time: string) => invoke<{ project: any; folder: string; from: string; warnings: string[]; conflict: boolean; backup?: string | null }>("project_open", { path, time }),
+  projectOpen: (path: string, time: string) => invoke<{ project: any; folder: string; from: string; warnings: string[]; conflict: boolean; backup?: string | null; backupProject?: any }>("project_open", { path, time }),
   projectInfo: (id: string) => invoke<{ folder: string; file?: string } | null>("project_info", { id }),
   projectRoot: () => invoke<ProjectRoot>("project_root"),
   projectSetRoot: (path: string) => invoke<void>("project_set_root", { path }),

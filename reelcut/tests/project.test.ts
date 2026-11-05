@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../src/api";
 import { newDraft } from "../src/edit";
 import { hourlyTick, HOURLY_MS, isProjectFile, openPaths, openProjectFile, queueOpen, recoverConversations, recoverGroup, relinkFrom, restoreBackup, saveProjectAs, takeHanded } from "../src/project";
-import { canUndo, checkMissing, deleteProject, localIso, localStamp, mutate, SAVE_DEBOUNCE, SAVE_MAX, saveNow, set, st, undo } from "../src/store";
+import { canUndo, checkMissing, createProject, deleteProject, localIso, localStamp, mutate, openProject, SAVE_DEBOUNCE, SAVE_MAX, saveNow, set, st, undo } from "../src/store";
 import { COMMANDS } from "../src/commands";
 import { copyChat, retire } from "../src/chats";
 import type { Project } from "../src/types";
@@ -208,6 +208,43 @@ describe("saving", () => {
     expect(saves.map((x) => JSON.parse(x.json).name)).toEqual(["여행", "셋째"]);
   });
 
+  it("saves the open project's last edit before another project (or a new one) takes its place", async () => {
+    store.set("project-sB", JSON.stringify(proj("sB", { name: "비" })));
+    set({ project: proj("sA", { name: "에이" }), draftId: "d1" });
+    const gates: (() => void)[] = [];
+    vi.spyOn(api, "projectSave").mockImplementation(async (id, json) => {
+      await new Promise<void>((r) => gates.push(r));
+      store.set("project-" + id, json);
+      saves.push({ id, json });
+      return { file: "C:/R/x/x.reelcut" };
+    });
+    // A's autosave is running; one more edit, then 홈 (a save is only queued), then B's card.
+    void saveNow();
+    mutate((p) => ({ ...p, name: "에이 최종" }));
+    void saveNow();
+    const opening = openProject("sB");
+    await vi.waitFor(() => expect(gates.length).toBe(1));
+    gates.shift()!();
+    await vi.waitFor(() => expect(gates.length).toBe(1));
+    gates.shift()!();
+    await opening;
+    expect(st.project?.id).toBe("sB");
+    expect(saves.map((x) => [x.id, JSON.parse(x.json).name])).toEqual([["sA", "에이"], ["sA", "에이 최종"]]);
+    expect(JSON.parse(store.get("project-sA")!).name).toBe("에이 최종");
+    // The same with a new project made while B's edit is still being saved.
+    mutate((p) => ({ ...p, name: "비 최종" }));
+    void saveNow();
+    const making = createProject("새 프로젝트");
+    // B's save, B's queued save, then the new project's first save.
+    for (let i = 0; i < 3; i++) {
+      await vi.waitFor(() => expect(gates.length).toBe(1));
+      gates.shift()!();
+    }
+    await making;
+    expect(JSON.parse(store.get("project-sB")!).name).toBe("비 최종");
+    expect(st.project?.name).toBe("새 프로젝트");
+  });
+
   it("never brings back a project deleted from Home while it was the last one open", async () => {
     set({ project: proj("s2"), draftId: "d1", route: "home" });
     await saveNow();
@@ -242,6 +279,17 @@ describe("opening from Explorer", () => {
     await openProjectFile("C:/R/여행/백업/2026-11-05 0900 수동.reelcut");
     expect(st.project?.id).toBe("o2");
     expect([st.dialog, st.backupPick]).toEqual(["backups", "2026-11-05 0900 수동.reelcut"]);
+  });
+
+  it("opens a backup from a copied folder as a copy holding that backup", async () => {
+    const backupProject = proj("o2", { drafts: [{ ...newDraft("백업 편집본"), id: "d9" }] });
+    vi.spyOn(api, "projectOpen").mockResolvedValue({ project: proj("o2"), folder: "E:/여행", from: "file", warnings: [], conflict: true, backup: "2026-11-01 0900 AI 작업 전.reelcut", backupProject });
+    await openProjectFile("E:/여행/백업/2026-11-01 0900 AI 작업 전.reelcut");
+    expect(st.project?.id).not.toBe("o2");
+    expect([st.project?.name, st.project?.drafts[0].name]).toEqual(["여행 (사본)", "백업 편집본"]);
+    // Its own (new) folder has no such backup, so the backups dialog does not open for it.
+    expect([st.dialog, st.backupPick]).toEqual(["", ""]);
+    expect(st.toast).toContain("사본으로 열었습니다");
   });
 
   it("keeps files handed over while starting, and opens them in order once ready", async () => {

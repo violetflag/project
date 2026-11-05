@@ -103,7 +103,7 @@ export async function invoke(cmd: string, a: any = {}): Promise<any> {
       const files = (window as any).__mockProjectFiles ?? {};
       const doc = files[a.path];
       if (!doc) throw new Error(`${a.path}: 파일이 없습니다`);
-      return { project: doc, folder: a.path.replace(/[\\/][^\\/]+$/, ""), from: "file", warnings: [], conflict: false, backup: (window as any).__mockOpenBackup ?? null };
+      return { project: doc, folder: a.path.replace(/[\\/][^\\/]+$/, ""), from: "file", warnings: [], conflict: !!(window as any).__mockOpenConflict, backup: (window as any).__mockOpenBackup ?? null, backupProject: (window as any).__mockOpenBackupProject ?? null };
     }
     case "project_info": { const f = ls.get(`folder:${a.id}`); return f ? { folder: f, file: `${f}/${f.split("/").pop()}.reelcut` } : null; }
     case "project_root": return { root: ls.get("mock-root") || "C:/Users/me/Documents/Reelcut", default: "C:/Users/me/Documents/Reelcut", custom: !!ls.get("mock-root"), docsSyncedBy: null, rootSyncedBy: null };

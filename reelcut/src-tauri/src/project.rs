@@ -434,18 +434,65 @@ pub fn folder_id(dir: &Path) -> Option<String> {
     })
 }
 
-/// A folder Reelcut made for a project (`<folder>.reelcut` or its `.bak`, a 대화 folder, or its
-/// README), not some folder a lone `.reelcut` file was dropped into (the Desktop, Downloads, a
-/// drive). Only such folders are written into, renamed or moved to the trash.
+/// A folder Reelcut made for a project: it holds Reelcut's README, or `<folder>.reelcut` (or its
+/// `.bak`) together with one of Reelcut's own sub-folders. Not some folder a lone `.reelcut` file
+/// was dropped into (the Desktop, Downloads, a drive, the user's footage folder named like the
+/// project, a folder that happens to have a 대화 sub-folder). Only such folders are written into,
+/// renamed or moved to the trash.
 pub fn is_project_folder(dir: &Path) -> bool {
     let Some(base) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else { return false };
     if dir.parent().is_none() || !dir.is_dir() {
         return false;
     }
-    dir.join(format!("{base}.{EXT}")).is_file()
-        || dir.join(format!("{base}.{EXT}.bak")).is_file()
-        || dir.join(CHATS).is_dir()
-        || std::fs::read_to_string(dir.join("README.txt")).is_ok_and(|t| t.starts_with("Reelcut 프로젝트 폴더"))
+    let marked = std::fs::read_to_string(dir.join("README.txt")).is_ok_and(|t| t.starts_with("Reelcut 프로젝트 폴더"));
+    let file = dir.join(format!("{base}.{EXT}")).is_file() || dir.join(format!("{base}.{EXT}.bak")).is_file();
+    marked || (file && [CHATS, LOGS, BACKUPS].iter().any(|s| dir.join(s).is_dir()))
+}
+
+/// Holds nothing but what Reelcut puts into a project folder, so renaming it or moving it to the
+/// trash can never take the user's own files with it.
+fn only_ours(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    let ext = format!(".{EXT}");
+    let bak = format!(".{EXT}.bak");
+    entries.flatten().all(|e| {
+        let n = e.file_name().to_string_lossy().into_owned();
+        let l = n.to_ascii_lowercase();
+        l.ends_with(&ext)
+            || l.ends_with(&bak)
+            || l.ends_with(".tmp")
+            || [CHATS, LOGS, BACKUPS].contains(&n.as_str())
+            || ["readme.txt", "desktop.ini", "thumbs.db", ".ds_store"].contains(&l.as_str())
+    })
+}
+
+/// On a drive (or network share) that is not connected now: an external drive left unplugged.
+fn drive_gone(p: &Path) -> bool {
+    p.ancestors().filter(|d| !d.as_os_str().is_empty()).last().is_some_and(|d| !d.exists())
+}
+
+fn ms_of(t: SystemTime) -> Option<u64> {
+    t.duration_since(SystemTime::UNIX_EPOCH).ok().map(|d| d.as_millis() as u64)
+}
+
+fn now_ms() -> u64 {
+    ms_of(SystemTime::now()).unwrap_or(0)
+}
+
+/// The folder holds the project file this app wrote last (by its digest), not a copy saved at
+/// another moment.
+fn holds_sum(dir: &Path, id: &str, sum: &str) -> bool {
+    project_files(dir).iter().any(|p| file_id(p).as_deref() == Some(id) && std::fs::read(p).is_ok_and(|b| digest(&b) == sum))
+}
+
+/// The project file was written before the project's folder was made again: it is the folder the
+/// user moved away, not a copy of the one made since (a copy keeps the time its file was last
+/// written). `at` 0 is a record from 2.18.1, which kept no time: the made folder's own creation
+/// time stands in for it.
+fn written_before(file: &Path, at: u64, made: &Path) -> bool {
+    let at = if at > 0 { Some(at) } else { std::fs::metadata(made).and_then(|m| m.created()).ok().and_then(ms_of) };
+    let written = std::fs::metadata(file).and_then(|m| m.modified()).ok().and_then(ms_of);
+    matches!((written, at), (Some(w), Some(a)) if w < a)
 }
 
 /// Inside a `_휴지통` folder (a deleted project, or pruned backups).
@@ -676,10 +723,30 @@ pub struct RegFile {
     /// project is renamed in the app, never because the user renamed the folder in Explorer.
     #[serde(default)]
     pub names: HashMap<String, String>,
-    /// Projects whose folder vanished and was made again by a save; when the user then opens the
-    /// moved folder, it takes over instead of opening as a copy.
+    /// Projects whose folder vanished (or could not be told apart from a copy) and was made again
+    /// by a save, with when (ms). When the user then opens the folder they moved, whose project
+    /// file was written before that moment, it takes over instead of opening as a copy; a copy of
+    /// the folder made since still opens as a copy.
+    #[serde(default, deserialize_with = "recreated_in")]
+    pub recreated: HashMap<String, u64>,
+    /// Project id → digest of the project file its last save wrote, so a folder found again after
+    /// a rename or move is the one this app wrote, not a snapshot copy the user made beside it.
     #[serde(default)]
-    pub recreated: HashSet<String>,
+    pub sums: HashMap<String, String>,
+}
+
+/// `recreated` as 2.18.1 wrote it (a list of ids, no time) or as a map of id → ms.
+fn recreated_in<'de, D: serde::Deserializer<'de>>(d: D) -> Result<HashMap<String, u64>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Any {
+        At(HashMap<String, u64>),
+        Ids(Vec<String>),
+    }
+    Ok(match Any::deserialize(d)? {
+        Any::At(m) => m,
+        Any::Ids(v) => v.into_iter().map(|id| (id, 0)).collect(),
+    })
 }
 
 pub struct Reg {
@@ -708,7 +775,7 @@ impl Reg {
     pub fn unbind(&mut self, id: &str) -> Result<(), String> {
         let a = self.file.folders.remove(id).is_some();
         let b = self.file.names.remove(id).is_some();
-        let c = self.file.recreated.remove(id);
+        let c = self.file.recreated.remove(id).is_some();
         if a || b || c {
             self.store()?;
         }
@@ -725,35 +792,68 @@ impl Reg {
     /// moved in Explorer, or deleted with the project and brought back from Home's 휴지통) found
     /// again by its id. Nothing is made.
     pub fn locate(&mut self, root: &Path, id: &str, name: Option<&str>) -> Option<PathBuf> {
+        self.find(root, id, name).0
+    }
+    /// `locate`, and whether folders of this project were seen that could not be told apart (a
+    /// snapshot copy beside the folder the user renamed).
+    fn find(&mut self, root: &Path, id: &str, name: Option<&str>) -> (Option<PathBuf>, bool) {
         if let Some(d) = self.folder(id) {
-            return Some(d);
+            return (Some(d), false);
         }
         let old = self.file.folders.get(id).map(PathBuf::from);
-        let found = find_folder(root, id, old.as_deref())?;
+        // On a drive that is not plugged in: nothing is looked for elsewhere, so nothing takes its
+        // place, and saves go back to it once the drive is there again.
+        if old.as_deref().is_some_and(drive_gone) {
+            return (None, false);
+        }
+        let (found, seen) = find_folder(root, id, old.as_deref(), self.file.sums.get(id).map(String::as_str));
+        let Some(found) = found else { return (None, seen) };
         let name = name.map(String::from).unwrap_or_else(|| name_in(&found));
-        let found = if in_trash(&found) { untrash(&found, root, &folder_name(&name), id, &self.file.folders)? } else { found };
-        self.adopt(id, &found, &name).ok()?;
-        Some(found)
+        let found = if in_trash(&found) {
+            match untrash(&found, root, &folder_name(&name), id, &self.file.folders) {
+                Some(f) => f,
+                None => return (None, seen),
+            }
+        } else {
+            found
+        };
+        if self.adopt(id, &found, &name).is_err() {
+            return (None, seen);
+        }
+        (Some(found), seen)
     }
     /// The project's folder, made under `root` the first time ("이름 (2)" when the name is taken
-    /// by another project), and renamed when the project was renamed in the app.
+    /// by another project), and renamed when the project was renamed in the app. A folder on a
+    /// drive that is not connected is an error, not a reason to make another.
     pub fn folder_for(&mut self, root: &Path, id: &str, name: &str) -> Result<PathBuf, String> {
         ok_id(id)?;
         let want = folder_name(name);
-        if let Some(dir) = self.locate(root, id, Some(name)) {
+        let (found, seen) = self.find(root, id, Some(name));
+        if let Some(dir) = found {
             return self.follow_name(root, id, &want, dir);
         }
-        let vanished = self.file.folders.contains_key(id);
+        if let Some(old) = self.file.folders.get(id).filter(|p| drive_gone(Path::new(p))) {
+            return Err(format!("프로젝트 폴더가 있는 드라이브가 연결되어 있지 않습니다: {old}"));
+        }
+        let vanished = self.file.folders.contains_key(id) || seen;
         std::fs::create_dir_all(root).map_err(|e| format!("{}: {e}", root.display()))?;
         let dir = free_name(root, &want, id, &self.file.folders).ok_or("폴더 이름을 정하지 못했습니다")?;
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         self.file.folders.insert(id.to_string(), dir.to_string_lossy().into_owned());
         self.file.names.insert(id.to_string(), want);
         if vanished {
-            self.file.recreated.insert(id.to_string());
+            self.file.recreated.insert(id.to_string(), now_ms());
         }
         self.store()?;
         Ok(dir)
+    }
+    /// Notes the digest of the project file a save wrote.
+    pub fn note_sum(&mut self, id: &str, sum: &str) -> Result<(), String> {
+        if self.file.sums.get(id).map(String::as_str) == Some(sum) {
+            return Ok(());
+        }
+        self.file.sums.insert(id.to_string(), sum.to_string());
+        self.store()
     }
     /// Renames the folder (and its project file) after the project was renamed in the app.
     fn follow_name(&mut self, root: &Path, id: &str, want: &str, dir: PathBuf) -> Result<PathBuf, String> {
@@ -769,7 +869,7 @@ impl Reg {
             self.store()?;
             return Ok(dir);
         }
-        if !self.renames_tried.insert((id.to_string(), want.to_string())) || !is_project_folder(&dir) || root.starts_with(&dir) {
+        if !self.renames_tried.insert((id.to_string(), want.to_string())) || !is_project_folder(&dir) || !only_ours(&dir) || root.starts_with(&dir) {
             return Ok(dir);
         }
         let parent = dir.parent().map(Path::to_path_buf).unwrap_or_else(|| root.to_path_buf());
@@ -799,30 +899,45 @@ fn free_name(parent: &Path, name: &str, id: &str, folders: &HashMap<String, Stri
 }
 
 /// A project folder whose registered place is gone: renamed or moved within the projects folder
-/// or its old parent folder, or (newest first) in `_휴지통` after the project was deleted.
-fn find_folder(root: &Path, id: &str, old: Option<&Path>) -> Option<PathBuf> {
+/// or its old parent folder, or (newest first) in `_휴지통` after the project was deleted from Home
+/// (only then: a folder moved there because the user's own folder took over never comes back).
+/// When the digest of the project's last written file is known, only the one folder holding it
+/// is taken; a snapshot copy beside it, or two folders that cannot be told apart, give none. The
+/// flag says folders of this project were seen.
+fn find_folder(root: &Path, id: &str, old: Option<&Path>, sum: Option<&str>) -> (Option<PathBuf>, bool) {
     let mut parents = vec![root.to_path_buf()];
     if let Some(p) = old.and_then(Path::parent).filter(|p| *p != root && !in_trash(p)) {
         parents.push(p.to_path_buf());
     }
+    let mut found: Vec<PathBuf> = Vec::new();
     for parent in &parents {
         for e in std::fs::read_dir(parent).into_iter().flatten().flatten() {
             let p = e.path();
-            if e.file_name() != TRASH && p.is_dir() && is_project_folder(&p) && folder_id(&p).as_deref() == Some(id) {
-                return Some(p);
+            if e.file_name() != TRASH && p.is_dir() && is_project_folder(&p) && folder_id(&p).as_deref() == Some(id) && !found.contains(&p) {
+                found.push(p);
             }
         }
     }
-    let mut trashed: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(root.join(TRASH))
+    let seen = !found.is_empty();
+    if let Some(s) = sum {
+        found.retain(|p| holds_sum(p, id, s));
+    }
+    if found.len() == 1 {
+        return (found.pop(), seen);
+    }
+    if seen || old.is_some() {
+        return (None, seen);
+    }
+    let mut trashed: Vec<(bool, SystemTime, PathBuf)> = std::fs::read_dir(root.join(TRASH))
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_dir() && folder_id(p).as_deref() == Some(id))
-        .map(|p| (std::fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH), p))
+        .map(|p| (sum.is_some_and(|s| holds_sum(&p, id, s)), std::fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH), p))
         .collect();
-    trashed.sort_by(|a, b| b.0.cmp(&a.0));
-    trashed.into_iter().next().map(|x| x.1)
+    trashed.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    (trashed.into_iter().next().map(|x| x.2), false)
 }
 
 /// The project name written in a folder's project file.
@@ -1043,10 +1158,16 @@ pub fn save_folder(data: &Path, docs: Option<&Path>, home: &Path, project: &Valu
         r.folder_for(&root, &id, &name)
     })?;
     let img = img_dir(data, &dir, &id);
-    let wrote = {
+    let (wrote, sum) = {
         let mut w = WRITTEN.lock();
-        write_folder(&dir, &img, project, env!("CARGO_PKG_VERSION"), saved_at, w.get_or_insert_with(HashMap::new))?
+        let w = w.get_or_insert_with(HashMap::new);
+        let wrote = write_folder(&dir, &img, project, env!("CARGO_PKG_VERSION"), saved_at, w)?;
+        let sum = w.get(&wrote.file).cloned();
+        (wrote, sum)
     };
+    if let Some(s) = sum {
+        let _ = with_reg(data, |r| r.note_sum(&id, &s));
+    }
     let fresh = OWNED.lock().get_or_insert_with(HashMap::new).insert(id.clone(), dir.clone()).as_ref() != Some(&dir);
     if fresh {
         sync_logs(data, &dir, &id);
@@ -1130,7 +1251,7 @@ pub fn open_file(data: &Path, docs: Option<&Path>, home: &Path, path: &Path, tim
     let p = path.to_path_buf();
     let p = if p.is_dir() { project_files(&p).into_iter().next().ok_or("이 폴더에 .reelcut 파일이 없습니다")? } else { p };
     let (p, backup) = match backup_of(&p) {
-        Some(main) => (main, p.file_name().map(|n| n.to_string_lossy().into_owned())),
+        Some(main) => (main, Some(p)),
         None => (p, None),
     };
     let probe = file_id(&p).or_else(|| {
@@ -1171,9 +1292,9 @@ pub fn open_file(data: &Path, docs: Option<&Path>, home: &Path, path: &Path, tim
             Some(_) if in_trash(&o.folder) => Ok((true, o.folder.clone(), None)),
             // The folder the user moved, opened after a save had made a new one: it takes over,
             // and the new one goes to the trash.
-            Some(made) if r.file.recreated.contains(&id) => {
+            Some(made) if r.file.recreated.get(&id).is_some_and(|&at| written_before(&p, at, &made)) => {
                 r.adopt(&id, &o.folder, &name)?;
-                let gone = (is_project_folder(&made) && !root.starts_with(&made)).then(|| trash_folder(&made, &root, time).ok()).flatten();
+                let gone = (is_project_folder(&made) && only_ours(&made) && !root.starts_with(&made)).then(|| trash_folder(&made, &root, time).ok()).flatten();
                 Ok((false, o.folder.clone(), gone))
             }
             Some(_) => Ok((true, o.folder.clone(), None)),
@@ -1186,7 +1307,11 @@ pub fn open_file(data: &Path, docs: Option<&Path>, home: &Path, path: &Path, tim
     if !o.warnings.is_empty() {
         notes.push(format!("open {}: {}", p.display(), o.warnings.join(" / ")));
     }
-    let v = json!({ "project": o.project, "folder": folder.to_string_lossy(), "from": o.from, "warnings": o.warnings, "conflict": conflict, "backup": backup });
+    // A backup in a copied folder: the copy is made from what the backup holds (the folder's own
+    // backups are not the project's, so it could not be picked afterwards).
+    let backup_project = backup.as_ref().filter(|_| conflict).and_then(|b| read_doc(b).ok()).map(|d| d["project"].clone());
+    let backup = backup.as_ref().and_then(|b| b.file_name()).map(|n| n.to_string_lossy().into_owned());
+    let v = json!({ "project": o.project, "folder": folder.to_string_lossy(), "from": o.from, "warnings": o.warnings, "conflict": conflict, "backup": backup, "backupProject": backup_project });
     Ok((v, notes))
 }
 
@@ -1331,7 +1456,7 @@ pub async fn project_trash(app: super::St<'_>, handle: tauri::AppHandle, id: Str
             let root = r.root(docs.as_deref(), &home);
             let dir = r.folder(&id);
             let moved = match dir {
-                Some(d) if is_project_folder(&d) && !root.starts_with(&d) && !in_trash(&d) => trash_folder(&d, &root, &time).map(|to| Some((d, to))),
+                Some(d) if is_project_folder(&d) && only_ours(&d) && !root.starts_with(&d) && !in_trash(&d) => trash_folder(&d, &root, &time).map(|to| Some((d, to))),
                 _ => Ok(None),
             };
             r.unbind(&id).and(moved)
@@ -1668,6 +1793,181 @@ mod tests {
         with_reg(data, |r| r.folder(id))
     }
 
+    /// The file was last written a minute ago (time passes between saves on a real PC; here they
+    /// can fall in the same millisecond).
+    fn age(p: &Path) {
+        let f = std::fs::File::options().write(true).open(p).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(60)).unwrap();
+    }
+
+    /// An Explorer copy of a folder: the files keep the time they were last written.
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            let (a, b) = (e.path(), to.join(e.file_name()));
+            if a.is_dir() {
+                copy_tree(&a, &b);
+            } else {
+                std::fs::copy(&a, &b).unwrap();
+                let t = std::fs::metadata(&a).unwrap().modified().unwrap();
+                std::fs::File::options().write(true).open(&b).unwrap().set_modified(t).unwrap();
+            }
+        }
+    }
+
+    fn open_at(data: &Path, docs: &Path, root: &Path, file: &Path, time: &str) -> Value {
+        open_file(data, Some(docs), root, file, time, &root.join("tmp")).unwrap().0
+    }
+
+    #[test]
+    fn a_folder_on_an_unplugged_drive_is_waited_for_not_replaced() {
+        let root = tmp("drive");
+        let (data, docs) = (root.join("data"), root.join("Docs"));
+        let p = sample("drA", "여행", Path::new("/x"));
+        save_folder(&data, Some(&docs), &root, &p, "t").unwrap();
+        // The project's folder is on an external drive that is not plugged in at this start (a
+        // drive letter that is not there; on Linux a relative "Zq:" stands in for it).
+        let gone = "Zq:/영상/여행";
+        assert!(drive_gone(Path::new(gone)) && !drive_gone(&root));
+        with_reg(&data, |r| {
+            r.file.folders.insert("drA".into(), gone.into());
+            r.store()
+        })
+        .unwrap();
+        // The save says so, and no other folder takes the drive's place…
+        let e = save_folder(&data, Some(&docs), &root, &p, "t2").unwrap_err();
+        assert!(e.contains("드라이브") && e.contains(gone), "{e}");
+        assert!(with_reg(&data, |r| r.locate(&docs.join("Reelcut"), "drA", None)).is_none());
+        // …so the registration still points at the drive for when it is back.
+        let (folder, made) = with_reg(&data, |r| (r.file.folders.get("drA").cloned(), r.file.recreated.contains_key("drA")));
+        assert_eq!((folder.as_deref(), made), (Some(gone), false));
+    }
+
+    #[test]
+    fn a_folder_the_takeover_put_in_the_trash_never_comes_back() {
+        let root = tmp("revive");
+        let (data, docs) = (root.join("data"), root.join("Docs"));
+        let p = sample("rvA", "여행", Path::new("/x"));
+        let dir = save_folder(&data, Some(&docs), &root, &p, "t").unwrap().file.parent().unwrap().to_path_buf();
+        // Moved next to the footage on E:, a save made the folder again, and opening the moved one
+        // took over: the folder made meanwhile went to _휴지통.
+        let away = root.join("E").join("영상").join("여행");
+        std::fs::create_dir_all(away.parent().unwrap()).unwrap();
+        std::fs::rename(&dir, &away).unwrap();
+        age(&away.join("여행.reelcut"));
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t").unwrap().file.parent(), Some(dir.as_path()));
+        assert_eq!(open_at(&data, &docs, &root, &away.join("여행.reelcut"), "2026-11-05 1200")["conflict"], json!(false));
+        let trashed = docs.join("Reelcut/_휴지통/여행 (2026-11-05 1200)");
+        assert!(trashed.is_dir() && !dir.exists());
+        save_folder(&data, Some(&docs), &root, &p, "t2").unwrap();
+        age(&away.join("여행.reelcut"));
+        // A start while E: is away: the folder in _휴지통 stays there…
+        let parked = root.join("parked");
+        std::fs::rename(root.join("E"), &parked).unwrap();
+        save_folder(&data, Some(&docs), &root, &p, "t3").unwrap();
+        assert!(trashed.is_dir());
+        // …and with E: back, opening the user's folder still takes over (no '(사본)').
+        std::fs::rename(&parked, root.join("E")).unwrap();
+        assert_eq!(open_at(&data, &docs, &root, &away.join("여행.reelcut"), "2026-11-05 1300")["conflict"], json!(false));
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t4").unwrap().file, away.join("여행.reelcut"));
+    }
+
+    #[test]
+    fn a_footage_folder_named_like_the_project_is_never_taken() {
+        let root = tmp("footage");
+        let (data, docs) = (root.join("data"), root.join("Docs"));
+        let p = sample("ftA", "여행", Path::new("/x"));
+        let w = save_folder(&data, Some(&docs), &root, &p, "t").unwrap();
+        // The user keeps a copy of the project file beside the clips, in a folder named like it,
+        // and opens it there after deleting the project from Home (or on a new PC).
+        let clips = root.join("Videos").join("여행");
+        std::fs::create_dir_all(&clips).unwrap();
+        std::fs::write(clips.join("CAM_0001.OSV"), b"v").unwrap();
+        std::fs::copy(&w.file, clips.join("여행.reelcut")).unwrap();
+        with_reg(&data, |r| r.unbind("ftA")).unwrap();
+        assert!(!is_project_folder(&clips));
+        assert_eq!(open_at(&data, &docs, &root, &clips.join("여행.reelcut"), "t")["conflict"], json!(false));
+        assert_eq!(with_reg(&data, |r| r.file.folders.get("ftA").cloned()), None);
+        // Saves go into the project's own folder; nothing is written beside the clips.
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t2").unwrap().file, w.file);
+        let mut names: Vec<String> = std::fs::read_dir(&clips).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["CAM_0001.OSV", "여행.reelcut"]);
+        // A Desktop that happens to have a 대화 folder is not Reelcut's either.
+        let desk = root.join("Desktop");
+        std::fs::create_dir_all(desk.join(CHATS)).unwrap();
+        assert!(!is_project_folder(&desk));
+        // A folder Reelcut made, where the user also put clips, is never renamed (or moved to the
+        // trash, which checks the same).
+        let dir = w.file.parent().unwrap().to_path_buf();
+        assert!(only_ours(&dir));
+        std::fs::write(dir.join("CAM_0002.OSV"), b"v").unwrap();
+        assert!(!only_ours(&dir));
+        let mut q = p.clone();
+        q["name"] = json!("제주");
+        assert_eq!(save_folder(&data, Some(&docs), &root, &q, "t3").unwrap().file.parent(), Some(dir.as_path()));
+        assert!(dir.join("CAM_0002.OSV").is_file());
+    }
+
+    #[test]
+    fn a_copy_of_a_folder_made_again_still_opens_as_a_copy() {
+        let root = tmp("recopy");
+        let (data, docs) = (root.join("data"), root.join("Docs"));
+        let p = sample("rcA", "여행", Path::new("/x"));
+        let dir = save_folder(&data, Some(&docs), &root, &p, "t").unwrap().file.parent().unwrap().to_path_buf();
+        // Moved away while the app was closed: a save makes the folder again, and work goes on in it.
+        let away = root.join("E").join("여행");
+        std::fs::create_dir_all(away.parent().unwrap()).unwrap();
+        std::fs::rename(&dir, &away).unwrap();
+        age(&away.join("여행.reelcut"));
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t2").unwrap().file.parent(), Some(dir.as_path()));
+        assert!(with_reg(&data, |r| r.file.recreated.get("rcA").is_some_and(|&t| t > 0)));
+        save_folder(&data, Some(&docs), &root, &p, "t3").unwrap();
+        // Weeks later the user copies that folder onto a USB stick to try something: the copy opens
+        // as a copy, and the project's folder stays where it is.
+        let usb = root.join("USB").join("여행");
+        copy_tree(&dir, &usb);
+        assert_eq!(open_at(&data, &docs, &root, &usb.join("여행.reelcut"), "2026-12-01 0900")["conflict"], json!(true));
+        assert!(dir.is_dir() && reg_folder(&data, "rcA") == Some(dir.clone()));
+        // The folder the user moved away still takes over.
+        assert_eq!(open_at(&data, &docs, &root, &away.join("여행.reelcut"), "2026-12-01 1000")["conflict"], json!(false));
+        assert!(!dir.exists());
+        // A registry from 2.18.1 (a list of ids, no time) still loads, nothing else lost.
+        let r: RegFile = serde_json::from_str(r#"{"root":"D:/R","folders":{"x1":"D:/R/a"},"recreated":["x1"]}"#).unwrap();
+        assert_eq!((r.recreated.get("x1"), r.folders.len(), r.root.as_str()), (Some(&0), 1, "D:/R"));
+    }
+
+    #[test]
+    fn a_snapshot_copy_is_never_taken_for_the_project_folder() {
+        let root = tmp("snap");
+        let (data, docs) = (root.join("data"), root.join("Docs"));
+        let mut p = sample("snA", "여행", Path::new("/x"));
+        let dir = save_folder(&data, Some(&docs), &root, &p, "t1").unwrap().file.parent().unwrap().to_path_buf();
+        // Before a big edit the user copies the folder in Explorer as a snapshot, then works on.
+        let snap = dir.with_file_name("여행 - 복사본");
+        copy_tree(&dir, &snap);
+        let kept = std::fs::read(snap.join("여행.reelcut")).unwrap();
+        p["drafts"][0]["name"] = json!("둘째 편집본");
+        save_folder(&data, Some(&docs), &root, &p, "t2").unwrap();
+        // The original is renamed: the next save follows it, not the snapshot listed first.
+        let renamed = dir.with_file_name("여행 최종");
+        std::fs::rename(&dir, &renamed).unwrap();
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t2").unwrap().file, renamed.join("여행 최종.reelcut"));
+        // Then moved into a sub-folder, where it is not looked for: the snapshot is not taken
+        // either; a new folder is made, and the snapshot is left exactly as it was.
+        let moved = docs.join("Reelcut").join("2025").join("여행 최종");
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(&renamed, &moved).unwrap();
+        age(&moved.join("여행 최종.reelcut"));
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t3").unwrap().file.parent(), Some(dir.as_path()));
+        assert_eq!(std::fs::read(snap.join("여행.reelcut")).unwrap(), kept);
+        assert!(!snap.join("여행 - 복사본.reelcut").exists());
+        // Opening the moved original takes over; the snapshot opens as a copy.
+        assert_eq!(open_at(&data, &docs, &root, &moved.join("여행 최종.reelcut"), "2026-11-06 0900")["conflict"], json!(false));
+        assert_eq!(open_at(&data, &docs, &root, &snap.join("여행.reelcut"), "t")["conflict"], json!(true));
+        assert_eq!(save_folder(&data, Some(&docs), &root, &p, "t4").unwrap().file, moved.join("여행 최종.reelcut"));
+    }
+
     #[test]
     fn a_lone_file_never_takes_the_folder_it_was_dropped_in() {
         let root = tmp("lone");
@@ -1747,6 +2047,7 @@ mod tests {
         let away = root.join("D").join("영상").join("제주");
         std::fs::create_dir_all(away.parent().unwrap()).unwrap();
         std::fs::rename(&named, &away).unwrap();
+        age(&away.join("제주.reelcut"));
         let made = save_folder(&data, Some(&docs), &root, &p, "t").unwrap().file.parent().unwrap().to_path_buf();
         assert_eq!(made, named);
         let (v, _) = open_file(&data, Some(&docs), &root, &away.join("제주.reelcut"), "2026-11-05 1300", &temp).unwrap();
@@ -1798,6 +2099,14 @@ mod tests {
         // Its conversations come from the project folder, not from 백업.
         assert_eq!(v["project"]["chats"][0]["messages"].as_array().map(Vec::len), Some(3));
         assert!(v["warnings"].as_array().is_some_and(Vec::is_empty));
+        assert!(v["backupProject"].is_null());
+        // The same backup in a copy of the folder (a USB stick): it opens as a copy, made from what
+        // the backup holds.
+        let usb = root.join("USB").join("여행");
+        copy_tree(&dir, &usb);
+        let (v, _) = open_file(&data, Some(&docs), &root, &usb.join(BACKUPS).join(&b), "t", &temp).unwrap();
+        assert_eq!((v["backup"].as_str(), v["conflict"].as_bool()), (Some(b.as_str()), Some(true)));
+        assert_eq!(v["backupProject"]["drafts"][0]["name"].as_str(), Some("첫 편집본"));
     }
 
     #[test]

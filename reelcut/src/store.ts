@@ -226,7 +226,16 @@ export async function loadProjects() {
   set({ projects: metas, brokenProjects: broken });
 }
 
+/**
+ * Before another project takes the open one's place: its last edits are written first. A save
+ * asked for while one runs saves whichever project is open when it runs, which would be the next.
+ */
+async function saveBeforeSwitch() {
+  if (st.project && (firstUnsaved || inFlight || queued)) await saveNow();
+}
+
 export async function createProject(name: string, aspect = "16:9", fps = 30): Promise<Project> {
+  await saveBeforeSwitch();
   const now = Date.now();
   const d = newDraft("첫 편집본", aspect, fps);
   const c = newSession();
@@ -238,6 +247,8 @@ export async function createProject(name: string, aspect = "16:9", fps = 30): Pr
 }
 
 export async function openProject(id: string) {
+  // Also when it is the same project: the store must hold its last edits before it is read back.
+  await saveBeforeSwitch();
   const raw = await api.storeGet("project-" + id);
   if (!raw) return toast("프로젝트를 찾을 수 없습니다");
   // Brought back from the trash, or made again.
