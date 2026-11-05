@@ -999,6 +999,77 @@ impl Stitcher {
 
 // ------------------------------------------------------------------ running it on a file
 
+/// Raw lens pictures are tens of MB each. An ordinary pipe holds 64 KB, so ffmpeg and the reader take
+/// turns for every 64 KB and that is what limits an export (44 pictures a second measured on John's
+/// PC against 73 with this): on Windows the pictures come through a named pipe with a larger buffer.
+#[cfg(windows)]
+mod big_pipe {
+    use parking_lot::Mutex;
+    use std::ffi::c_void;
+    use std::io::Read;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    const BUFFER: u32 = 4 << 20;
+    const PIPE_ACCESS_INBOUND: u32 = 1;
+    extern "system" {
+        fn CreateNamedPipeW(name: *const u16, open: u32, mode: u32, max: u32, out: u32, inb: u32, timeout: u32, sa: *mut c_void) -> *mut c_void;
+        fn ConnectNamedPipe(h: *mut c_void, o: *mut c_void) -> i32;
+    }
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    /// Waits for ffmpeg to open its end on the first read.
+    struct Pipe {
+        file: std::fs::File,
+        connected: bool,
+    }
+    impl Read for Pipe {
+        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+            if !self.connected {
+                self.connected = true;
+                // Fails harmlessly when ffmpeg got there first.
+                unsafe { ConnectNamedPipe(self.file.as_raw_handle() as *mut c_void, std::ptr::null_mut()) };
+            }
+            self.file.read(b)
+        }
+    }
+
+    /// The pipe's name for ffmpeg and our end of it; None if it cannot be made (stdout then).
+    pub fn create() -> Option<(String, Box<dyn Read + Send>)> {
+        let name = format!(r"\\.\pipe\reelcut-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+        let wide: Vec<u16> = std::ffi::OsStr::new(&name).encode_wide().chain([0]).collect();
+        let h = unsafe { CreateNamedPipeW(wide.as_ptr(), PIPE_ACCESS_INBOUND, 0, 1, BUFFER, BUFFER, 0, std::ptr::null_mut()) };
+        if h as isize == -1 || h.is_null() {
+            return None;
+        }
+        Some((name, Box::new(Pipe { file: unsafe { std::fs::File::from_raw_handle(h) }, connected: false })))
+    }
+
+    /// If ffmpeg ends before it ever opened the pipe, nobody would wake the reader: this does.
+    pub fn unblock_when_gone(child: Arc<Mutex<std::process::Child>>, name: String) {
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if !matches!(child.lock().try_wait(), Ok(None)) {
+                let _ = std::fs::File::open(&name);
+                return;
+            }
+        });
+    }
+}
+
+#[cfg(not(windows))]
+mod big_pipe {
+    use parking_lot::Mutex;
+    use std::io::Read;
+    use std::sync::Arc;
+    pub fn create() -> Option<(String, Box<dyn Read + Send>)> {
+        None
+    }
+    pub fn unblock_when_gone(_: Arc<Mutex<std::process::Child>>, _: String) {}
+}
+
 /// The recording to stitch.
 #[derive(Clone, Debug)]
 pub struct Source {
@@ -1113,9 +1184,21 @@ pub fn run<T: Px>(
     let n = src.n() as usize;
     let (iw, ih) = (2 * n, n);
     let in_len = Frame::<T>::byte_len(iw, ih);
-    let dec = spawn_tracked(jobs, tag, ffmpeg, &src.decode_args(T::FMT), false)?;
+    let mut dec_args = src.decode_args(T::FMT);
+    let big = big_pipe::create();
+    if let (Some((name, _)), Some(last)) = (&big, dec_args.last_mut()) {
+        *last = "-y".to_string();
+        dec_args.push(name.clone());
+    }
+    let dec = spawn_tracked(jobs, tag, ffmpeg, &dec_args, false)?;
     let dec_err = stderr_text(&dec);
-    let mut stdout = dec.lock().stdout.take().ok_or("ffmpeg 출력 없음")?;
+    let mut stdout: Box<dyn Read + Send> = match big {
+        Some((name, pipe)) => {
+            big_pipe::unblock_when_gone(dec.clone(), name);
+            pipe
+        }
+        None => Box::new(dec.lock().stdout.take().ok_or("ffmpeg 출력 없음")?),
+    };
     let (tx_in, rx_in) = sync_channel::<Vec<u8>>(2);
     // Used buffers come back: one input frame is tens of MB, too much to allocate for every picture.
     let (tx_back, rx_back) = std::sync::mpsc::channel::<Vec<u8>>();

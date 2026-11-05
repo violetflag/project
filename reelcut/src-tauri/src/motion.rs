@@ -963,7 +963,7 @@ pub fn motion_for(dir: &Path, ffmpeg: &Path, ffprobe: &Path, jobs: &Jobs, tag: &
 }
 
 /// Bump when the engine's picture changes, so kept clips are made again.
-pub const ENGINE_VERSION: u32 = 4;
+pub const ENGINE_VERSION: u32 = 6;
 
 /// How `render_flat` works: the lens size to decode at, the GPU, and the intermediate's quality.
 #[derive(Clone, Debug, Default)]
@@ -982,6 +982,8 @@ pub const RS_VERIFIED: bool = false;
 pub fn lens_px_for(fov: f64, w: u32, hfov_min: f64, dist: f64, lens_px: u32) -> u32 {
     let r_e = crate::proj::r_edge(hfov_min.max(20.0), dist);
     let want = fov.to_radians() * (w as f64 / 2.0) / r_e * 1.1;
+    // Close to the file's size, shrinking only softens the picture and costs a scaling pass.
+    let want = if want >= lens_px as f64 * 0.85 { lens_px as f64 } else { want };
     let n = want.clamp(1024.0_f64.min(lens_px as f64), lens_px as f64) as u32;
     n + n % 2
 }
