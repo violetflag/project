@@ -451,7 +451,7 @@ export async function prepare360(id: string) {
   const a = asset(id);
   if (!a || a.info.kind !== "video" || a.stitching) return;
   const lens: Lens = a.lens ?? { layout: a.info.layout360, swap: false, fov: 190 };
-  if ((lens.layout !== "dual" && lens.layout !== "dfisheye") || lens.stitch?.on === false || lens.stitch?.calibrated) return;
+  if ((lens.layout !== "dual" && lens.layout !== "dfisheye") || lens.stitch?.on === false || (lens.stitch?.calibrated && (lens.stitch.model ?? 0) >= 2)) return;
   patchAsset(id, { stitching: true });
   try {
     const stitch = await api.calibrate360(a.info, lens);

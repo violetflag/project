@@ -62,14 +62,35 @@ export function readMark(row: ArrayLike<number>): number | null {
   return k;
 }
 
-/** How the picture on the texture is laid out. */
-export type Proj = { kind: "equirect" } | { kind: "dfisheye"; fov: number; swap: boolean };
+/**
+ * A lens as the export reads it (src-tauri/src/stitch.rs `LensCal`, pano.rs `Geo`), as shares of the
+ * picture: r = f·θ(1 + k₁θ² + … + k₅θ¹⁰), round the centre (cu, cv).
+ */
+export type LensShape = { fu: number; fv: number; cu: number; cv: number; k: [number, number, number, number, number] };
+/** A plain fisheye of `fov` degrees, centred. */
+export const plainLens = (fov: number): LensShape => {
+  const f = 1 / ((fov * Math.PI) / 180);
+  return { fu: f, fv: f, cu: 0.5, cv: 0.5, k: [0, 0, 0, 0, 0] };
+};
+/** How the picture on the texture is laid out. "lenses": the back lens on the left half, the front on the right, joined here. */
+export type Proj = { kind: "equirect" } | { kind: "dfisheye"; fov: number; swap: boolean }
+  | { kind: "lenses"; back: LensShape; front: LensShape; yaw: number; pitch: number; roll: number; blend: number };
 
 const VS = `attribute vec2 p; varying vec2 uv; void main(){ uv = vec2(p.x*0.5+0.5, 0.5-p.y*0.5); gl_Position = vec4(p,0.0,1.0); }`;
 const FS = `precision highp float;
 varying vec2 uv; uniform sampler2D tex; uniform vec4 q; uniform vec2 rng;
 uniform float fish; uniform float frng; uniform float swp; uniform vec4 stab;
 uniform float dist; uniform float rE; uniform float asp; uniform vec2 vs;
+uniform float both; uniform vec4 backQ; uniform float bw;
+uniform vec4 shapeA; uniform vec4 kA; uniform float k5A; uniform vec4 shapeB; uniform vec4 kB; uniform float k5B;
+vec2 lensAt(vec3 v, vec4 s, vec4 k, float k5){
+  float h = length(v.xy);
+  float a = atan(h, v.z);
+  float t2 = a*a;
+  float r = a*(1.0 + t2*(k.x + t2*(k.y + t2*(k.z + t2*(k.w + t2*k5)))));
+  vec2 dir = h > 1e-9 ? v.xy/h : vec2(0.0);
+  return s.zw + s.xy*r*dir;
+}
 vec4 qm(vec4 a, vec4 b){ return vec4(
   a.x*b.x - a.y*b.y - a.z*b.z - a.w*b.w,
   a.x*b.y + a.y*b.x + a.z*b.w - a.w*b.z,
@@ -91,6 +112,16 @@ void main(){
   vec4 r = qm(qm(q, vec4(0.0, d)), vec4(q.x, -q.yzw));
   r = qm(qm(stab, r), vec4(stab.x, -stab.yzw));
   vec2 t;
+  if (both > 0.5) {
+    vec3 v = r.yzw;
+    vec3 vb = qm(qm(vec4(backQ.x, -backQ.yzw), vec4(0.0, v)), backQ).yzw;
+    float f = clamp((asin(clamp(v.z, -1.0, 1.0))*57.29578 + bw*0.5)/bw, 0.0, 1.0);
+    vec2 a = lensAt(vb, shapeA, kA, k5A), b = lensAt(v, shapeB, kB, k5B);
+    vec4 ca = texture2D(tex, vec2(clamp(a.x, 0.001, 0.999)*0.5, min(a.y*vs.x, vs.y)));
+    vec4 cb = texture2D(tex, vec2(0.5 + clamp(b.x, 0.001, 0.999)*0.5, min(b.y*vs.x, vs.y)));
+    gl_FragColor = mix(ca, cb, f);
+    return;
+  }
   if (fish > 0.5) {
     vec3 v = r.yzw;
     float h = length(v.xy);
@@ -189,6 +220,19 @@ export class Flat360 {
     gl.uniform1f(gl.getUniformLocation(this.prog, "fish"), fish ? 1 : 0);
     gl.uniform1f(gl.getUniformLocation(this.prog, "frng"), fish ? proj.fov / 360 : 1);
     gl.uniform1f(gl.getUniformLocation(this.prog, "swp"), fish && proj.swap ? 1 : 0);
+    gl.uniform1f(gl.getUniformLocation(this.prog, "both"), proj.kind === "lenses" ? 1 : 0);
+    if (proj.kind === "lenses") {
+      const u = (n: string, s: LensShape, m: string, k5: string) => {
+        gl.uniform4f(gl.getUniformLocation(this.prog, n), s.fu, s.fv, s.cu, s.cv);
+        gl.uniform4f(gl.getUniformLocation(this.prog, m), s.k[0], s.k[1], s.k[2], s.k[3]);
+        gl.uniform1f(gl.getUniformLocation(this.prog, k5), s.k[4]);
+      };
+      u("shapeA", proj.back, "kA", "k5A");
+      u("shapeB", proj.front, "kB", "k5B");
+      const b = rotation({ yaw: 180 + proj.yaw, pitch: proj.pitch, roll: proj.roll, hfov: 90 } as View);
+      gl.uniform4f(gl.getUniformLocation(this.prog, "backQ"), b[0], b[1], b[2], b[3]);
+      gl.uniform1f(gl.getUniformLocation(this.prog, "bw"), proj.blend);
+    }
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 }

@@ -57,6 +57,54 @@ pub struct Stitch {
     /// which the preview cannot show. (`flow` above is left from older files and not read.)
     #[serde(default)]
     pub seam: String,
+    /// The camera's factory calibration of the back and the front lens, when the file has it and it
+    /// lines the seam up better than what the picture alone gives.
+    #[serde(default)]
+    pub factory: Option<[LensCal; 2]>,
+    /// Which way of calibrating made this (older files are calibrated again).
+    #[serde(default)]
+    pub model: u32,
+}
+
+/// The calibration way of this version: looks for the camera's factory values first.
+pub const CAL_MODEL: u32 = 2;
+
+/// One lens from the camera's factory calibration (DJI's `DewarpParams` in the metadata track), in
+/// the file's pixels: r = fx·θ(1 + k₁θ² + k₂θ⁴ + k₃θ⁶ + k₄θ⁸ + k₅θ¹⁰).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LensCal {
+    pub fx: f64,
+    pub fy: f64,
+    pub cx: f64,
+    pub cy: f64,
+    pub k: [f64; 5],
+    pub size: f64,
+}
+
+impl LensCal {
+    /// θ with its distortion, in radians of the unit focal length.
+    fn bend(&self, t: f64) -> f64 {
+        let t2 = t * t;
+        let k = &self.k;
+        t * (1.0 + t2 * (k[0] + t2 * (k[1] + t2 * (k[2] + t2 * (k[3] + t2 * k[4])))))
+    }
+    /// Where a direction in the lens's own frame lands in an n×n picture of this lens.
+    #[inline]
+    pub fn px(&self, v: [f64; 3], n: f64) -> (f64, f64) {
+        let h = v[0].hypot(v[1]);
+        let lh = if h > 1e-12 { h } else { 1.0 };
+        let r = self.bend(h.atan2(v[2]));
+        let s = n / self.size;
+        ((self.fx * r * v[0] / lh + self.cx + 0.5) * s - 0.5, (self.fy * r * v[1] / lh + self.cy + 0.5) * s - 0.5)
+    }
+    /// For ffmpeg's plain fisheye, which has no distortion terms and sits in the picture's centre: the
+    /// square centred on the lens (size and left, top, as shares of the picture) and the field of view
+    /// that makes it agree with this lens at the seam, 90° off the axis.
+    pub fn plain(&self) -> (f64, f64, f64, f64) {
+        let half = (self.cx + 0.5).min(self.size - self.cx - 0.5).min(self.cy + 0.5).min(self.size - self.cy - 0.5);
+        let per_rad = self.fx * self.bend(std::f64::consts::FRAC_PI_2) / std::f64::consts::FRAC_PI_2;
+        (2.0 * half / self.size, (self.cx + 0.5 - half) / self.size, (self.cy + 0.5 - half) / self.size, (2.0 * half / per_rad).to_degrees())
+    }
 }
 
 impl Stitch {
@@ -74,7 +122,7 @@ fn neutral() -> [f64; 3] {
 
 impl Default for Stitch {
     fn default() -> Self {
-        Stitch { on: true, fov: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, gain_a: neutral(), gain_b: neutral(), calibrated: false, before: 0.0, after: 0.0, flow: true, seam: String::new() }
+        Stitch { on: true, fov: 0.0, yaw: 0.0, pitch: 0.0, roll: 0.0, gain_a: neutral(), gain_b: neutral(), calibrated: false, before: 0.0, after: 0.0, flow: true, seam: String::new(), factory: None, model: 0 }
     }
 }
 
@@ -189,7 +237,7 @@ fn flat_opts(y: f64, p: f64, r: f64, hfov: f64, w: u32, h: u32) -> String {
     format!("output=flat:h_fov={hf:.3}:v_fov={:.3}:yaw={:.3}:pitch={:.3}:roll={:.3}:w={w}:h={h}", vfov(hf, w, h), wrap180(y), p.clamp(-180.0, 180.0), r.clamp(-180.0, 180.0))
 }
 
-fn gain_lut(g: &[f64; 3]) -> Option<String> {
+pub(crate) fn gain_lut(g: &[f64; 3]) -> Option<String> {
     let neutral = (g[0] - 1.0).abs() < 1e-3 && g[1].abs() < 0.05 && g[2].abs() < 0.05;
     // lutyuv cuts the fraction off: +0.5 rounds, as the export's engine does.
     (!neutral).then(|| format!("lutyuv=y='clip(val*{:.4}+0.5,0,255)':u='clip(val+{:.2}+0.5,0,255)':v='clip(val+{:.2}+0.5,0,255)'", g[0], g[1], g[2]))
@@ -229,6 +277,15 @@ pub fn graph(i: usize, lens: &Lens, scale_each: Option<u32>, pre: &str, out: &Ou
     let f = s.fov.clamp(181.0, 260.0);
     let b = blend_width(f);
     let n = name;
+    // With the factory values each lens is cut square round its own centre and has its own field of view.
+    let plain = |i: usize| match (&s.factory, lens.layout.as_str()) {
+        (Some(c), "dual") => {
+            let (size, x, y, fov) = c[i].plain();
+            (format!("crop=iw*{size:.6}:ih*{size:.6}:iw*{x:.6}:ih*{y:.6},"), fov.clamp(181.0, 260.0))
+        }
+        _ => (String::new(), f),
+    };
+    let ((cut_a, fa), (cut_b, fb)) = (plain(0), plain(1));
     let pre = if pre.is_empty() { String::new() } else { format!("{pre},") };
     let sc = scale_each.map(|w| format!("scale={w}:{w}:flags=area,")).unwrap_or_default();
     let ident = |v: &View| (v.yaw, v.pitch, v.roll);
@@ -247,8 +304,8 @@ pub fn graph(i: usize, lens: &Lens, scale_each: Option<u32>, pre: &str, out: &Ou
     match lens.layout.as_str() {
         "dual" => {
             let (ia, ib) = if lens.swap { (1, 0) } else { (0, 1) };
-            g += &format!("[{i}:v:{ia}]{pre}{cmd_a}{sc}null[{n}_fa];");
-            g += &format!("[{i}:v:{ib}]{pre}{cmd_bm}{sc}split=2[{n}_fb][{n}_ft];");
+            g += &format!("[{i}:v:{ia}]{pre}{cmd_a}{sc}{cut_a}null[{n}_fa];");
+            g += &format!("[{i}:v:{ib}]{pre}{cmd_bm}{sc}{cut_b}split=2[{n}_fb][{n}_ft];");
         }
         _ => {
             let (la, lb) = if lens.swap { ("iw/2", "0") } else { ("0", "iw/2") };
@@ -274,8 +331,8 @@ pub fn graph(i: usize, lens: &Lens, scale_each: Option<u32>, pre: &str, out: &Ou
         }
     };
     let lut = |gn: &[f64; 3]| gain_lut(gn).map(|l| format!(",{l}")).unwrap_or_default();
-    g += &format!("[{n}_fa]v360@{na}=input=fisheye:ih_fov={f:.3}:iv_fov={f:.3}:{opts_a}:interp=lanczos,format=yuv420p{}[{n}_A];", lut(&s.gain_a));
-    g += &format!("[{n}_fb]v360@{nb}=input=fisheye:ih_fov={f:.3}:iv_fov={f:.3}:{opts_b}:interp=lanczos,format=yuv420p{}[{n}_B];", lut(&s.gain_b));
+    g += &format!("[{n}_fa]v360@{na}=input=fisheye:ih_fov={fa:.3}:iv_fov={fa:.3}:{opts_a}:interp=lanczos,format=yuv420p{}[{n}_A];", lut(&s.gain_a));
+    g += &format!("[{n}_fb]v360@{nb}=input=fisheye:ih_fov={fb:.3}:iv_fov={fb:.3}:{opts_b}:interp=lanczos,format=yuv420p{}[{n}_B];", lut(&s.gain_b));
     // The weight of the front lens (`front_weight`): the angle past the lens boundary at each point
     // of the sphere, so the blend is as wide at the top of the picture as at the horizon.
     let e = format!("255*clip((asin(cos((0.5-(Y+0.5)/H)*PI)*cos(((X+0.5)/W*2-1)*PI))*180/PI+{b:.4}/2)/{b:.4},0,1)");
@@ -419,8 +476,16 @@ fn band(half: f64) -> Band {
 /// Geometry being searched: fov, back yaw, pitch, roll.
 type Geo = [f64; 4];
 
+/// A band point in a lens's s×s copy: by the factory values when given, else by a plain fisheye.
+fn lens_px(v: [f64; 3], g: &Geo, n: f64, s: f64, cal: Option<&LensCal>) -> Option<(f64, f64)> {
+    match cal {
+        Some(c) => (v[0].hypot(v[1]).atan2(v[2]).to_degrees() <= g[0] / 2.0).then(|| c.px(v, s)),
+        None => fisheye_px(v, g[0], n, s),
+    }
+}
+
 /// The two lenses' samples (luma or a chroma plane) of every band point; NaN where a lens misses.
-fn sample(pairs: &[(&Pair, [&[f32]; 2])], band: &Band, g: &Geo, n: f64) -> Vec<(Vec<f32>, Vec<f32>)> {
+fn sample(pairs: &[(&Pair, [&[f32]; 2])], band: &Band, g: &Geo, n: f64, cal: Option<&[LensCal; 2]>) -> Vec<(Vec<f32>, Vec<f32>)> {
     let m = matrix(ypr(180.0 + g[1], g[2], g[3]));
     pairs
         .iter()
@@ -429,8 +494,8 @@ fn sample(pairs: &[(&Pair, [&[f32]; 2])], band: &Band, g: &Geo, n: f64) -> Vec<(
             let mut a = Vec::with_capacity(band.pts.len());
             let mut b = Vec::with_capacity(band.pts.len());
             for v in &band.pts {
-                let fb = fisheye_px(*v, g[0], n, s).and_then(|(x, y)| bilinear(img[1], p.s, x, y));
-                let fa = fisheye_px(rotate_t(&m, *v), g[0], n, s).and_then(|(x, y)| bilinear(img[0], p.s, x, y));
+                let fb = lens_px(*v, g, n, s, cal.map(|c| &c[1])).and_then(|(x, y)| bilinear(img[1], p.s, x, y));
+                let fa = lens_px(rotate_t(&m, *v), g, n, s, cal.map(|c| &c[0])).and_then(|(x, y)| bilinear(img[0], p.s, x, y));
                 match (fa, fb) {
                     (Some(x), Some(y)) => {
                         a.push(x);
@@ -450,9 +515,13 @@ fn sample(pairs: &[(&Pair, [&[f32]; 2])], band: &Band, g: &Geo, n: f64) -> Vec<(
 /// Mean absolute difference of the two lenses in the band after removing each block's mean (so a
 /// brightness difference does not count, only misplaced detail).
 fn cost(pairs: &[(&Pair, [&[f32]; 2])], band: &Band, g: &Geo, n: f64) -> f64 {
+    cost_with(pairs, band, g, n, None)
+}
+
+fn cost_with(pairs: &[(&Pair, [&[f32]; 2])], band: &Band, g: &Geo, n: f64, cal: Option<&[LensCal; 2]>) -> f64 {
     let mut total = 0.0;
     let mut cnt = 0usize;
-    for (a, b) in sample(pairs, band, g, n) {
+    for (a, b) in sample(pairs, band, g, n, cal) {
         let mut sa = vec![0f64; band.nblk];
         let mut sb = vec![0f64; band.nblk];
         let mut nn = vec![0usize; band.nblk];
@@ -525,14 +594,14 @@ fn search(pairs: &[Pair], fov0: f64, n: f64) -> (Geo, f64, f64) {
 }
 
 /// Brightness/colour match from the band: each lens moves half way to the other.
-fn gains(pairs: &[Pair], g: &Geo, n: f64) -> ([f64; 3], [f64; 3]) {
+fn gains(pairs: &[Pair], g: &Geo, n: f64, cal: Option<&[LensCal; 2]>) -> ([f64; 3], [f64; 3]) {
     let band = band(((g[0] - 180.0) * 0.4).clamp(0.6, 2.5));
     let mut mean = [[0f64; 3]; 2];
     let mut cnt = 0f64;
     for c in 0..3 {
         let set: Vec<(&Pair, [&[f32]; 2])> = pairs.iter().map(|p| (p, [p.planes[0][c].as_slice(), p.planes[1][c].as_slice()])).collect();
         let mut k = 0f64;
-        for (a, b) in sample(&set, &band, g, n) {
+        for (a, b) in sample(&set, &band, g, n, cal) {
             for (x, y) in a.iter().zip(&b) {
                 if !x.is_nan() {
                     mean[0][c] += *x as f64;
@@ -559,8 +628,16 @@ fn gains(pairs: &[Pair], g: &Geo, n: f64) -> ([f64; 3], [f64; 3]) {
 /// Self-calibration from the frames (each a side-by-side YUV 4:4:4 pair at s×s per lens, back
 /// first) of lenses that are `n` pixels wide in the file.
 pub fn calibrate_frames(frames: &[Vec<u8>], s: usize, n: f64, lens: &Lens) -> Stitch {
+    calibrate_with(frames, s, n, lens, None)
+}
+
+/// As `calibrate_frames`; `factory` is what the camera wrote: the back and the front lens, and the
+/// back lens's yaw, pitch and roll. Used unless it is plainly off: the search is tuned on these very
+/// frames, so it looks better here than it does elsewhere (on other frames of a real recording the
+/// two came out the same on average, 18.8 and 18.9).
+pub fn calibrate_with(frames: &[Vec<u8>], s: usize, n: f64, lens: &Lens, factory: Option<([LensCal; 2], [f64; 3])>) -> Stitch {
     let pairs: Vec<Pair> = frames.iter().filter_map(|f| Pair::from_yuv444(f, s)).collect();
-    let mut st = Stitch { on: lens.stitch.as_ref().map(|x| x.on).unwrap_or(true), calibrated: true, ..Default::default() };
+    let mut st = Stitch { on: lens.stitch.as_ref().map(|x| x.on).unwrap_or(true), calibrated: true, model: CAL_MODEL, seam: lens.stitch.as_ref().map(|x| x.seam.clone()).unwrap_or_default(), ..Default::default() };
     if pairs.is_empty() {
         st.fov = lens.fov;
         return st;
@@ -569,7 +646,28 @@ pub fn calibrate_frames(frames: &[Vec<u8>], s: usize, n: f64, lens: &Lens) -> St
     // Keep the found geometry only when it clearly lines the seam up better (flat sky or a dark
     // room gives nothing to match).
     let g = if after.is_finite() && before.is_finite() && after < before * 0.92 && before > 0.5 { g } else { [lens.fov, 0.0, 0.0, 0.0] };
-    let (ga, gb) = gains(&pairs, &g, n);
+    if let Some((cal, ang)) = factory {
+        let fov = (cal[0].plain().3 + cal[1].plain().3) / 2.0;
+        let fg: Geo = [fov.max(g[0]), ang[0], ang[1], ang[2]];
+        // Both judged the same way, on the sharp pictures in the same band.
+        let band = band((fov - 180.0).mul_add(0.4, 0.0).clamp(0.6, 2.5));
+        let set: Vec<(&Pair, [&[f32]; 2])> = pairs.iter().map(|p| (p, [p.planes[0][0].as_slice(), p.planes[1][0].as_slice()])).collect();
+        let (mine, theirs) = (cost(&set, &band, &g, n), cost_with(&set, &band, &fg, n, Some(&cal)));
+        if theirs <= mine * 1.25 {
+            let (ga, gb) = gains(&pairs, &fg, n, Some(&cal));
+            st.fov = (fov * 100.0).round() / 100.0;
+            st.yaw = (ang[0] * 1000.0).round() / 1000.0;
+            st.pitch = (ang[1] * 1000.0).round() / 1000.0;
+            st.roll = (ang[2] * 1000.0).round() / 1000.0;
+            st.gain_a = ga.map(|x| (x * 1000.0).round() / 1000.0);
+            st.gain_b = gb.map(|x| (x * 1000.0).round() / 1000.0);
+            st.before = (mine * 100.0).round() / 100.0;
+            st.after = (theirs * 100.0).round() / 100.0;
+            st.factory = Some(cal);
+            return st;
+        }
+    }
+    let (ga, gb) = gains(&pairs, &g, n, None);
     st.fov = (g[0] * 100.0).round() / 100.0;
     st.yaw = (g[1] * 100.0).round() / 100.0;
     st.pitch = (g[2] * 100.0).round() / 100.0;
@@ -585,8 +683,10 @@ pub fn calibrate_frames(frames: &[Vec<u8>], s: usize, n: f64, lens: &Lens) -> St
 /// .lrf companion when there is one (same lenses, much quicker to decode).
 pub fn calibrate(ffmpeg: &Path, ffprobe: &Path, info: &MediaInfo, lens: &Lens) -> Result<Stitch, String> {
     let layout = if lens.layout.is_empty() || lens.layout == "none" { info.layout360.as_str() } else { lens.layout.as_str() };
+    // The factory values describe the original's lenses: judged on the original, not on the .lrf.
+    let factory = crate::motion::factory_lenses(ffprobe, info, lens.swap);
     let (src, layout, n) = match (&info.lrf, layout) {
-        (Some(l), "dual") => (l.clone(), "dfisheye", 0.0),
+        (Some(l), "dual") if factory.is_none() => (l.clone(), "dfisheye", 0.0),
         (_, "dual") => (info.path.clone(), "dual", info.videos.first().map(|v| v.width).unwrap_or(info.width) as f64),
         (_, "dfisheye") => (info.path.clone(), "dfisheye", info.width as f64 / 2.0),
         _ => return Err("두 렌즈 360 영상이 아닙니다.".into()),
@@ -614,7 +714,7 @@ pub fn calibrate(ffmpeg: &Path, ffprobe: &Path, info: &MediaInfo, lens: &Lens) -
     if frames.is_empty() {
         return Err("이음새 맞추기용 장면을 읽지 못했습니다.".into());
     }
-    Ok(calibrate_frames(&frames, s, n, lens))
+    Ok(calibrate_with(&frames, s, n, lens, factory))
 }
 
 #[cfg(test)]

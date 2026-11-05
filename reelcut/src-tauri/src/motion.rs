@@ -521,6 +521,61 @@ fn quat(b: &[u8]) -> Option<Qt> {
     (l > 0.5 && l < 1.5).then(|| norm4(q.map(|v| v as f64)))
 }
 
+/// The camera's factory calibration from the metadata track's first packet (DJI's `PanoDewarpParams`,
+/// whose place in the stream message moved between models): the back and the front lens, and the back
+/// lens's yaw, pitch and roll against the front one, as `stitch::Stitch` keeps them.
+pub fn factory_lenses(ffprobe: &Path, info: &MediaInfo, swap: bool) -> Option<([crate::stitch::LensCal; 2], [f64; 3])> {
+    if !info.djmd {
+        return None;
+    }
+    let a: Vec<String> = ["-v", "error", "-print_format", "json", "-show_streams", &info.path].iter().map(|x| x.to_string()).collect();
+    let (_, out, _) = ff::output(ffprobe, &a).ok()?;
+    let j: Value = serde_json::from_str(&out).ok()?;
+    let idx = j["streams"].as_array()?.iter().find(|x| x["codec_tag_string"].as_str() == Some("djmd"))?["index"].as_u64()?;
+    let a: Vec<String> = ["-v", "error", "-select_streams", &idx.to_string(), "-read_intervals", "%+0.2", "-show_entries", "packet=pos,size", "-of", "compact=p=0", &info.path].iter().map(|x| x.to_string()).collect();
+    let (_, out, _) = ff::output(ffprobe, &a).ok()?;
+    let line = out.lines().next()?;
+    let field = |k: &str| line.split('|').find_map(|kv| kv.strip_prefix(k).and_then(|v| v.strip_prefix('=')));
+    let (pos, size) = (field("pos")?.parse::<u64>().ok()?, field("size")?.parse::<usize>().ok()?);
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(&info.path).ok()?;
+    file.seek(SeekFrom::Start(pos)).ok()?;
+    let mut buf = vec![0u8; size];
+    file.read_exact(&mut buf).ok()?;
+    factory_of_packet(&buf, swap)
+}
+
+fn factory_of_packet(b: &[u8], swap: bool) -> Option<([crate::stitch::LensCal; 2], [f64; 3])> {
+    use crate::stitch::{euler, LensCal};
+    let stream = sub(b, &[2])?;
+    let lens = |m: &[u8]| -> Option<LensCal> {
+        let f = |n: u32| first_f32(m, n).map(|v| v as f64);
+        let (fx, cx, cy) = (f(1).filter(|v| *v > 50.0)?, f(3)?, f(4)?);
+        Some(LensCal { fx, fy: f(2).unwrap_or(fx), cx, cy, k: [f(5)?, f(6).unwrap_or(0.0), f(7).unwrap_or(0.0), f(8).unwrap_or(0.0), f(15).unwrap_or(0.0)], size: f(10).filter(|v| *v > 100.0)? })
+    };
+    // native_refine_slave = 1, native_refine_master = 2.
+    let (slave, master) = [6u32, 5].iter().find_map(|n| {
+        let d = sub(stream, &[*n])?;
+        Some((sub(d, &[1]).filter(|m| lens(m).is_some())?, sub(d, &[2]).filter(|m| lens(m).is_some())?))
+    })?;
+    // cam_extri_q: the rotation between the lenses (w, x, y, z), written on the slave lens.
+    let q = sub(slave, &[28])?;
+    let c = |n: u32| first_f32(q, n).unwrap_or(0.0) as f64;
+    let (w, x, y, z) = (c(1), c(2), c(3), c(4));
+    let len = (w * w + x * x + y * y + z * z).sqrt();
+    if len < 0.5 {
+        return None;
+    }
+    // It sits near a half turn about y; as yaw (past 180°), pitch and roll.
+    let (yaw, pitch, roll) = euler([w / len, x / len, y / len, z / len]);
+    let yaw = (yaw - 180.0 + 540.0).rem_euclid(360.0) - 180.0;
+    if yaw.abs() > 6.0 || pitch.abs() > 6.0 || roll.abs() > 6.0 {
+        return None;
+    }
+    let (m, s) = (lens(master)?, lens(slave)?);
+    Some((if swap { [s, m] } else { [m, s] }, [yaw, pitch, roll]))
+}
+
 /// One DJI metadata sample.
 #[derive(Default, Debug)]
 struct Meta {
@@ -1051,7 +1106,7 @@ pub fn motion_for(dir: &Path, ffmpeg: &Path, ffprobe: &Path, jobs: &Jobs, tag: &
 }
 
 /// Bump when the engine's picture changes, so kept clips are made again.
-pub const ENGINE_VERSION: u32 = 10;
+pub const ENGINE_VERSION: u32 = 11;
 
 /// How `render_flat` works: the lens size to decode at, the GPU, and the intermediate's quality.
 #[derive(Clone, Debug, Default)]
@@ -1415,6 +1470,38 @@ mod tests {
         assert!(out < 1.2, "{out}");
         let tilt = mid.iter().map(|r| mv(r, [0.0, 1.0, 0.0])[1].clamp(-1.0, 1.0).acos().to_degrees()).fold(0.0, f64::max);
         assert!(tilt < 6.0, "{tilt}");
+    }
+
+    /// What the camera's own lens values do on a real recording (numbers only).
+    #[test]
+    fn real_factory_lenses() {
+        let Ok(path) = std::env::var("REELCUT_REAL_OSV") else { return };
+        let bin = |n: &str| std::path::PathBuf::from(std::env::var("FFDIR").unwrap_or_else(|_| "/usr/bin".into())).join(n);
+        let info = crate::media::inspect(&bin("ffprobe"), &path).unwrap();
+        let f = factory_lenses(&bin("ffprobe"), &info, false).expect("factory values");
+        println!("FACTORY angles {:?} back {:?} front {:?} plain {:?} {:?}", f.1, f.0[0], f.0[1], f.0[0].plain(), f.0[1].plain());
+        let lens = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: None, stab: None };
+        let st = crate::stitch::calibrate(&bin("ffmpeg"), &bin("ffprobe"), &info, &lens).unwrap();
+        println!("FACTORY calibrate used {} fov {} yaw {} pitch {} roll {} before {} after {} gains {:?} {:?}", st.factory.is_some(), st.fov, st.yaw, st.pitch, st.roll, st.before, st.after, st.gain_a, st.gain_b);
+    }
+
+    #[test]
+    fn factory_lenses_map_like_the_formula() {
+        let c = crate::stitch::LensCal { fx: 1000.0, fy: 1000.0, cx: 1925.5, cy: 1919.5, k: [0.0; 5], size: 3840.0 };
+        // Straight ahead is the lens centre, at any picture size.
+        let (x, y) = c.px([0.0, 0.0, 1.0], 3840.0);
+        assert!((x - 1925.5).abs() < 1e-6 && (y - 1919.5).abs() < 1e-6);
+        // 90° off the axis: f·π/2 from the centre.
+        let (x, _) = c.px([1.0, 0.0, 0.0], 3840.0);
+        assert!((x - (1925.5 + 1000.0 * std::f64::consts::FRAC_PI_2)).abs() < 1e-6);
+        let (x2, _) = c.px([1.0, 0.0, 0.0], 1920.0);
+        assert!(((x2 + 0.5) * 2.0 - (x + 0.5)).abs() < 1e-6);
+        // ffmpeg's plain fisheye agrees at the seam.
+        let (size, left, top, fov) = c.plain();
+        let half = size / 2.0 * 3840.0;
+        assert!((left * 3840.0 + half - 1926.0).abs() < 1e-6 && (top * 3840.0 + half - 1920.0).abs() < 1e-6);
+        let r90 = half * (90.0 / (fov / 2.0));
+        assert!((r90 - 1000.0 * std::f64::consts::FRAC_PI_2).abs() < 1e-6);
     }
 
     #[test]

@@ -31,8 +31,8 @@ export function Stitch360({ a }: { a: Asset }) {
         a.stitching ? <p class="muted tip">두 렌즈가 겹치는 부분을 보고 맞추는 중…</p>
         : s.calibrated ? (
           <p class="muted tip">
-            자동 보정됨 · 화각 {s.fov.toFixed(1)}° · 뒤 렌즈 {deg(s.yaw)} / {deg(s.pitch)} / {deg(s.roll)} · 밝기 {pct(s.gain_b[0])}
-            {s.before > 0 && <> · 이음새 차이 {s.before.toFixed(1)} → {s.after.toFixed(1)}</>}
+            {s.factory ? "카메라 공장 값 사용" : "자동 보정됨"} · 화각 {s.fov.toFixed(1)}° · 뒤 렌즈 {deg(s.yaw)} / {deg(s.pitch)} / {deg(s.roll)} · 밝기 {pct(s.gain_b[0])}
+            {s.before > 0 && !s.factory && <> · 이음새 차이 {s.before.toFixed(1)} → {s.after.toFixed(1)}</>}
           </p>
         ) : <p class="muted tip">불러올 때 자동으로 맞춥니다. 겹치는 띠 가운데를 부드럽게 섞어 이어 붙입니다.</p>
       )}

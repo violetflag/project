@@ -1,9 +1,9 @@
 //! Live preview for files the WebView cannot play itself: an Osmo 360 `.osv` (two HEVC lens
 //! tracks), 10-bit HEVC, ProRes and the like. Like DJI Studio's own player, nothing is made ahead:
-//! the bundled ffmpeg decodes the original from the asked time, puts a 360 recording's two lenses
-//! together into a 2048×1024 sphere (the seam blend of `stitch`; stabilisation stays for the
-//! export), encodes low-latency H.264 as fragmented MP4 and streams it from a local HTTP server
-//! the viewer's video element plays. While paused, single frames come as JPEG. ffmpeg runs only
+//! the bundled ffmpeg decodes the original from the asked time and lays a stitched 360 recording's two
+//! lenses side by side (the viewer's shader joins them with the export's lens values and seam), encodes
+//! low-latency H.264 as fragmented MP4 and streams it from a local HTTP server the viewer's video
+//! element plays. While paused, single frames come as JPEG. ffmpeg runs only
 //! while something is being looked at, and nothing is written to disk (recent frames stay in memory).
 
 use crate::ff;
@@ -217,7 +217,8 @@ impl Live {
         a.extend(s(&["-ss", &format!("{:.3}", req.t.max(0.0))]));
         // Real time after a short head start, so ffmpeg works only as fast as the picture plays.
         a.extend(s(&["-readrate", &format!("{rate:.3}"), "-readrate_initial_burst", "2", "-i", &req.info.path]));
-        let mut pic = picture_with(&req.info, req.lens.as_ref(), gpu, self.sharp.load(Ordering::Relaxed));
+        let sharp = self.sharp.load(Ordering::Relaxed);
+        let mut pic = picture_lenses(&req.info, req.lens.as_ref(), gpu, sharp).unwrap_or_else(|| picture_with(&req.info, req.lens.as_ref(), gpu, sharp));
         if matches!(req.info.layout360.as_str(), "dual" | "dfisheye") {
             let first = (req.t.max(0.0) * req.info.fps.max(1.0) - 1e-3).ceil().max(0.0) as u64;
             pic[1] = pic[1].replace("[pv]", &format!(",{}[pv]", frame_marks(first)));
@@ -241,7 +242,7 @@ impl Live {
             Some(b) => Some(b),
             None => {
                 let mut a = s(&["-hide_banner", "-nostdin", "-loglevel", "error", "-ss", &format!("{:.3}", req.t.max(0.0)), "-i", &req.info.path]);
-                a.extend(picture_with(&req.info, req.lens.as_ref(), false, sharp));
+                a.extend(picture_lenses(&req.info, req.lens.as_ref(), false, sharp).unwrap_or_else(|| picture_with(&req.info, req.lens.as_ref(), false, sharp)));
                 a.extend(s(&["-frames:v", "1", "-q:v", "3", "-f", "image2", "-c:v", "mjpeg", "-"]));
                 let slot = format!("{}:frame", req.slot);
                 self.spawn(&slot, &a).and_then(|(gen, mut out)| {
@@ -302,6 +303,30 @@ fn qsv_fits(info: &MediaInfo, lens: Option<&Lens>) -> bool {
     info.layout360 == "dual" && crate::stitch::active(&l)
 }
 
+/// A stitched recording as ffmpeg options: the back lens on the left half, the front lens on the right,
+/// with their colour match; the viewer's shader does the rest (`gl360.ts`, kind "lenses"). None when
+/// this recording is not stitched. Like DJI Studio, which joins the lenses on the graphics chip too.
+pub fn picture_lenses(info: &MediaInfo, lens: Option<&Lens>, gpu: bool, sharp: bool) -> Option<Vec<String>> {
+    let each = if sharp { 1536u32 } else { 1024 };
+    let layout = lens.map(|l| l.layout.as_str()).filter(|l| !l.is_empty() && *l != "none").unwrap_or(info.layout360.as_str()).to_string();
+    let l = Lens { layout: layout.clone(), ..lens.cloned().unwrap_or(Lens { layout: String::new(), swap: false, fov: 190.0, stitch: None, stab: None }) };
+    if !crate::stitch::active(&l) {
+        return None;
+    }
+    let st = crate::stitch::params(&l);
+    let lut = |g: &[f64; 3]| crate::stitch::gain_lut(g).map(|x| format!(",{x}")).unwrap_or_default();
+    let (la, lb) = (lut(&st.gain_a), lut(&st.gain_b));
+    let graph = if layout == "dual" {
+        let (ia, ib) = if l.swap { (1, 0) } else { (0, 1) };
+        let pre = if gpu { format!("vpp_qsv=w={each}:h={each}:format=nv12,hwdownload,format=nv12") } else { format!("scale={each}:{each}:flags=area") };
+        format!("[0:v:{ia}]{pre},format=yuv420p{la}[la];[0:v:{ib}]{pre},format=yuv420p{lb}[lb];[la][lb]hstack=inputs=2[pv]")
+    } else {
+        let (xa, xb) = if l.swap { ("iw/2", "0") } else { ("0", "iw/2") };
+        format!("[0:v:0]split=2[sl][sr];[sl]crop=iw/2:ih:{xa}:0,scale={each}:{each}:flags=area,format=yuv420p{la}[la];[sr]crop=iw/2:ih:{xb}:0,scale={each}:{each}:flags=area,format=yuv420p{lb}[lb];[la][lb]hstack=inputs=2[pv]")
+    };
+    Some(s(&["-filter_complex", &graph, "-map", "[pv]"]))
+}
+
 /// `picture`, with each lens decoded and shrunk on the GPU when `gpu` (the input opened with
 /// `-hwaccel qsv -hwaccel_output_format qsv`).
 pub fn picture_with(info: &MediaInfo, lens: Option<&Lens>, gpu: bool, sharp: bool) -> Vec<String> {
@@ -337,6 +362,19 @@ mod tests {
 
     fn info(layout: &str) -> MediaInfo {
         MediaInfo { path: "x.osv".into(), kind: "video".into(), layout360: layout.into(), fps: 30.0, has_audio: true, ..Default::default() }
+    }
+
+    #[test]
+    fn a_stitched_stream_is_the_two_lenses_side_by_side() {
+        let a = picture_lenses(&info("dual"), None, true, true).unwrap();
+        assert!(a[1].contains("[0:v:0]vpp_qsv=w=1536:h=1536") && a[1].contains("[0:v:1]vpp_qsv") && a[1].ends_with("[la][lb]hstack=inputs=2[pv]"), "{}", a[1]);
+        assert!(!a[1].contains("v360"), "{}", a[1]);
+        let off = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: Some(crate::stitch::Stitch { on: false, ..Default::default() }), stab: None };
+        assert!(picture_lenses(&info("dual"), Some(&off), false, false).is_none());
+        assert!(picture_lenses(&info("none"), None, false, false).is_none());
+        // The back lens is always on the left.
+        let sw = Lens { layout: "dual".into(), swap: true, fov: 190.0, stitch: None, stab: None };
+        assert!(picture_lenses(&info("dual"), Some(&sw), false, false).unwrap()[1].starts_with("[0:v:1]"));
     }
 
     #[test]

@@ -16,6 +16,8 @@ export type MediaInfo = {
 export type Stitch = {
   on: boolean; fov: number; yaw: number; pitch: number; roll: number;
   gain_a: number[]; gain_b: number[]; calibrated: boolean; before: number; after: number;
+  /** The camera's factory lens values, when in use; which way of calibrating made this. */
+  factory?: unknown; model?: number;
   /** Line the lenses up again on every frame (DJI's AI seam, Reelcut's own matching). */
   flow?: boolean;
   /** "linear" = the live preview's blend (default); "flow" = slower alignment the preview cannot show. */

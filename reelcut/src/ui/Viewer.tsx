@@ -14,7 +14,7 @@ import {
   parseTC, stabFor, transitionLook, xinOf, playableInWebView, previewSource, setViewKey, starts, timedDur, trackState, updateClip, viewAt, volAt,
   lensFor,
 } from "../edit";
-import { Flat360, type Proj } from "../gl360";
+import { Flat360, type LensShape, type Proj, plainLens } from "../gl360";
 import { STICKERS, stickerSvgPath, textLook } from "../graphics";
 import { analyzeMotion, asset, assetMap, draft, editDraft, set, st, toast, useStore } from "../store";
 import type { Asset, Clip, ColorAdj, Draft, Overlay, Transform, View } from "../types";
@@ -43,8 +43,20 @@ function mediaUrl(a: Asset): string | null {
   return p.live ? null : fileSrc(p.path);
 }
 
+/** Width of the blend at the seam, degrees (src-tauri/src/stitch.rs `blend_width`). */
+const blendWidth = (fov: number) => Math.max(0.5, Math.min(20, (fov - 180) * 0.5));
+
 function projOf(a: Asset): Proj {
   const p = srcOf(a);
+  // A live stitched recording comes as its two lenses; they are joined here, as the export joins them.
+  const layout = a.lens?.layout && a.lens.layout !== "none" ? a.lens.layout : a.info.layout360;
+  if (p.live && (layout === "dual" || layout === "dfisheye") && a.lens?.stitch?.on !== false) {
+    const s = a.lens?.stitch;
+    const fov = Math.max(181, Math.min(260, s && s.fov >= 90 ? s.fov : a.lens?.fov ?? 190));
+    const shape = (c?: any): LensShape => c ? { fu: c.fx / c.size, fv: c.fy / c.size, cu: (c.cx + 0.5) / c.size, cv: (c.cy + 0.5) / c.size, k: c.k } : plainLens(fov);
+    const f = layout === "dual" ? (s?.factory as any[] | undefined) : undefined;
+    return { kind: "lenses", back: shape(f?.[0]), front: shape(f?.[1]), yaw: s?.yaw ?? 0, pitch: s?.pitch ?? 0, roll: s?.roll ?? 0, blend: blendWidth(fov) };
+  }
   return p.proj === "dfisheye" ? { kind: "dfisheye", fov: p.fov, swap: p.swap } : { kind: "equirect" };
 }
 

@@ -232,23 +232,29 @@ pub struct Geo {
     pub back: M3,
     /// Each fisheye is `n`×`n` pixels in the decoded frame.
     pub n: f64,
+    /// The camera's factory calibration of the back and the front lens, when in use.
+    pub cal: Option<[crate::stitch::LensCal; 2]>,
 }
 
 impl Geo {
     pub fn new(s: &Stitch, n: f64) -> Geo {
-        Geo { fov: s.fov.clamp(181.0, 260.0), back: matrix(ypr(180.0 + s.yaw, s.pitch, s.roll)), n }
+        Geo { fov: s.fov.clamp(181.0, 260.0), back: matrix(ypr(180.0 + s.yaw, s.pitch, s.roll)), n, cal: s.factory.clone() }
     }
     /// Pixel of a front-frame direction in lens 0 (back) or 1 (front), v360's fisheye mapping;
     /// and whether it is inside that lens's field of view.
     #[inline]
     pub fn px(&self, lens: usize, d: [f64; 3]) -> (f64, f64, bool) {
         let v = if lens == 0 { mv(&mt(&self.back), d) } else { d };
-        self.px_local(v)
+        self.px_local(lens, v)
     }
     #[inline]
-    fn px_local(&self, v: [f64; 3]) -> (f64, f64, bool) {
+    fn px_local(&self, lens: usize, v: [f64; 3]) -> (f64, f64, bool) {
         let h = v[0].hypot(v[1]);
         let ang = h.atan2(v[2]);
+        if let Some(c) = &self.cal {
+            let (x, y) = c[lens].px(v, self.n);
+            return (x, y, ang.to_degrees() <= self.fov / 2.0 + 1e-9);
+        }
         let lh = if h > 1e-12 { h } else { 1.0 };
         let k = ang / std::f64::consts::PI / (self.fov / 360.0);
         let (u, w) = (v[0] / lh * k, v[1] / lh * k);

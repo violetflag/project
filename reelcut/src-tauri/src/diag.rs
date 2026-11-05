@@ -15,11 +15,11 @@ const H: usize = 540;
 const SW: usize = 2048;
 const SH: usize = 1024;
 
-/// Luma of the sphere the live preview plays.
-fn preview_sphere(ffmpeg: &Path, info: &MediaInfo, lens: &Lens, t: f64, dir: &Path) -> Result<Vec<u8>, String> {
+/// Luma of the two lenses side by side, as the live preview's stream carries them.
+fn preview_lenses(ffmpeg: &Path, info: &MediaInfo, lens: &Lens, t: f64, dir: &Path) -> Result<Vec<u8>, String> {
     let raw = dir.join("preview.yuv");
     let mut a: Vec<String> = ["-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-ss", &format!("{t:.3}"), "-i", &info.path].iter().map(|x| x.to_string()).collect();
-    a.extend(live::picture(info, Some(lens)));
+    a.extend(live::picture_lenses(info, Some(lens), false, false).ok_or("이어 붙이는 영상이 아닙니다")?);
     a.extend(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "yuv420p"].iter().map(|x| x.to_string()));
     a.push(raw.to_string_lossy().into_owned());
     let o = ff::command(ffmpeg).args(&a).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
@@ -35,23 +35,28 @@ fn preview_sphere(ffmpeg: &Path, info: &MediaInfo, lens: &Lens, t: f64, dir: &Pa
     Ok(y)
 }
 
-/// A flat view of the sphere: the shader's directions and its bilinear lookup.
-fn preview_view(sphere: &[u8], rot: &crate::pano::M3, hfov: f64) -> Vec<f32> {
+/// A flat view of the two lenses: the shader's directions, lens lookup and seam (gl360.ts).
+fn preview_view(pic: &[u8], geo: &crate::pano::Geo, blend: f64, rot: &crate::pano::M3, hfov: f64) -> Vec<f32> {
     let tx = (hfov.to_radians() / 2.0).tan();
     let ty = tx * H as f64 / W as f64;
+    let n = SH as i64;
+    let at = |lens: i64, x: f64, y: f64| -> f32 {
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = ((x - x0) as f32, (y - y0) as f32);
+        let p = |c: i64, r: i64| pic[r.clamp(0, n - 1) as usize * SW + (c.clamp(0, n - 1) + lens * n) as usize] as f32;
+        let (c, r) = (x0 as i64, y0 as i64);
+        (p(c, r) * (1.0 - fx) + p(c + 1, r) * fx) * (1.0 - fy) + (p(c, r + 1) * (1.0 - fx) + p(c + 1, r + 1) * fx) * fy
+    };
     let mut out = vec![0f32; W * H];
     for y in 0..H {
         for x in 0..W {
             let v = [(2.0 * (x as f64 + 0.5) / W as f64 - 1.0) * tx, (2.0 * (y as f64 + 0.5) / H as f64 - 1.0) * ty, 1.0];
             let l = (v[0] * v[0] + v[1] * v[1] + 1.0).sqrt();
             let d = crate::pano::mv(rot, [v[0] / l, v[1] / l, v[2] / l]);
-            let u = (d[0].atan2(d[2]) / std::f64::consts::PI + 1.0) / 2.0 * SW as f64 - 0.5;
-            let w = (d[1].clamp(-1.0, 1.0).asin() / std::f64::consts::FRAC_PI_2 + 1.0) / 2.0 * SH as f64 - 0.5;
-            let (x0, y0) = (u.floor(), w.floor());
-            let (fx, fy) = ((u - x0) as f32, (w - y0) as f32);
-            let at = |c: i64, r: i64| sphere[r.clamp(0, SH as i64 - 1) as usize * SW + c.rem_euclid(SW as i64) as usize] as f32;
-            let (c, r) = (x0 as i64, y0 as i64);
-            out[y * W + x] = (at(c, r) * (1.0 - fx) + at(c + 1, r) * fx) * (1.0 - fy) + (at(c, r + 1) * (1.0 - fx) + at(c + 1, r + 1) * fx) * fy;
+            let f = stitch::front_weight(d[2].clamp(-1.0, 1.0).asin().to_degrees(), blend) as f32;
+            let (ax, ay, _) = geo.px(0, d);
+            let (bx, by, _) = geo.px(1, d);
+            out[y * W + x] = at(0, ax, ay) * (1.0 - f) + at(1, bx, by) * f;
         }
     }
     out
@@ -93,13 +98,14 @@ pub fn parity(ffmpeg: &Path, jobs: &ff::Jobs, info: &MediaInfo, lens: &Lens, tim
     flat.stab = Some(motion::Stab { mode: "off".into(), ..Default::default() });
     let band = stitch::blend_width(stitch::params(lens).fov.clamp(181.0, 260.0));
     let hfov = 100.0;
+    let geo = crate::pano::Geo::new(&stitch::params(lens), SH as f64);
     let mut rows = Vec::new();
     let gen = jobs.generation("diag");
     for &t in times {
-        let sphere = preview_sphere(ffmpeg, info, &flat, t, dir)?;
+        let pic = preview_lenses(ffmpeg, info, &flat, t, dir)?;
         for &yaw in yaws {
             let rot = stitch::matrix(stitch::ypr(yaw, -10.0, 0.0));
-            let live = preview_view(&sphere, &rot, hfov);
+            let live = preview_view(&pic, &geo, band, &rot, hfov);
             let mut eng: Vec<f32> = vec![];
             motion::look_at(ffmpeg, jobs, "diag", gen, info, &flat, None, &[(t, rot, Some((hfov, 0.0)))], W as u32 * 2, H as u32 * 2, &mut |_, _, f| {
                 if eng.is_empty() {
@@ -143,18 +149,18 @@ mod tests {
 
     #[test]
     fn the_preview_view_looks_where_the_engine_looks() {
-        // A sphere with one bright column at longitude 90: straight ahead of a view turned that way.
+        // A white column down the middle of the front lens (the right half): straight ahead.
         let mut s = vec![0u8; SW * SH];
         let col = SW * 3 / 4;
         for r in 0..SH {
             s[r * SW + col] = 255;
             s[r * SW + col - 1] = 255;
         }
-        let rot = stitch::matrix(stitch::ypr(90.0, 0.0, 0.0));
-        let v = preview_view(&s, &rot, 100.0);
-        let row = &v[(H / 2) * W..(H / 2 + 1) * W];
-        let best = row.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as i64;
-        assert!((best - W as i64 / 2).abs() <= 2, "{best}");
+        let st = stitch::Stitch { fov: 195.0, ..Default::default() };
+        let geo = crate::pano::Geo::new(&st, SH as f64);
+        let v = preview_view(&s, &geo, stitch::blend_width(195.0), &crate::pano::I3, 100.0);
+        let mid = H / 2 * W + W / 2;
+        assert!(v[mid] > 100.0 && v[mid - 40] < 5.0 && v[mid + 40] < 5.0, "{} {} {}", v[mid - 40], v[mid], v[mid + 40]);
     }
 
     /// Reading back part of the lenses must not change a pixel (a real recording, Quick Sync).
@@ -204,7 +210,11 @@ mod tests {
         let bin = |n: &str| std::path::PathBuf::from(std::env::var("FFDIR").unwrap_or_else(|_| "/usr/bin".into())).join(n);
         let info = crate::media::inspect(&bin("ffprobe"), &path).unwrap();
         let stitch = serde_json::from_value(json!({ "on": true, "fov": 193.4, "yaw": 0.85, "pitch": 0.15, "roll": -0.45, "gain_a": [0.976, 0.431, -0.267], "gain_b": [1.025, -0.431, 0.267], "calibrated": true, "before": 21.17, "after": 8.58, "flow": true })).unwrap();
-        let lens = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: Some(stitch), stab: None };
+        let mut lens = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: Some(stitch), stab: None };
+        if std::env::var("REELCUT_FACTORY").is_ok() {
+            lens.stitch = Some(crate::stitch::calibrate(&bin("ffmpeg"), &bin("ffprobe"), &info, &lens).unwrap());
+            println!("calibrated with factory values: {}", lens.stitch.as_ref().unwrap().factory.is_some());
+        }
         let rows = parity(&bin("ffmpeg"), &ff::Jobs::default(), &info, &lens, &[270.0, 290.0, 600.0], &[90.0, -90.0], Path::new(&dir)).unwrap();
         println!("{}", serde_json::to_string(&rows).unwrap());
     }
