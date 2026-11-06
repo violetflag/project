@@ -1,0 +1,48 @@
+// Step-by-step guide the AI reads (get_playbook) for turning a long 360 recording into a short edit
+// that follows people. Written for Reelcut's own tools.
+
+/** How to look for people in 360 footage; every guide that looks for people says this. */
+export const PEOPLE_360_RULE = "360 영상에서 사람을 찾을 때는 equirect_sheet나 find_faces로 파노라마 전체를 봅니다. contact_sheet는 어안이고 view_frames는 한 방향만 보여 주므로, 거기 없다고 영상에 없다고 판단하면 안 됩니다.";
+
+/** The look of a followed view. The app holds AI views to this unless the user asks for something else. */
+export const LEVEL_VIEW_RULE = "시점은 수평에 가깝게 두고 수평선이 화면에 보이게 합니다: pitch는 ±30° 안, 화각은 16:9에서 보통 91°, 9:16에서 보통 56°. 더 넓어야 하면 hfov를 직접 키우지 말고 view_preset(wide/ultra)이나 quick_action을 씁니다. 많이 내려다보거나 화각이 넓으면 선이 휘고 몸이 늘어납니다. 아이가 아래에 있으면 시점을 더 숙이지 말고 아이가 화면 아래쪽에 오게 둡니다. 앱이 이 범위로 맞추며, 사용자가 내려다보는 장면이나 광각을 직접 요청했을 때만 allow_steep을 켭니다.";
+
+export const PLAYBOOK_360 = `# 360 영상 자동 편집 순서 (Reelcut 도구 기준)
+
+필요한 것: 360 원본(.osv 등), 따라갈 사람(누구인지), 목표 길이(말이 없으면 원본의 1/3).
+
+## 늘 지킬 것
+- ${PEOPLE_360_RULE}
+- ${LEVEL_VIEW_RULE}
+- 머리는 되도록 화면 위에서 1/3 지점. 몸통이 아니라 머리 위치를 기준으로 합니다.
+- 컷 사이에 방향과 기울기가 크게 달라지지 않게 합니다. 비슷한 방향의 장면을 이어 붙이고, 앱이 기울기를 앞 클립에 맞춰 조금 옮깁니다.
+- 말 중간에서 끊지 않습니다. 컷은 말 틈에서.
+- 한 컷은 4~30초. 주인공 중심으로 하되 다른 가족도 전체의 10~15%.
+- 쌍둥이(두 아이)처럼 여러 명이 주인공이면 한 명만 가운데에 두지 말고 함께 담습니다: 장면마다 두 아이 머리를 모두 찍어 frame_subject의 subjects로 넣으세요(앱이 둘의 가운데를 보고 둘 다 들어오게 화각을 넓힘). 두 아이의 화면 시간은 비슷하게 맞춥니다. 이때 위의 '다른 가족 10~15%'는 두 아이 사이에는 적용하지 않습니다.
+- 수평선 유지(흔들림 보정은 앱의 360 설정 > 렌즈 > 안정화 '수평 유지'), 흔들림은 줄입니다.
+- 하이라이트는 일부만 보고 고르지 말고, 영상 전체를 훑은 뒤 고르세요.
+
+## 순서
+1. get_project_overview로 미디어를 확인합니다. 받아쓰기가 없고 대사가 있으면 transcribe 먼저.
+2. 전체 훑기: contact_sheet를 구간별로 여러 번 (예: 30초 간격) 봅니다. 360이라 어안으로 둥글게 보이니, 후보 장면은 equirect_sheet로 다시 봅니다.
+   훑으면서 본 것을 save_scene_notes로 저장해 두면 다음부터 search_scenes로 바로 찾을 수 있습니다. scan_bad_shots로 흐리거나 흔들린 구간을 찾아 피하세요.
+3. 하이라이트 구간을 고르고 합쳐서 목표 길이에 맞춥니다. 구간마다 어떤 사람이 나오는지 적어 두세요.
+4. create_draft로 편집본을 만듭니다 (비율은 보통 16:9). 구간마다 클립 1개.
+5. snap_cuts로 시작·끝을 말 틈으로 옮깁니다. 말 틈이 없는 조용한 장면은 그대로 둡니다.
+6. 클립마다 사람 위치 표시 만들기:
+   - equirect_sheet로 클립을 몇 곳 보고 누가 누구인지 확인합니다. find_faces를 같이 쓰면 얼굴 위치를 정확한 숫자로 받습니다.
+   - 따라갈 사람의 머리 [x, y]를 읽습니다. x는 0~960(480이 정면), y는 0~480(240이 수평선). frame_subject가 표시에서 시작해 자동으로 추적하므로(track 기본 켬) 사람마다 표시는 클립의 처음·중간·끝 정도면 됩니다. 사람이 겹치거나 가려지는 곳만 더 찍으세요.
+   - [[t, x, y], …]를 frame_subject에 넣으면 0.1초마다 시점을 만들고 키 사이를 부드럽게 이어 줍니다. t는 원본 초입니다.
+   - 여러 명을 함께 담을 때는 subjects: [{name:"첫째", marks:[…]}, {name:"둘째", marks:[…]}]. 한 아이가 잠시 안 보이면 그 아이 표시를 건너뛰어도 됩니다(3초 넘게 표시가 없으면 나머지만 담음).
+   - 결과의 "너무 멀리 떨어져 한 화면에 못 담은 구간"은 클립을 나눠 한 명씩 번갈아 따라가세요. "화면 안 비율"이 낮은 아이가 있으면 표시를 더 촘촘히(1초 간격) 찍어 다시 하세요.
+   - 사람이 화면 밖으로 나가거나 다른 사람으로 바뀌는 곳은 클립을 나누세요.
+7. 쌍둥이처럼 여럿을 담는 클립은 check_framing이 누가 화면 안에 있는지 비율로 알려 줍니다. 사진을 직접 보고, 어른이 화면을 차지하거나 한 아이가 빠진 곳은 표시를 고쳐 다시 하고, 안 되면 trim_to_subjects로 뺀 뒤 나온 비율을 알립니다.
+   check_framing으로 클립마다 서너 곳을 확인합니다. 머리가 위쪽 1/3 선 근처인지, 얼굴이 위·아래 가장자리에 걸리지 않는지, 여러 명을 담는 클립이면 모두 화면 안에 있는지 봅니다. 어긋나면 marks를 고쳐 frame_subject를 다시.
+8. 요청이 있으면 add_text로 첫머리에 제목이나 장소·날짜 핀(촬영 날짜는 get_project_overview에 있음)을 올리고, set_captions의 style로 자막 모양을 고릅니다.
+9. get_draft로 길이와 구성을 확인하고 결과를 알려 줍니다. 내보내기는 요청이 있을 때만.
+
+## 팁
+- 시점 값이 범위를 벗어나도(예: yaw 195) 앱이 알아서 -180~180으로 맞춥니다. 걱정 말고 쓰세요.
+- 직접 키프레임을 쓰려면 edit_draft의 set_view_keys. 키를 많이 넣어도 되고(수천 개), 키 사이는 곡선으로 이어집니다.
+- 잘못 만든 편집본은 delete_draft로 지우거나 Ctrl+Z로 되돌립니다.
+`;

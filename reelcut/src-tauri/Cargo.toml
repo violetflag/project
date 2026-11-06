@@ -1,0 +1,41 @@
+[package]
+name = "reelcut"
+version = "2.25.2"
+description = "Video editor with transcript editing, 360 reframing and an AI agent"
+authors = ["John"]
+edition = "2021"
+
+[lib]
+name = "reelcut_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+base64 = "0.22"
+ureq = { version = "2", features = ["json"] }
+sha2 = "0.10"
+flate2 = "1"
+crc32fast = "1"
+tar = "0.4"
+tract-onnx = "0.21"
+rayon = "1"
+
+# Built for speed of building: every CPU core compiles in parallel (16 codegen units) and
+# thin LTO links in parallel too. The heavy work at run time is ffmpeg, so the app itself
+# loses nothing noticeable versus the old single-unit fat-LTO build, which ran on one core.
+[profile.release]
+codegen-units = 16
+lto = "thin"
+incremental = false
+opt-level = 3
+panic = "abort"
+strip = true
