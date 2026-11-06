@@ -37,12 +37,20 @@ export function shrinkSettings(p: ShrinkPreset, codec: Codec, container: "mkv" |
 }
 
 /** Rough size guess in bytes (shown before export). */
-export function estimateBytes(mode: string, secs: number, kbps: number, preset?: ShrinkPreset, codec?: Codec, short = 1080): number {
+/**
+ * Measured on a real 7:38 Osmo 360 edit with the small preset, AV1: 3782 kbps at 1080p and about 11300
+ * at 2160p, so bitrate grows with pixels to the power 0.79, and such footage (a moving camera, lots of
+ * detail) takes 2.9 times the bitrate of the typical video below. Frame rate's share is an assumption.
+ */
+const PIXEL_POWER = 0.79, FOOTAGE_360 = 2.91, FPS_POWER = 0.7;
+
+export function estimateBytes(mode: string, secs: number, kbps: number, preset?: ShrinkPreset, codec?: Codec, short = 1080, source: { is360?: boolean; fps?: number } = {}): number {
   if (mode === "audio") return secs * 48000 * 2 * 2;
   if (mode === "standard") return (secs * (kbps + 256) * 1000) / 8;
   // Typical bitrates at 1080p for the CRFs above (from Shrink's samples), scaled by pixels.
   const base: Record<string, number> = { archive: 6000, balanced: 2600, small: 1300, lecture: 400 };
   const cf = codec === "h264" ? 1.6 : codec === "hevc" ? 1.15 : 1;
-  const px = (short / 1080) ** 2;
-  return (secs * ((base[preset?.id ?? "balanced"] * cf * px) + (preset?.abr ?? 128)) * 1000) / 8;
+  const px = ((short / 1080) ** 2) ** PIXEL_POWER;
+  const rate = (source.fps && source.fps > 0 ? source.fps / 30 : 1) ** FPS_POWER;
+  return (secs * ((base[preset?.id ?? "balanced"] * cf * px * rate * (source.is360 ? FOOTAGE_360 : 1)) + (preset?.abr ?? 128)) * 1000) / 8;
 }

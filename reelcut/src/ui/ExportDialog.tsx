@@ -3,7 +3,7 @@
 import { ChevronDown, ChevronRight, ListChecks, Save, Trash2 } from "lucide-preact";
 import { useState } from "preact/hooks";
 import { api, pickFolder } from "../api";
-import { draftDuration, fmtTC, fmtTCF, outSize, uid } from "../edit";
+import { draftDuration, fmtTC, fmtTCF, outSize, uid, is360, isGap } from "../edit";
 import { DEFAULT_CHOICE, qualityOf, rememberedChoice, enqueue, exportRange, exportSeconds, outPath, PURPOSES, sourceLimits, startExport, type ExportChoice } from "../exporter";
 import { estimateBytes, pickCodec, QUALITIES, SHRINK } from "../presets";
 import { assetMap, editDraft, saveSettings, set, st, toast, useStore } from "../store";
@@ -29,7 +29,8 @@ export function ExportDialog({ draft: d, onClose }: { draft: Draft; onClose: () 
   const preset = SHRINK.find((x) => x.id === c.preset)!;
   const codec = pickCodec(c.codec, s.info?.hw ?? null);
   const [w, h] = outSize(d.aspect, q.short);
-  const est = estimateBytes(c.mode, secs, c.kbps || q.kbps, preset, codec, q.short);
+  const am = assetMap();
+  const est = estimateBytes(c.mode, secs, c.kbps || q.kbps, preset, codec, q.short, { is360: d.clips.some((x) => !isGap(x) && is360(am.get(x.asset))), fps: c.fps || autoFps });
   const path = outPath(d, c);
   const purpose = PURPOSES.find((p) => p.id === c.purpose);
   const aspectMismatch = purpose?.aspect && purpose.aspect !== d.aspect;
