@@ -925,8 +925,15 @@ fn level(down: [f64; 3], fwd: [f64; 3]) -> Option<M3> {
 /// How gently the horizon correction changes, seconds (sigma of the smoothing). Far slower than a
 /// hand or a step, so it cannot put any shake into the picture, whatever the attitude's timing.
 const LEVEL_SIGMA: f64 = 0.6;
-/// How slowly the forward view turns with the camera, seconds.
-const FORWARD_SIGMA: f64 = 2.0;
+/// How the forward view follows the camera's heading: smoothed over FORWARD_SIGMA seconds and
+/// FORWARD_DELAY seconds behind it. Fitted to DJI Studio's 전진 뷰 export of the same recording
+/// (docs/dji-parity.md): its heading is the camera's, gaussian-smoothed with sigma 1 s, half a
+/// second late (0.8° rms on the steady stretch).
+const FORWARD_SIGMA: f64 = 1.0;
+const FORWARD_DELAY: f64 = 0.5;
+/// Where DJI's still (RockSteady + 수평) picture looks, degrees from the gyro world's x axis about
+/// down: measured −4.8° and −5.2° on two clips of its free-view export.
+const DJI_HEADING: f64 = -5.0;
 
 /// The shortest turn that takes `a` to `b` (unit vectors).
 fn from_to(a: [f64; 3], b: [f64; 3]) -> M3 {
@@ -1000,15 +1007,16 @@ pub fn targets(m: &Motion, s: &Stab) -> Vec<M3> {
         "horizon" => then(rot, LEVEL_SIGMA),
         // The tilt out on every frame; turning stays. Only as steady as the attitude is.
         "tilt" => then(rot, 0.0),
-        // The shake out of the attitude (DJI's EIS), with or without levelling (EisAndHorizontal).
+        // The shake out of the attitude, horizon left alone: DJI's RockSteady with 수평 off follows the
+        // camera smoothed (sigma 0.5 s at strength 1).
         "smooth" => (0..rot.len()).map(|k| gauss_avg(&rot, k, sig)).collect(),
-        "eis" => then((0..rot.len()).map(|k| gauss_avg(&rot, k, sig)).collect(), LEVEL_SIGMA),
         // Level, heading where the camera has been going over the last seconds: its forward, flattened
         // and smoothed. (DJI also has the GPS when a remote gives one; this camera's files do not.)
         "forward" => {
             let n = rot.len();
             let fwd: Vec<[f64; 3]> = rot.iter().map(|r| mv(r, [0.0, 0.0, 1.0])).collect();
             let sg = FORWARD_SIGMA * fps;
+            let late = (FORWARD_DELAY * fps).round() as isize;
             let rad = (sg * 3.0).ceil() as isize;
             let weights: Vec<f64> = (-rad..=rad).map(|d| (-(d * d) as f64 / (2.0 * sg * sg)).exp()).collect();
             let mut last = level(down, fwd[0]).or_else(|| level(down, mv(&rot[0], [1.0, 0.0, 0.0]))).unwrap_or(I3);
@@ -1016,7 +1024,7 @@ pub fn targets(m: &Motion, s: &Stab) -> Vec<M3> {
                 .map(|k| {
                     let mut a = [0.0; 3];
                     for (d, g) in (-rad..=rad).zip(&weights) {
-                        let v = fwd[(k + d).clamp(0, n as isize - 1) as usize];
+                        let v = fwd[(k - late + d).clamp(0, n as isize - 1) as usize];
                         for i in 0..3 {
                             a[i] += g * v[i];
                         }
@@ -1028,8 +1036,25 @@ pub fn targets(m: &Motion, s: &Stab) -> Vec<M3> {
                 })
                 .collect()
         }
-        "lock" => {
-            // Level, always looking the way the camera looked in the first second.
+        // DJI's RockSteady with 수평 on (its 360 export and free view alike) holds the picture still in
+        // the world: level, and looking one way however the camera turns. Fitted: 0.2-0.3° from DJI's
+        // own export (docs/dji-parity.md). With the camera's gyro, DJI looks one fixed way of the
+        // gyro's world (the same in clips two minutes apart), DJI_HEADING from its x axis.
+        "eis" if m.source == "gyro" => {
+            let x = [1.0, 0.0, 0.0];
+            let h = [x[0] - dot(x, down) * down[0], x[1] - dot(x, down) * down[1], x[2] - dot(x, down) * down[2]];
+            let l = (dot(h, h) > 0.04).then(|| {
+                let (e1, a) = (unit(h), DJI_HEADING.to_radians());
+                let e2 = cross(down, e1);
+                level(down, [0, 1, 2].map(|i| a.cos() * e1[i] + a.sin() * e2[i]))
+            });
+            match l.flatten() {
+                Some(l) => vec![l; rot.len()],
+                None => targets(m, &Stab { mode: "lock".into(), ..s.clone() }),
+            }
+        }
+        // 방향 고정: the same stillness, looking the way the camera looked in the first second.
+        "eis" | "lock" => {
             let k = (fps as usize).clamp(1, rot.len());
             let mut first = [0.0; 3];
             for r in &rot[..k] {
@@ -1141,7 +1166,7 @@ pub fn motion_for(dir: &Path, ffmpeg: &Path, ffprobe: &Path, jobs: &Jobs, tag: &
 }
 
 /// Bump when the engine's picture changes, so kept clips are made again.
-pub const ENGINE_VERSION: u32 = 13;
+pub const ENGINE_VERSION: u32 = 14;
 
 /// How `render_flat` works: the lens size to decode at, the GPU, and the intermediate's quality.
 #[derive(Clone, Debug, Default)]
@@ -1461,6 +1486,36 @@ mod tests {
     }
 
     #[test]
+    fn eis_holds_still_one_world_way_like_dji() {
+        let m = shaky(30.0, 20.0);
+        let tg = targets(&m, &Stab { mode: "eis".into(), ..Default::default() });
+        let down = unit(m.down);
+        for t in &tg {
+            // Level, and forward at DJI's heading in the gyro's world, whatever the camera does.
+            assert!(dot(mv(t, [0.0, 1.0, 0.0]), down) > 0.9999);
+            let f = mv(t, [0.0, 0.0, 1.0]);
+            let head = (-f[2]).atan2(f[0]).to_degrees();
+            assert!((head - DJI_HEADING).abs() < 0.01, "{head}");
+        }
+        // Without the gyro there is no such world: the first second's way, as 방향 고정.
+        let v = Motion { source: "video".into(), ..m.clone() };
+        let (a, b) = (targets(&v, &Stab { mode: "eis".into(), ..Default::default() }), targets(&v, &Stab { mode: "lock".into(), ..Default::default() }));
+        assert!(a.iter().zip(&b).all(|(x, y)| angle_between(x, y) < 1e-9));
+    }
+
+    #[test]
+    fn the_forward_view_follows_half_a_second_late() {
+        // A camera turning at a steady 30°/s: the view turns with it, FORWARD_DELAY behind.
+        let fps = 30.0;
+        let rot: Vec<[f64; 9]> = (0..600).map(|k| to9(&matrix(ypr(30.0 * k as f64 / fps, 0.0, 0.0)))).collect();
+        let m = Motion { source: "gyro".into(), fps, rot, down: [0.0, 1.0, 0.0], ..Default::default() };
+        let tg = targets(&m, &Stab { mode: "forward".into(), ..Default::default() });
+        let k = 300;
+        let lag = angle_between(&tg[k], &m.at(k)).to_degrees();
+        assert!((lag - 30.0 * FORWARD_DELAY).abs() < 1.0, "{lag}");
+    }
+
+    #[test]
     fn levelling_adds_no_shake_of_its_own() {
         let m = shaky(30.0, 20.0);
         let tg = targets(&m, &Stab::default());
@@ -1521,6 +1576,480 @@ mod tests {
         assert!(fast < 1.1, "{fast}");
         let total: f64 = mid.windows(2).map(|w| angle_between(&w[0], &w[1]).to_degrees()).sum();
         assert!(total > 250.0, "{total}");
+    }
+
+    /// DJI Studio's stabilised panorama against the camera's attitude (numbers only; the pictures stay
+    /// in memory). REELCUT_DJI_PANO: DJI's 360 export of two stretches; REELCUT_DJI_STARTS: their
+    /// source start seconds, comma separated; REELCUT_DJI_SPLIT: DJI frame where the second begins.
+    #[test]
+    fn real_dji_fit() {
+        let (Ok(path), Ok(pano), Ok(md), Ok(key)) = (std::env::var("REELCUT_REAL_OSV"), std::env::var("REELCUT_DJI_PANO"), std::env::var("REELCUT_MOTION_DIR"), std::env::var("REELCUT_MOTION_KEY")) else { return };
+        let starts: Vec<f64> = std::env::var("REELCUT_DJI_STARTS").unwrap().split(',').map(|x| x.parse().unwrap()).collect();
+        let split: usize = std::env::var("REELCUT_DJI_SPLIT").unwrap().parse().unwrap();
+        let bin = |n: &str| std::path::PathBuf::from(std::env::var("FFDIR").unwrap_or_else(|_| "/usr/bin".into())).join(n);
+        let info = crate::media::inspect(&bin("ffprobe"), &path).unwrap();
+        let m: Motion = serde_json::from_str(&std::fs::read_to_string(std::path::Path::new(&md).join(format!("{key}{TRACK_FILE}"))).unwrap()).unwrap();
+        let fps = m.fps;
+        let (w, h) = (512usize, 256usize);
+        // DJI's frames.
+        let o = ff::command(&bin("ffmpeg")).args(["-v", "error", "-i", &pano, "-vf", &format!("scale={w}:{h}:flags=area,format=gray"), "-f", "rawvideo", "-"]).output().unwrap();
+        let dji: Vec<Vec<u8>> = o.stdout.chunks(w * h).filter(|c| c.len() == w * h).map(|c| c.to_vec()).collect();
+        println!("DJI frames {}", dji.len());
+        // Ours, as filmed (no turn), around each stretch.
+        let lens = Lens { layout: "dual".into(), swap: false, fov: 190.0, stitch: None, stab: None };
+        let st = crate::stitch::calibrate(&bin("ffmpeg"), &bin("ffprobe"), &info, &lens).unwrap();
+        let lens = Lens { stitch: Some(st), ..lens };
+        let s = crate::stitch::params(&lens);
+        let mut raws: Vec<(usize, Vec<Vec<u8>>)> = vec![];
+        for &t0 in &starts {
+            let from = (t0 - 0.5).max(0.0);
+            let k0 = (from * fps).round() as usize;
+            let mut src = source_for(&info, &lens, from, 16.5, Some(256), false);
+            src.gpu = true;
+            let mut sp = Stitcher::new(&s, src.n() as f64, w, h, false, None);
+            let setup = |_k: usize, _t: f64| FrameSetup { rot: I3, hfov: None, omega: None };
+            let mut v: Vec<Vec<u8>> = vec![];
+            let mut cb = |_k: usize, f: &Frame<u8>| v.push(f.p[0].clone());
+            pano::run::<u8>(&bin("ffmpeg"), &Jobs::default(), "t", 0, &src, &mut sp, &setup, Sink::Call(&mut cb), |_| {}).unwrap();
+            raws.push((k0, v));
+        }
+        let pts: Vec<[f64; 3]> = VisualTracker::new(w, h).pts.iter().map(|p| p.0).collect();
+        // How alike two pictures are under a turn (dir in `b` = turn · dir in `a`): 1 − correlation.
+        let resid = |a: &[u8], b: &[u8], turn: &M3| -> f64 {
+            let (mut sa, mut sb, mut saa, mut sbb, mut sab, mut n) = (0f64, 0f64, 0f64, 0f64, 0f64, 0f64);
+            for p in &pts {
+                let va = eq_sample(a, w, h, *p) as f64;
+                let vb = eq_sample(b, w, h, mv(turn, *p)) as f64;
+                sa += va; sb += vb; saa += va * va; sbb += vb * vb; sab += va * vb; n += 1.0;
+            }
+            let cov = sab / n - sa / n * sb / n;
+            1.0 - cov / ((saa / n - (sa / n).powi(2)).max(1e-9) * (sbb / n - (sb / n).powi(2)).max(1e-9)).sqrt()
+        };
+        let align = |a: &[u8], b: &[u8], guess: M3| -> M3 {
+            let mut tr = VisualTracker::new(w, h);
+            tr.prev = Some(a.to_vec());
+            tr.last = guess;
+            tr.push(b)
+        };
+        let eis = targets(&m, &Stab { mode: "eis".into(), strength: 1.0, rs: false });
+        // Per DJI frame: the camera frame it shows and DJI's virtual camera (output dir → world).
+        let mut found: Vec<(usize, usize, M3)> = vec![]; // (stretch, source frame, T_dji)
+        let mut found_j: Vec<usize> = vec![];
+        for (ci, &t0) in starts.iter().enumerate() {
+            let (j0, j1) = if ci == 0 { (0, split) } else { (split, dji.len()) };
+            let (k0, raw) = &raws[ci];
+            let kof = |j: usize, off: f64| ((t0 + (j - j0) as f64 / 30.0) * fps + off).round() as usize;
+            // First frame: DJI's heading against ours (level both), then its time offset.
+            let kf = kof(j0, 0.0);
+            let base = |k: usize| mmul(&mt(&eis[k]), &m.at(k)); // raw → our level output
+            let mut best = (f64::INFINITY, I3);
+            for yd in (0..360).step_by(6) {
+                let g = mmul(&matrix(ypr(yd as f64, 0.0, 0.0)), &base(kf));
+                let r = align(&raw[kf - k0], &dji[j0], g);
+                let e = resid(&raw[kf - k0], &dji[j0], &r);
+                if e < best.0 { best = (e, r); }
+            }
+            let mut s_turn = best.1;
+            let mut off_best = (f64::INFINITY, 0.0);
+            for o in -8..=8 {
+                let off = o as f64 * 0.5;
+                let mut e = 0.0;
+                for jj in [j0, j0 + 60, j0 + 200] {
+                    let k = kof(jj, off);
+                    let tg = mmul(&s_turn, &mmul(&mt(&base(kf)), &base(k)));
+                    let r = align(&raw[k - k0], &dji[jj], tg);
+                    e += resid(&raw[k - k0], &dji[jj], &r);
+                }
+                if e < off_best.0 { off_best = (e, off); }
+            }
+            println!("DJI stretch {ci}: start residual {:.3}, time offset {:+.1} frames", best.0, off_best.1);
+            let mut prev_t: Option<M3> = None;
+            let mut res = 0.0;
+            for j in j0..j1 {
+                let k = kof(j, off_best.1);
+                if k < *k0 || k - k0 >= raw.len() { continue; }
+                let guess = match prev_t { Some(t) => mmul(&mt(&t), &m.at(k)), None => s_turn };
+                let r = align(&raw[k - k0], &dji[j], guess);
+                res += resid(&raw[k - k0], &dji[j], &r);
+                // world = R·d_raw, d_dji = r·d_raw ⇒ T_dji = R·rᵀ.
+                let t = mmul(&m.at(k), &mt(&r));
+                prev_t = Some(t);
+                s_turn = r;
+                found.push((ci, k, t));
+                found_j.push(j);
+            }
+            println!("DJI stretch {ci}: {} frames, mean residual {:.3}", j1 - j0, res / (j1 - j0) as f64);
+        }
+        let down = unit(m.down);
+        let tilt = |t: &M3| mv(t, [0.0, 1.0, 0.0]).iter().zip(down).map(|(a, b)| a * b).sum::<f64>().clamp(-1.0, 1.0).acos().to_degrees();
+        let jitter = |ts: &[M3]| -> f64 {
+            // Turn per frame minus its local mean (the shake that is left), degrees.
+            let w: Vec<[f64; 3]> = ts.windows(2).map(|p| logmap(&mmul(&mt(&p[0]), &p[1]))).collect();
+            let mut s = 0.0;
+            for i in 2..w.len().saturating_sub(2) {
+                let mut mean = [0.0; 3];
+                for d in -2i32..=2 { for a in 0..3 { mean[a] += w[(i as i32 + d) as usize][a] / 5.0; } }
+                s += (0..3).map(|a| (w[i][a] - mean[a]).powi(2)).sum::<f64>().sqrt();
+            }
+            (s / (w.len().saturating_sub(4)).max(1) as f64).to_degrees()
+        };
+        for ci in 0..starts.len() {
+            let f: Vec<&(usize, usize, M3)> = found.iter().filter(|x| x.0 == ci).collect();
+            let td: Vec<M3> = f.iter().map(|x| x.2).collect();
+            let cam: Vec<M3> = f.iter().map(|x| m.at(x.1)).collect();
+            let tilts: Vec<f64> = td.iter().map(tilt).collect();
+            let mt_ = tilts.iter().sum::<f64>() / tilts.len() as f64;
+            println!("DJI stretch {ci}: horizon tilt mean {mt_:.2}° max {:.2}°; jitter left: DJI {:.3}°/frame, camera {:.3}°/frame", tilts.iter().cloned().fold(0.0, f64::max), jitter(&td), jitter(&cam));
+        }
+        // The seam: how much it shows and flickers in DJI's panorama against ours (2.25.2: plain and
+        // lined up), on the same frames at 2048×1024. Across the lens border (the circle half way
+        // between the lenses, in the camera's axes) against circles 10° to either side.
+        if std::env::var("REELCUT_DJI_SEAM").is_ok() {
+            let (sw, sh) = (2048usize, 1024usize);
+            let delta = 0.35f64.to_radians();
+            let bins = 720usize;
+            // Signed steps across a circle at `off` from the border, per bin (None near the poles).
+            let steps = |img: &[u8], r: &M3, off: f64| -> Vec<Option<f64>> {
+                (0..bins).map(|b| {
+                    let ph = b as f64 / bins as f64 * std::f64::consts::TAU;
+                    let p = [ph.cos(), ph.sin(), 0.0];
+                    let at = |a: f64| { let q = [p[0] * a.cos(), p[1] * a.cos(), a.sin()]; mv(r, q) };
+                    let c = at(off);
+                    if c[1].abs() > 0.9 { return None; }
+                    Some(eq_sample(img, sw, sh, at(off + delta)) as f64 - eq_sample(img, sw, sh, at(off - delta)) as f64)
+                }).collect()
+            };
+            let windows: Vec<(usize, usize)> = vec![(0, 60), (0, 210), (0, 360), (1, 60), (1, 210), (1, 360)]; // (stretch, DJI frame from its start)
+            let mut acc: std::collections::BTreeMap<&str, (f64, f64, f64, f64)> = Default::default(); // vis num, den, flick num, den
+            for &(ci, off) in &windows {
+                let j0 = if ci == 0 { 0 } else { split } + off;
+                let idx: Vec<usize> = (0..found.len()).filter(|&i| found_j[i] >= j0 && found_j[i] < j0 + 30).collect();
+                if idx.len() < 20 { continue; }
+                let (ja, jb) = (found_j[idx[0]], found_j[*idx.last().unwrap()]);
+                let o = ff::command(&bin("ffmpeg")).args(["-v", "error", "-i", &pano, "-vf", &format!("select=between(n\\,{ja}\\,{jb}),scale={sw}:{sh}:flags=area,format=gray"), "-fps_mode", "passthrough", "-f", "rawvideo", "-"]).output().unwrap();
+                let djb: Vec<Vec<u8>> = o.stdout.chunks(sw * sh).filter(|c| c.len() == sw * sh).map(|c| c.to_vec()).collect();
+                let (ka, kb) = (found[idx[0]].1, found[*idx.last().unwrap()].1);
+                let mut ours: Vec<(&str, Vec<Vec<u8>>)> = vec![];
+                for (label, flow) in [("Reelcut plain", false), ("Reelcut 2.25.2", true)] {
+                    let from = ka as f64 / fps;
+                    let mut src = source_for(&info, &lens, from, (kb - ka + 1) as f64 / fps - 0.5 / fps, Some(1024), false);
+                    src.gpu = true;
+                    let mut sp = Stitcher::new(&s, src.n() as f64, sw, sh, flow && s.precise(), None);
+                    let setup = |_k: usize, _t: f64| FrameSetup { rot: I3, hfov: None, omega: None };
+                    let mut v: Vec<Vec<u8>> = vec![];
+                    let mut cb = |_k: usize, f: &Frame<u8>| v.push(f.p[0].clone());
+                    pano::run::<u8>(&bin("ffmpeg"), &Jobs::default(), "t", 0, &src, &mut sp, &setup, Sink::Call(&mut cb), |_| {}).unwrap();
+                    ours.push((label, v));
+                }
+                let mut series: Vec<(&str, Vec<[Vec<Option<f64>>; 3]>)> = vec![];
+                let dj: Vec<[Vec<Option<f64>>; 3]> = idx.iter().filter_map(|&i| {
+                    let img = djb.get(found_j[i] - ja)?;
+                    let r = mmul(&mt(&found[i].2), &m.at(found[i].1));
+                    Some([steps(img, &r, 0.0), steps(img, &r, 10f64.to_radians()), steps(img, &r, -10f64.to_radians())])
+                }).collect();
+                series.push(("DJI Studio", dj));
+                for (label, v) in &ours {
+                    let ss: Vec<[Vec<Option<f64>>; 3]> = idx.iter().filter_map(|&i| {
+                        let img = v.get(found[i].1 - ka)?;
+                        Some([steps(img, &I3, 0.0), steps(img, &I3, 10f64.to_radians()), steps(img, &I3, -10f64.to_radians())])
+                    }).collect();
+                    series.push((label, ss));
+                }
+                for (label, ser) in &series {
+                    let e = acc.entry(label).or_default();
+                    let (mut vs, mut vc, mut fs, mut fc, mut nv, mut nf) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+                    for (t, fr3) in ser.iter().enumerate() {
+                        for b in 0..bins {
+                            if let (Some(a), Some(c1), Some(c2)) = (fr3[0][b], fr3[1][b], fr3[2][b]) {
+                                vs += a.abs(); vc += (c1.abs() + c2.abs()) / 2.0; nv += 1.0;
+                                if t > 0 {
+                                    let p = &ser[t - 1];
+                                    if let (Some(pa), Some(p1), Some(p2)) = (p[0][b], p[1][b], p[2][b]) {
+                                        fs += (a - pa).abs(); fc += ((c1 - p1).abs() + (c2 - p2).abs()) / 2.0; nf += 1.0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    println!("SEAMW {label} stretch {ci} +{off}: visibility {:.3} flicker {:.3} (across {:.2} vs beside {:.2}; change {:.2} vs {:.2})", vs / vc, fs / fc, vs / nv, vc / nv, fs / nf, fc / nf);
+                    e.0 += vs / nv; e.1 += vc / nv; e.2 += fs / nf; e.3 += fc / nf;
+                }
+            }
+            for (label, e) in &acc {
+                println!("SEAM {label}: visibility {:.3} (step across the seam ÷ beside it), flicker {:.3} (its change frame to frame ÷ beside it)", e.0 / e.1, e.2 / e.3);
+            }
+        }
+        // Heading (about down), elevation and roll of a virtual camera, degrees.
+        let e1 = { let x = [1.0, 0.0, 0.0]; let d = dot(x, down); unit([x[0] - d * down[0], x[1] - d * down[1], x[2] - d * down[2]]) };
+        let e2 = cross(down, e1);
+        let hpr = |t: &M3| -> [f64; 3] {
+            let f = mv(t, [0.0, 0.0, 1.0]);
+            let head = dot(f, e2).atan2(dot(f, e1)).to_degrees();
+            let elev = (-dot(f, down)).clamp(-1.0, 1.0).asin().to_degrees();
+            let roll = match level(down, f) { Some(l) => { let y = mv(t, [0.0, 1.0, 0.0]); let lx = mv(&l, [1.0, 0.0, 0.0]); let ly = mv(&l, [0.0, 1.0, 0.0]); dot(y, lx).atan2(dot(y, ly)).to_degrees() } None => 0.0 };
+            [head, elev, roll]
+        };
+        let unwrap = |v: Vec<f64>| -> Vec<f64> { let mut o = vec![]; let mut acc = 0.0; let mut last = v[0]; for x in v { let mut d = x - last; while d > 180.0 { d -= 360.0 } while d < -180.0 { d += 360.0 } acc += d; last = x; o.push(acc) } o };
+        let gsm = |v: &[f64], sg: f64| -> Vec<f64> { let n = v.len() as isize; let r = (sg * 3.0).ceil() as isize; (0..n).map(|k| { let (mut a, mut w) = (0.0, 0.0); for d in -r..=r { let g = (-(d * d) as f64 / (2.0 * sg * sg).max(1e-9)).exp(); a += g * v[(k + d).clamp(0, n - 1) as usize]; w += g; } a / w }).collect() };
+        let ema = |v: &[f64], tau: f64| -> Vec<f64> { let a = 1.0 / (1.0 + tau.max(0.0)); let mut s = v[0]; v.iter().map(|x| { s += a * (x - s); s }).collect() };
+        for ci in 0..starts.len() {
+            let f: Vec<&(usize, usize, M3)> = found.iter().filter(|x| x.0 == ci).collect();
+            let d: Vec<[f64; 3]> = f.iter().map(|x| hpr(&x.2)).collect();
+            let c: Vec<[f64; 3]> = f.iter().map(|x| hpr(&m.at(x.1))).collect();
+            let dh = unwrap(d.iter().map(|x| x[0]).collect());
+            let ch = unwrap(c.iter().map(|x| x[0]).collect());
+            println!("START {ci}: DJI heading minus camera heading {:.1}°, DJI elevation {:.1}°", { let mut x = d[0][0] - c[0][0]; while x > 180.0 { x -= 360.0 } while x < -180.0 { x += 360.0 } x }, d[0][1]);
+            for j in (0..f.len()).step_by(30) {
+                println!("TRACK {ci} {:5.1}s heading DJI {:8.2} cam {:8.2} | elev DJI {:6.2} cam {:6.2} | roll DJI {:6.2} cam {:6.2}", j as f64 / 30.0, dh[j] - dh[0], ch[j] - ch[0], d[j][1], c[j][1], d[j][2], c[j][2]);
+            }
+            // Heading: DJI's against the camera's, smoothed both ways, over a range of time constants.
+            let rms = |a: &[f64], b: &[f64]| -> f64 { let off = a.iter().zip(b).map(|(x, y)| x - y).sum::<f64>() / a.len() as f64; (a.iter().zip(b).map(|(x, y)| (x - y - off).powi(2)).sum::<f64>() / a.len() as f64).sqrt() };
+            let mut bg = (f64::INFINITY, 0.0); let mut be = (f64::INFINITY, 0.0);
+            for i in 0..=80 { let sg = i as f64 * 0.25; let e = rms(&dh, &gsm(&ch, sg * 30.0)); if e < bg.0 { bg = (e, sg) } let e2 = rms(&dh, &ema(&ch, sg * 30.0)); if e2 < be.0 { be = (e2, sg) } }
+            println!("HEADING {ci}: centred gaussian best sigma {:.2} s (rms {:.2}°); one-sided best tau {:.2} s (rms {:.2}°); locked rms {:.2}°; camera rms {:.2}°", bg.1, bg.0, be.1, be.0, rms(&dh, &vec![0.0; dh.len()]), rms(&dh, &ch));
+            let de: Vec<f64> = d.iter().map(|x| x[1]).collect(); let dr: Vec<f64> = d.iter().map(|x| x[2]).collect();
+            println!("LEVEL {ci}: DJI elevation mean {:.2}° sd {:.2}°, roll mean {:.2}° sd {:.2}°", de.iter().sum::<f64>() / de.len() as f64, rms(&de, &vec![0.0; de.len()]), dr.iter().sum::<f64>() / dr.len() as f64, rms(&dr, &vec![0.0; dr.len()]));
+        }
+        // Fit: Reelcut's ways with a range of smoothing and lags, after one constant turn per stretch.
+        let fit = |mode: &str, strength: f64, lag: isize| -> (f64, f64, f64) {
+            let tg = targets(&m, &Stab { mode: mode.into(), strength, rs: false });
+            let (mut e, mut et, mut n, mut jt) = (0.0, 0.0, 0.0, 0.0);
+            for ci in 0..starts.len() {
+                let f: Vec<&(usize, usize, M3)> = found.iter().filter(|x| x.0 == ci).collect();
+                let at = |k: usize| tg[((k as isize + lag).max(0) as usize).min(tg.len() - 1)];
+                let mut acc = [0.0; 4];
+                for x in &f {
+                    let q = quat_of(&mmul(&mt(&at(x.1)), &x.2));
+                    let q = if q[0] < 0.0 { q.map(|v| -v) } else { q };
+                    for i in 0..4 { acc[i] += q[i]; }
+                }
+                let o = mat_of(acc);
+                for x in &f {
+                    let mm = mmul(&at(x.1), &o);
+                    e += angle_between(&mm, &x.2).to_degrees();
+                    et += (tilt(&mm) - tilt(&x.2)).abs();
+                    n += 1.0;
+                }
+                let jit: Vec<M3> = f.iter().map(|x| at(x.1)).collect();
+                jt += jitter(&jit) / starts.len() as f64;
+            }
+            (e / n, et / n, jt)
+        };
+        for mode in ["eis", "smooth", "horizon", "forward", "lock", "off"] {
+            let mut best = (f64::INFINITY, 0.0, 0, 0.0, 0.0);
+            let strengths: &[f64] = if mode == "eis" || mode == "smooth" { &[0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0] } else { &[1.0] };
+            for &sg in strengths {
+                for lag in (-12isize..=12).step_by(3) {
+                    let (e, et, j) = fit(mode, sg, lag);
+                    if e < best.0 { best = (e, sg, lag, et, j); }
+                }
+            }
+            println!("FIT {mode}: best strength {} (sigma {:.2} s) lag {} frames: mean difference {:.2}°, horizon difference {:.2}°, jitter {:.3}°/frame", best.1, best.1 / 2.0, best.2, best.0, best.3, best.4);
+        }
+        for &sg in &[1.0, 2.0, 4.0, 6.0, 10.0] {
+            let (e, et, j) = fit("eis", sg, 0);
+            println!("CURVE eis strength {sg}: {e:.2}° (horizon {et:.2}°, jitter {j:.3})");
+        }
+        // DJI's flat (reframed) exports: per frame, the virtual camera and the field of view that make
+        // our unturned sphere look like DJI's picture. Coarse to fine, on halved pictures.
+        let Ok(flats) = std::env::var("REELCUT_DJI_FLATS") else { return };
+        let half = |img: &[u8], iw: usize, ih: usize| -> Vec<u8> {
+            let (ow, oh) = (iw / 2, ih / 2);
+            let mut o = vec![0u8; ow * oh];
+            for y in 0..oh { for x in 0..ow {
+                let s = img[2 * y * iw + 2 * x] as u32 + img[2 * y * iw + 2 * x + 1] as u32 + img[(2 * y + 1) * iw + 2 * x] as u32 + img[(2 * y + 1) * iw + 2 * x + 1] as u32;
+                o[y * ow + x] = ((s + 2) / 4) as u8;
+            } }
+            o
+        };
+        // Levels: (flat w, h, sphere w, h).
+        let lv = [(32usize, 18usize, 128usize, 64usize), (64, 36, 256, 128), (128, 72, 512, 256)];
+        let pyr_s = |s: &[u8]| -> Vec<Vec<u8>> { let a = half(s, 512, 256); let b = half(&a, 256, 128); vec![b, a, s.to_vec()] };
+        for flat in flats.split(',') {
+            let (fw, fh) = (128usize, 72usize);
+            let o = ff::command(&bin("ffmpeg")).args(["-v", "error", "-i", flat, "-vf", &format!("scale={fw}:{fh}:flags=area,format=gray"), "-f", "rawvideo", "-"]).output().unwrap();
+            let fr: Vec<Vec<Vec<u8>>> = o.stdout.chunks(fw * fh).filter(|c| c.len() == fw * fh).map(|c| { let b = half(c, 128, 72); let a = half(&b, 64, 36); vec![a, b, c.to_vec()] }).collect();
+            let name = std::path::Path::new(flat).file_stem().unwrap().to_string_lossy().to_string();
+            // 1 − correlation of DJI's picture with our sphere seen by camera `t` (virtual → raw) at `hf`°.
+            // Lens kinds: 0 rectilinear, 1 stereographic, 2 equidistant, 3 equisolid; `hf` = angle across.
+            let theta = |kind: usize, r: f64, f: f64| -> f64 { match kind { 0 => (r / f).atan(), 1 => 2.0 * (r / (2.0 * f)).atan(), 2 => r / f, _ => 2.0 * (r / (2.0 * f)).min(1.0).asin() } };
+            let focal = |kind: usize, half_px: f64, hf: f64| -> f64 { let a = (hf / 2.0).to_radians(); match kind { 0 => half_px / a.min(1.5).tan(), 1 => half_px / (2.0 * (a / 2.0).tan()), 2 => half_px / a, _ => half_px / (2.0 * (a / 2.0).sin()) } };
+            let fres = |l: usize, img: &[u8], sph: &[u8], t: &M3, hf: f64, mirror: bool, kind: usize| -> f64 {
+                let (iw, ih, sw, sh) = lv[l];
+                let f = focal(kind, iw as f64 / 2.0, hf);
+                let sx = if mirror { -1.0 } else { 1.0 };
+                let (mut sa, mut sb, mut saa, mut sbb, mut sab, mut n) = (0f64, 0f64, 0f64, 0f64, 0f64, 0f64);
+                for y in 1..ih - 1 {
+                    for x in 1..iw - 1 {
+                        let (px, py) = (sx * (x as f64 + 0.5 - iw as f64 / 2.0), y as f64 + 0.5 - ih as f64 / 2.0);
+                        let r = (px * px + py * py).sqrt();
+                        let th = theta(kind, r, f);
+                        let k = if r > 1e-9 { th.sin() / r } else { 1.0 / f };
+                        let d = [px * k, py * k, th.cos()];
+                        let va = img[y * iw + x] as f64;
+                        let vb = eq_sample(sph, sw, sh, mv(t, d)) as f64;
+                        sa += va; sb += vb; saa += va * va; sbb += vb * vb; sab += va * vb; n += 1.0;
+                    }
+                }
+                let cov = sab / n - sa / n * sb / n;
+                1.0 - cov / ((saa / n - (sa / n).powi(2)).max(1e-9) * (sbb / n - (sb / n).powi(2)).max(1e-9)).sqrt()
+            };
+            let refine = |img: &[Vec<u8>], sph: &[Vec<u8>], t0: M3, hf: f64, mirror: bool, kind: usize, from: usize| -> (M3, f64) {
+                let mut t = t0;
+                let mut e = 0.0;
+                for l in from..3 {
+                    e = fres(l, &img[l], &sph[l], &t, hf, mirror, kind);
+                    let steps: &[f64] = match l { 0 => &[3.0, 1.0], 1 => &[0.6, 0.25], _ => &[0.12, 0.05] };
+                    for &step in steps {
+                        let mut moved = true;
+                        let mut it = 0;
+                        while moved && it < 15 {
+                            moved = false;
+                            it += 1;
+                            for a in 0..3 {
+                                for sgn in [-1.0, 1.0] {
+                                    let mut wv = [0.0; 3];
+                                    wv[a] = sgn * step.to_radians();
+                                    let c = mmul(&t, &expmap(wv));
+                                    let ec = fres(l, &img[l], &sph[l], &c, hf, mirror, kind);
+                                    if ec < e { e = ec; t = c; moved = true; }
+                                }
+                            }
+                        }
+                    }
+                }
+                (t, e)
+            };
+            let mut fl: Vec<(usize, usize, usize, M3)> = vec![]; // (stretch, DJI frame, source frame, virtual → world)
+            let mut hfov = 60.0;
+            let mut mirror = false;
+            let mut kind = 0usize;
+            for (ci, &t0s) in starts.iter().enumerate() {
+                let (j0, j1) = if ci == 0 { (0, split) } else { (split, fr.len()) };
+                let (k0, raw) = &raws[ci];
+                let kof = |j: usize| ((t0s + (j - j0) as f64 / 30.0) * fps - 1.5).round() as usize;
+                let k = kof(j0);
+                let sph = pyr_s(&raw[k - k0]);
+                // Start: look all round from the level world frame, on the coarsest level.
+                let mut best = (f64::INFINITY, I3, false, 0usize, hfov);
+                let fixed: Option<(usize, f64)> = std::env::var("REELCUT_DJI_LENS").ok().map(|v| { let mut it = v.split(','); (it.next().unwrap().parse().unwrap(), it.next().unwrap().parse().unwrap()) });
+                if let Some((kd, hf)) = fixed { kind = kd; hfov = hf; }
+                let mirrors: &[bool] = if ci == 0 && fixed.is_none() { &[false, true] } else if mirror { &[true] } else { &[false] };
+                let kinds: Vec<usize> = if ci == 0 && fixed.is_none() { vec![0, 1, 2, 3] } else { vec![kind] };
+                let hfs: Vec<f64> = if ci == 0 && fixed.is_none() { (0..8).map(|i| 60.0 + 20.0 * i as f64).collect() } else { vec![hfov] };
+                for &mi in mirrors { for &kd in &kinds { for &hf0 in &hfs {
+                    if kd == 0 && hf0 > 150.0 { continue }
+                    for hd in (0..360).step_by(4) {
+                        for el in (-80..=80).step_by(10) {
+                            for rl in (-90..=90).step_by(10) {
+                                let (h_, e_) = ((hd as f64).to_radians(), (el as f64).to_radians());
+                                let fwd = [0usize, 1, 2].map(|i| e_.cos() * (h_.cos() * e1[i] + h_.sin() * e2[i]) - e_.sin() * down[i]);
+                                let Some(lvl) = level(down, fwd) else { continue };
+                                let lr = mmul(&lvl, &expmap([0.0, 0.0, (rl as f64).to_radians()]));
+                                let t = mmul(&mt(&m.at(k)), &lr);
+                                let e = fres(0, &fr[j0][0], &sph[0], &t, hf0, mi, kd);
+                                if e < best.0 { best = (e, t, mi, kd, hf0); }
+                            }
+                        }
+                    }
+                } } }
+                mirror = best.2;
+                kind = best.3;
+                hfov = best.4;
+                let (mut t, mut e) = refine(&fr[j0], &sph, best.1, hfov, mirror, kind, 0);
+                if ci == 0 && fixed.is_none() {
+                    for _ in 0..2 {
+                        let mut bh = (e, hfov, kind);
+                        for kd in 0..4 { for i in 0..=90 { let hf = 30.0 + 2.0 * i as f64; if kd == 0 && hf > 160.0 { continue } let ee = fres(1, &fr[j0][1], &sph[1], &t, hf, mirror, kd); if ee < bh.0 { bh = (ee, hf, kd); } } }
+                        hfov = bh.1;
+                        kind = bh.2;
+                        let r = refine(&fr[j0], &sph, t, hfov, mirror, kind, 1);
+                        t = r.0; e = r.1;
+                    }
+                }
+                println!("FLAT {name} stretch {ci}: start residual {e:.3} (coarse {:.3}), lens kind {kind}, hfov {hfov:.1}°, mirror {mirror}", best.0);
+                let mut prev = mmul(&m.at(k), &t);
+                let mut prev_raw = t;
+                let mut res = 0.0;
+                let mut worst: f64 = 0.0;
+                for j in j0..j1 {
+                    let k = kof(j);
+                    if k < *k0 || k - k0 >= raw.len() { continue; }
+                    let sph = pyr_s(&raw[k - k0]);
+                    // Two guesses: held still in the world, or carried along with the camera.
+                    let g1 = mmul(&mt(&m.at(k)), &prev);
+                    let g2 = prev_raw;
+                    let e1g = fres(1, &fr[j][1], &sph[1], &g1, hfov, mirror, kind);
+                    let e2g = fres(1, &fr[j][1], &sph[1], &g2, hfov, mirror, kind);
+                    let (t, e) = refine(&fr[j], &sph, if e1g <= e2g { g1 } else { g2 }, hfov, mirror, kind, 1);
+                    res += e;
+                    worst = worst.max(e);
+                    prev = mmul(&m.at(k), &t);
+                    prev_raw = t;
+                    fl.push((ci, j, k, prev));
+                }
+                println!("FLAT {name} stretch {ci}: mean residual {:.3}, worst {worst:.3}", res / (j1 - j0) as f64);
+            }
+            // Field of view, finer, over frames of both stretches.
+            {
+                let pick: Vec<&(usize, usize, usize, M3)> = fl.iter().step_by(60).collect();
+                let mut bh = (f64::INFINITY, hfov);
+                for i in 0..=40 {
+                    let hf = hfov - 4.0 + i as f64 * 0.2;
+                    let mut e = 0.0;
+                    for x in &pick {
+                        let (k0, raw) = &raws[x.0];
+                        let sph = pyr_s(&raw[x.2 - k0]);
+                        e += refine(&fr[x.1], &sph, mmul(&mt(&m.at(x.2)), &x.3), hf, mirror, kind, 2).1;
+                    }
+                    if e < bh.0 { bh = (e, hf); }
+                }
+                println!("FLAT {name}: field of view {:.1}° across (first-frame fit {hfov:.1}°)", bh.1);
+            }
+            let rms = |a: &[f64], b: &[f64]| -> f64 { let off = a.iter().zip(b).map(|(x, y)| x - y).sum::<f64>() / a.len() as f64; (a.iter().zip(b).map(|(x, y)| (x - y - off).powi(2)).sum::<f64>() / a.len() as f64).sqrt() };
+            for ci in 0..starts.len() {
+                let f: Vec<&(usize, usize, usize, M3)> = fl.iter().filter(|x| x.0 == ci).collect();
+                let d: Vec<[f64; 3]> = f.iter().map(|x| hpr(&x.3)).collect();
+                let c: Vec<[f64; 3]> = f.iter().map(|x| hpr(&m.at(x.2))).collect();
+                let dh = unwrap(d.iter().map(|x| x[0]).collect());
+                let ch = unwrap(c.iter().map(|x| x[0]).collect());
+                println!("FSTART {name} {ci}: DJI heading {:.1}° camera {:.1}°", d[0][0], c[0][0]);
+                println!("FSTART {name} {ci}: DJI heading minus camera heading {:.1}°, DJI elevation {:.1}°, camera elevation {:.1}°", { let mut x = d[0][0] - c[0][0]; while x > 180.0 { x -= 360.0 } while x < -180.0 { x += 360.0 } x }, d[0][1], c[0][1]);
+                for j in (0..f.len()).step_by(45) {
+                    println!("FTRACK {name} {ci} {:5.1}s heading DJI {:8.2} cam {:8.2} | elev DJI {:6.2} cam {:6.2} | roll DJI {:6.2} cam {:6.2}", j as f64 / 30.0, dh[j] - dh[0], ch[j] - ch[0], d[j][1], c[j][1], d[j][2], c[j][2]);
+                }
+                let mut bg = (f64::INFINITY, 0.0, 0isize);
+                let mut be = (f64::INFINITY, 0.0);
+                for i in 0..=80 {
+                    let sg = i as f64 * 0.25;
+                    let sm = gsm(&ch, sg * 30.0);
+                    for lag in (-30isize..=30).step_by(3) {
+                        let sh: Vec<f64> = (0..sm.len() as isize).map(|j| sm[(j - lag).clamp(0, sm.len() as isize - 1) as usize]).collect();
+                        let e = rms(&dh, &sh);
+                        if e < bg.0 { bg = (e, sg, lag) }
+                    }
+                    let e2 = rms(&dh, &ema(&ch, sg * 30.0));
+                    if e2 < be.0 { be = (e2, sg) }
+                }
+                let td: Vec<M3> = f.iter().map(|x| x.3).collect();
+                let cam: Vec<M3> = f.iter().map(|x| m.at(x.2)).collect();
+                println!("FHEADING {name} {ci}: gaussian sigma {:.2} s lag {} frames (rms {:.2}°); one-sided tau {:.2} s (rms {:.2}°); locked rms {:.2}°; camera rms {:.2}°; jitter DJI {:.3} camera {:.3} °/frame", bg.1, bg.2, bg.0, be.1, be.0, rms(&dh, &vec![0.0; dh.len()]), rms(&dh, &ch), jitter(&td), jitter(&cam));
+                for (mode, sg) in [("off", 1.0), ("smooth", 1.0), ("eis", 1.0), ("lock", 1.0), ("forward", 1.0), ("horizon", 1.0)] {
+                    let tg = targets(&m, &Stab { mode: mode.into(), strength: sg, rs: false });
+                    let mut acc = [0.0; 4];
+                    for x in &f { let q = quat_of(&mmul(&mt(&tg[x.2]), &x.3)); let q = if q[0] < 0.0 { q.map(|v| -v) } else { q }; for i in 0..4 { acc[i] += q[i]; } }
+                    let o = mat_of(acc);
+                    let errs: Vec<f64> = f.iter().map(|x| angle_between(&mmul(&tg[x.2], &o), &x.3).to_degrees()).collect();
+                    let mut srt = errs.clone(); srt.sort_by(f64::total_cmp);
+                    println!("FMODE {name} {ci} {mode}: mean {:.2}° median {:.2}° p95 {:.2}°", errs.iter().sum::<f64>() / errs.len() as f64, srt[srt.len() / 2], srt[srt.len() * 95 / 100]);
+                }
+                let de: Vec<f64> = d.iter().map(|x| x[1]).collect();
+                let dr: Vec<f64> = d.iter().map(|x| x[2]).collect();
+                let ce: Vec<f64> = c.iter().map(|x| x[1]).collect();
+                let cr: Vec<f64> = c.iter().map(|x| x[2]).collect();
+                println!("FLEVEL {name} {ci}: elevation mean {:.2}° sd {:.2}° (vs camera rms {:.2}°), roll mean {:.2}° sd {:.2}° (vs camera rms {:.2}°)", de.iter().sum::<f64>() / de.len() as f64, rms(&de, &vec![0.0; de.len()]), rms(&de, &ce), dr.iter().sum::<f64>() / dr.len() as f64, rms(&dr, &vec![0.0; dr.len()]), rms(&dr, &cr));
+            }
+        }
     }
 
     /// The seam with and without lining up, on a real recording (numbers only).
@@ -1607,7 +2136,7 @@ mod tests {
         let tg = targets(&m, &Stab { mode: "eis".into(), ..Default::default() });
         let mid = &tg[60..540];
         let out = mid.windows(2).map(|w| angle_between(&w[0], &w[1]).to_degrees()).fold(0.0, f64::max);
-        // Only the slow spin is left (25°/s is 0.83° a frame).
+        // Held still in the world, as DJI does: neither the shake nor the spin is left.
         assert!(out < 1.2, "{out}");
         let tilt = mid.iter().map(|r| mv(r, [0.0, 1.0, 0.0])[1].clamp(-1.0, 1.0).acos().to_degrees()).fold(0.0, f64::max);
         assert!(tilt < 6.0, "{tilt}");

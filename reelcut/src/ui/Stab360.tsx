@@ -13,10 +13,10 @@ export const DEFAULT_STAB: Stab = { mode: "horizon", strength: 1, rs: true };
 const MODES: [Stab["mode"], string, string][] = [
   ["horizon", "수평만 맞추기", "수평선을 천천히 맞춥니다. 카메라 움직임은 찍힌 그대로 둡니다"],
   ["tilt", "기울기 복원", "프레임마다 기울기를 없앱니다. 도는 움직임은 그대로 둡니다"],
-  ["forward", "진행 방향 보기", "수평을 맞추고, 카메라가 가는 쪽을 천천히 따라갑니다"],
-  ["eis", "수평 + 흔들림 보정", "수평을 맞추고 손떨림도 없앱니다. 방향은 카메라를 천천히 따라갑니다"],
-  ["lock", "방향 고정", "수평을 맞추고, 카메라가 돌아도 처음 바라본 방향을 계속 봅니다"],
-  ["smooth", "흔들림만 보정", "기울기는 그대로 두고 손떨림만 없앱니다"],
+  ["forward", "진행 방향 보기", "수평을 맞추고, 카메라가 향하는 쪽을 0.5초쯤 늦게 부드럽게 따라갑니다 (DJI 전진 뷰와 같게 맞춤)"],
+  ["eis", "수평 + 흔들림 보정", "수평을 맞추고 화면을 공간에 고정합니다. 카메라가 돌아도 보던 방향 그대로 보고, 방향은 시점 키로 돌립니다 (DJI 흔들림 보정 + 수평과 같게 맞춤)"],
+  ["lock", "방향 고정", "수평을 맞추고, 카메라가 돌아도 처음 바라본 방향을 계속 봅니다 (수평 + 흔들림 보정과 같은 움직임)"],
+  ["smooth", "흔들림만 보정", "기울기는 그대로 두고 손떨림만 없앱니다 (DJI 흔들림 보정, 수평 끔)"],
   ["off", "끄기", "찍힌 그대로 둡니다"],
 ];
 
@@ -51,7 +51,7 @@ export function Stab360({ a }: { a: Asset }) {
       </label>
       {s.mode !== "off" && (
         <>
-          {(s.mode === "eis" || s.mode === "smooth") && (
+          {s.mode === "smooth" && (
             <label title="클수록 카메라가 돌 때 화면이 더 천천히, 부드럽게 따라갑니다">부드러움 {strength.toFixed(1)}초
               <input type="range" min={0.2} max={5} step={0.1} value={strength}
                 onInput={(e) => setStrength(Number((e.target as HTMLInputElement).value))}
