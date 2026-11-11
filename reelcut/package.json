@@ -1,0 +1,27 @@
+{
+  "name": "reelcut",
+  "private": true,
+  "version": "2.26.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "test": "vitest run",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "lucide-preact": "^1.67.0",
+    "preact": "^10.26.0",
+    "pretendard": "^1.3.9"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.0",
+    "@tauri-apps/cli": "^2",
+    "typescript": "~5.9.0",
+    "vite": "^7.0.0",
+    "vitest": "^3.2.0"
+  }
+}
