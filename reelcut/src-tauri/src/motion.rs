@@ -1007,8 +1007,8 @@ pub fn targets(m: &Motion, s: &Stab) -> Vec<M3> {
         "horizon" => then(rot, LEVEL_SIGMA),
         // The tilt out on every frame; turning stays. Only as steady as the attitude is.
         "tilt" => then(rot, 0.0),
-        // The shake out of the attitude, horizon left alone: DJI's RockSteady with 수평 off follows the
-        // camera smoothed (sigma 0.5 s at strength 1).
+        // The shake out of the attitude, horizon left alone: DJI's RockSteady with 수평 off (its export
+        // is 1.7-6.2° from this at strength 1, sigma 0.5 s; docs/dji-parity.md).
         "smooth" => (0..rot.len()).map(|k| gauss_avg(&rot, k, sig)).collect(),
         // Level, heading where the camera has been going over the last seconds: its forward, flattened
         // and smoothed. (DJI also has the GPS when a remote gives one; this camera's files do not.)
@@ -1820,7 +1820,7 @@ mod tests {
                 let mut acc = [0.0; 4];
                 for x in &f {
                     let q = quat_of(&mmul(&mt(&at(x.1)), &x.2));
-                    let q = if q[0] < 0.0 { q.map(|v| -v) } else { q };
+                    let q = if acc.iter().zip(&q).map(|(a, b)| a * b).sum::<f64>() < 0.0 { q.map(|v| -v) } else { q };
                     for i in 0..4 { acc[i] += q[i]; }
                 }
                 let o = mat_of(acc);
@@ -1932,11 +1932,11 @@ mod tests {
                 let sph = pyr_s(&raw[k - k0]);
                 // Start: look all round from the level world frame, on the coarsest level.
                 let mut best = (f64::INFINITY, I3, false, 0usize, hfov);
-                let fixed: Option<(usize, f64)> = std::env::var("REELCUT_DJI_LENS").ok().map(|v| { let mut it = v.split(','); (it.next().unwrap().parse().unwrap(), it.next().unwrap().parse().unwrap()) });
+                let fixed: Option<(usize, f64)> = std::env::var("REELCUT_DJI_LENS").ok().and_then(|v| { let per: Vec<&str> = v.split(';').collect(); let p = per[ci.min(per.len() - 1)]; if p == "search" { return None; } let mut it = p.split(','); Some((it.next().unwrap().parse().unwrap(), it.next().unwrap().parse().unwrap())) });
                 if let Some((kd, hf)) = fixed { kind = kd; hfov = hf; }
-                let mirrors: &[bool] = if ci == 0 && fixed.is_none() { &[false, true] } else if mirror { &[true] } else { &[false] };
-                let kinds: Vec<usize> = if ci == 0 && fixed.is_none() { vec![0, 1, 2, 3] } else { vec![kind] };
-                let hfs: Vec<f64> = if ci == 0 && fixed.is_none() { (0..8).map(|i| 60.0 + 20.0 * i as f64).collect() } else { vec![hfov] };
+                let mirrors: &[bool] = if fixed.is_none() { &[false, true] } else if mirror { &[true] } else { &[false] };
+                let kinds: Vec<usize> = if fixed.is_none() { vec![0, 1, 2, 3] } else { vec![kind] };
+                let hfs: Vec<f64> = if fixed.is_none() { (0..8).map(|i| 60.0 + 20.0 * i as f64).collect() } else { vec![hfov] };
                 for &mi in mirrors { for &kd in &kinds { for &hf0 in &hfs {
                     if kd == 0 && hf0 > 150.0 { continue }
                     for hd in (0..360).step_by(4) {
@@ -1957,7 +1957,7 @@ mod tests {
                 kind = best.3;
                 hfov = best.4;
                 let (mut t, mut e) = refine(&fr[j0], &sph, best.1, hfov, mirror, kind, 0);
-                if ci == 0 && fixed.is_none() {
+                if fixed.is_none() || std::env::var("REELCUT_DJI_FOVFIT").is_ok() {
                     for _ in 0..2 {
                         let mut bh = (e, hfov, kind);
                         for kd in 0..4 { for i in 0..=90 { let hf = 30.0 + 2.0 * i as f64; if kd == 0 && hf > 160.0 { continue } let ee = fres(1, &fr[j0][1], &sph[1], &t, hf, mirror, kd); if ee < bh.0 { bh = (ee, hf, kd); } } }
@@ -2034,14 +2034,88 @@ mod tests {
                 let td: Vec<M3> = f.iter().map(|x| x.3).collect();
                 let cam: Vec<M3> = f.iter().map(|x| m.at(x.2)).collect();
                 println!("FHEADING {name} {ci}: gaussian sigma {:.2} s lag {} frames (rms {:.2}°); one-sided tau {:.2} s (rms {:.2}°); locked rms {:.2}°; camera rms {:.2}°; jitter DJI {:.3} camera {:.3} °/frame", bg.1, bg.2, bg.0, be.1, be.0, rms(&dh, &vec![0.0; dh.len()]), rms(&dh, &ch), jitter(&td), jitter(&cam));
-                for (mode, sg) in [("off", 1.0), ("smooth", 1.0), ("eis", 1.0), ("lock", 1.0), ("forward", 1.0), ("horizon", 1.0)] {
+                for (mode, sg) in [("off", 1.0), ("smooth", 0.5), ("smooth", 0.7), ("smooth", 0.85), ("smooth", 1.0), ("smooth", 1.2), ("smooth", 1.5), ("smooth", 2.0), ("eis", 1.0), ("lock", 1.0), ("forward", 1.0), ("horizon", 1.0)] {
                     let tg = targets(&m, &Stab { mode: mode.into(), strength: sg, rs: false });
                     let mut acc = [0.0; 4];
-                    for x in &f { let q = quat_of(&mmul(&mt(&tg[x.2]), &x.3)); let q = if q[0] < 0.0 { q.map(|v| -v) } else { q }; for i in 0..4 { acc[i] += q[i]; } }
+                    for x in &f { let q = quat_of(&mmul(&mt(&tg[x.2]), &x.3)); let q = if acc.iter().zip(&q).map(|(a, b)| a * b).sum::<f64>() < 0.0 { q.map(|v| -v) } else { q }; for i in 0..4 { acc[i] += q[i]; } }
                     let o = mat_of(acc);
                     let errs: Vec<f64> = f.iter().map(|x| angle_between(&mmul(&tg[x.2], &o), &x.3).to_degrees()).collect();
                     let mut srt = errs.clone(); srt.sort_by(f64::total_cmp);
-                    println!("FMODE {name} {ci} {mode}: mean {:.2}° median {:.2}° p95 {:.2}°", errs.iter().sum::<f64>() / errs.len() as f64, srt[srt.len() / 2], srt[srt.len() * 95 / 100]);
+                    println!("FMODE {name} {ci} {mode} {sg}: mean {:.2}° median {:.2}° p95 {:.2}°", errs.iter().sum::<f64>() / errs.len() as f64, srt[srt.len() / 2], srt[srt.len() * 95 / 100]);
+                }
+                // Per angle: DJI's heading, elevation and roll against the camera's (turned by the one
+                // constant turn that best matches), as gain × smoothed (sigma, lag) + offset.
+                {
+                    let mut acc = [0.0; 4];
+                    for x in &f { let q = quat_of(&mmul(&mt(&m.at(x.2)), &x.3)); let q = if acc.iter().zip(&q).map(|(a, b)| a * b).sum::<f64>() < 0.0 { q.map(|v| -v) } else { q }; for i in 0..4 { acc[i] += q[i]; } }
+                    let cst = mat_of(acc);
+                    let cm: Vec<[f64; 3]> = f.iter().map(|x| hpr(&mmul(&m.at(x.2), &cst))).collect();
+                    let names = ["heading", "elevation", "roll"];
+                    for a in 0..3 {
+                        let dv: Vec<f64> = if a == 0 { unwrap(d.iter().map(|x| x[0]).collect()) } else { d.iter().map(|x| x[a]).collect() };
+                        let cv: Vec<f64> = if a == 0 { unwrap(cm.iter().map(|x| x[0]).collect()) } else { cm.iter().map(|x| x[a]).collect() };
+                        let n = dv.len();
+                        let mut best = (f64::INFINITY, 0.0, 0isize, 0.0, 0.0);
+                        for i in 0..=40 {
+                            let sg = i as f64 * 0.1;
+                            let sm = gsm(&cv, sg * 30.0);
+                            for lag in (-15isize..=24).step_by(3) {
+                                let sh: Vec<f64> = (0..n as isize).map(|j| sm[(j - lag).clamp(0, n as isize - 1) as usize]).collect();
+                                // Least squares: dv ≈ g·sh + c.
+                                let (mx, my) = (sh.iter().sum::<f64>() / n as f64, dv.iter().sum::<f64>() / n as f64);
+                                let sxy: f64 = sh.iter().zip(&dv).map(|(x, y)| (x - mx) * (y - my)).sum();
+                                let sxx: f64 = sh.iter().map(|x| (x - mx).powi(2)).sum();
+                                let g = if sxx > 1e-9 { sxy / sxx } else { 0.0 };
+                                let c = my - g * mx;
+                                let e = (sh.iter().zip(&dv).map(|(x, y)| (y - g * x - c).powi(2)).sum::<f64>() / n as f64).sqrt();
+                                if e < best.0 { best = (e, sg, lag, g, c); }
+                            }
+                        }
+                        let spread = { let my = dv.iter().sum::<f64>() / n as f64; (dv.iter().map(|y| (y - my).powi(2)).sum::<f64>() / n as f64).sqrt() };
+                        println!("FANGLE {name} {ci} {}: gain {:.2} sigma {:.1} s lag {} frames offset {:.1}° (rms {:.2}°, DJI spread {:.2}°)", names[a], best.3, best.1, best.2, best.4, best.0, spread);
+                    }
+                }
+                // Models for DJI's path: heading smoothed over sa seconds, the tilt (the camera in its own
+                // level frame) smoothed over sb seconds (0 = per frame, 99 = held at its mean), lag; also
+                // the whole turn smoothed together (Reelcut's 흔들림만 보정). One constant turn each.
+                if std::env::var("REELCUT_DJI_MODELS").is_ok() {
+                    let ka = f[0].2.saturating_sub(300);
+                    let kb = (f.last().unwrap().2 + 300).min(m.rot.len() - 1);
+                    let rr: Vec<M3> = (ka..=kb).map(|k| m.at(k)).collect();
+                    let hh = unwrap(rr.iter().map(|r| hpr(r)[0]).collect());
+                    let lev = |h: f64| { let a = h.to_radians(); level(down, [0, 1, 2].map(|i| a.cos() * e1[i] + a.sin() * e2[i])).unwrap_or(I3) };
+                    let tilts: Vec<M3> = rr.iter().zip(&hh).map(|(r, h)| mmul(&mt(&lev(*h)), r)).collect();
+                    let score = |model: &dyn Fn(usize) -> M3| -> f64 {
+                        let mut acc = [0.0; 4];
+                        for x in &f { let q = quat_of(&mmul(&mt(&model(x.2 - ka)), &x.3)); let q = if acc.iter().zip(&q).map(|(a, b)| a * b).sum::<f64>() < 0.0 { q.map(|v| -v) } else { q }; for i in 0..4 { acc[i] += q[i]; } }
+                        let o = mat_of(acc);
+                        f.iter().map(|x| angle_between(&mmul(&model(x.2 - ka), &o), &x.3).to_degrees()).sum::<f64>() / f.len() as f64
+                    };
+                    let mut results: Vec<(f64, String)> = vec![];
+                    for &sa in &[0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0] {
+                        let hs = gsm(&hh, sa * fps);
+                        for &sb in &[0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 99.0] {
+                            let ts: Vec<M3> = if sb >= 99.0 {
+                                let i0 = f[0].2 - ka; let i1 = f.last().unwrap().2 - ka;
+                                let mut acc = [0.0; 4];
+                                let q0 = quat_of(&tilts[i0]);
+                                for t in &tilts[i0..=i1] { let q = quat_of(t); let q = if q.iter().zip(&q0).map(|(a, b)| a * b).sum::<f64>() < 0.0 { q.map(|v| -v) } else { q }; for i in 0..4 { acc[i] += q[i]; } }
+                                vec![mat_of(acc); tilts.len()]
+                            } else { (0..tilts.len()).map(|k| gauss_avg(&tilts, k, sb * fps)).collect() };
+                            for lag in [-6isize, -3, 0, 3, 6] {
+                                let at = |i: usize| ((i as isize - lag).clamp(0, rr.len() as isize - 1)) as usize;
+                                let e = score(&|i: usize| mmul(&lev(hs[at(i)]), &ts[at(i)]));
+                                results.push((e, format!("heading sigma {sa} s, tilt sigma {sb} s, lag {lag}")));
+                            }
+                        }
+                    }
+                    for &sg in &[0.25, 0.5, 1.0, 2.0, 4.0] {
+                        let sm: Vec<M3> = (0..rr.len()).map(|k| gauss_avg(&rr, k, sg * fps)).collect();
+                        results.push((score(&|i: usize| sm[i]), format!("whole turn sigma {sg} s")));
+                    }
+                    results.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    for r in results.iter().take(6) { println!("FMODEL {name} {ci}: {:.2}° {}", r.0, r.1); }
+                    for r in results.iter().filter(|r| r.1.starts_with("whole")) { println!("FMODEL {name} {ci}: {:.2}° {}", r.0, r.1); }
                 }
                 let de: Vec<f64> = d.iter().map(|x| x[1]).collect();
                 let dr: Vec<f64> = d.iter().map(|x| x[2]).collect();
